@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Nova Voice Monitor</title>
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #eaf1ff; background: #07101f; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 8% 0%, #1c407055, transparent 32rem), #07101f; }
+    main { width: min(1180px, calc(100% - 32px)); margin: auto; padding: 34px 0 56px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 22px; }
+    .header-actions { display: flex; align-items: center; gap: 16px; }
+    .font-picker { display: grid; gap: 4px; color: #8799ba; font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; }
+    .font-picker select { color: #eaf1ff; background: #101b30; border: 1px solid #32496f; border-radius: 8px; padding: 6px 9px; }
+    h1 { font-size: clamp(1.45rem, 4vw, 2.05rem); margin: 0; letter-spacing: -.025em; }
+    p { color: #9badca; margin: 6px 0 0; }
+    .live { color: #61e6b1; font-size: .85rem; font-weight: 700; white-space: nowrap; }
+    .live::before { content: ""; display: inline-block; width: .55rem; height: .55rem; margin-right: .45rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 14px currentColor; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .card, .event, .empty { border: 1px solid #243553; background: #101b30dc; border-radius: 16px; }
+    .card { padding: 15px 17px; min-height: 88px; }
+    .label { display: block; color: #8799ba; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }
+    .value { display: block; margin-top: 8px; font-size: 1.05rem; font-weight: 680; overflow-wrap: anywhere; }
+    .good { color: #61e6b1; } .warn { color: #ffca6b; } .bad { color: #ff8395; }
+    .section-title { margin: 28px 0 10px; color: #b9c9e5; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
+    #events { display: grid; gap: 10px; }
+    .event { padding: 16px 18px; }
+    .event-head { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; }
+    .event-kind { color: #6ee2ff; font-size: .8rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+    time { color: #8192b0; font: .78rem ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+    .summary { margin-top: 8px; font-size: 1rem; font-weight: 600; }
+    .summary.transcript { font-family: var(--transcript-font, Inter, ui-sans-serif, system-ui, sans-serif); white-space: pre-wrap; }
+    .details { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 7px 14px; margin-top: 12px; color: #aebddb; font-size: .86rem; }
+    .detail { overflow-wrap: anywhere; } .detail b { color: #7183a5; font-weight: 600; margin-right: 4px; }
+    .result { margin-top: 9px; color: #9eb0d0; font: .8rem ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .empty { padding: 25px; color: #91a3c1; text-align: center; }
+    @media (max-width: 680px) { .cards { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; } .header-actions { justify-content: space-between; width: 100%; } .event-head { align-items: flex-start; flex-direction: column; gap: 4px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Nova Voice Monitor</h1><p>Live, read-only pipeline trace. No microphone capture or raw-audio storage.</p></div>
+      <div class="header-actions">
+        <label class="font-picker">Transcript font
+          <select id="transcript-font">
+            <option value="system">System sans</option>
+            <option value="mono">Monospace</option>
+            <option value="serif">Serif</option>
+            <option value="rounded">Rounded sans</option>
+          </select>
+        </label>
+        <div class="live" id="connection">Connecting</div>
+      </div>
+    </header>
+    <section class="cards">
+      <div class="card"><span class="label">Voice mode</span><span class="value" id="mode">Loading…</span></div>
+      <div class="card"><span class="label">Satellite</span><span class="value" id="satellite">Waiting for Indium</span></div>
+      <div class="card"><span class="label">Pipeline</span><span class="value" id="pipeline">Loading…</span></div>
+    </section>
+    <div class="section-title">Recent events</div>
+    <section id="events"><div class="empty">Waiting for a satellite event or spoken request…</div></section>
+  </main>
+  <script>
+    const events = document.querySelector('#events');
+    const transcriptFont = document.querySelector('#transcript-font');
+    const transcriptFontKey = 'nova.voice.monitor.transcriptFont.v1';
+    const transcriptFonts = {
+      system: 'Inter, ui-sans-serif, system-ui, sans-serif',
+      mono: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+      serif: 'Georgia, Cambria, Times New Roman, serif',
+      rounded: 'ui-rounded, Nunito, Quicksand, system-ui, sans-serif',
+    };
+    function applyTranscriptFont(value) {
+      const selected = transcriptFonts[value] ? value : 'system';
+      transcriptFont.value = selected;
+      document.documentElement.style.setProperty('--transcript-font', transcriptFonts[selected]);
+      localStorage.setItem(transcriptFontKey, selected);
+    }
+    applyTranscriptFont(localStorage.getItem(transcriptFontKey) || 'system');
+    transcriptFont.addEventListener('change', () => applyTranscriptFont(transcriptFont.value));
+    let after = 0;
+    let serverInstance = null;
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    const time = value => new Date(value).toLocaleTimeString([], {hour12:false});
+    const statusClass = value => value ? 'good' : 'warn';
+    function summary(event) {
+      if (event.kind === 'satellite_connected') return `${event.satelliteId} connected in ${event.roomId}`;
+      if (event.kind === 'satellite_disconnected') return `${event.satelliteId} disconnected during ${event.stage}`;
+      if (event.kind === 'speech_segment') return `Speech segment received${event.wakeDetected ? ' (wake word detected)' : ''}`;
+      if (event.kind === 'transcription_empty') return 'Speech segment had no usable transcription';
+      if (event.kind === 'turn') return event.transcript ? `User: ${event.transcript}` : 'User: (unaddressed speech — not transcribed)';
+      if (event.kind === 'response_completed' && event.responseText) {
+        const agentName = event.agentName || 'Nova';
+        return `${agentName}: ${event.responseText}`;
+      }
+      if (event.kind === 'response_completed') return 'No spoken agent response.';
+      if (event.kind === 'processing_error') return `Pipeline error in ${event.stage}`;
+      if (event.kind === 'transport_error') return `Satellite transport: ${event.reason}`;
+      return event.kind;
+    }
+    function detail(label, value) { return value === undefined || value === null || value === '' ? '' : `<span class="detail"><b>${esc(label)}</b>${esc(value)}</span>`; }
+    function render(event) {
+      const interpretation = event.interpretation || {};
+      const results = event.results || [];
+      const details = [
+        detail('Satellite', event.satelliteId), detail('Room', event.roomId),
+        detail('STT', event.transcriptConfidence != null ? `${Math.round(event.transcriptConfidence * 100)}%` : null),
+        detail('Decision', interpretation.decision), detail('Addressed', interpretation.addressedProbability != null ? `${Math.round(interpretation.addressedProbability * 100)}%` : null),
+        detail('Policy', event.policyReason), detail('Execution', event.executed === undefined ? null : event.executed ? 'sent to provider' : event.shadowed ? 'shadowed' : 'not executed'),
+        detail('Timing', event.timingsMs?.audioTotal != null ? `${Math.round(event.timingsMs.audioTotal)} ms` : null),
+      ].filter(Boolean).join('');
+      const resultText = results.length ? results.map(item => `${item.actionId}: ${item.ok ? 'ok' : item.code}${item.target ? ` (${item.target})` : ''}${item.message ? ` — ${item.message}` : ''}`).join('\n') : '';
+      const isTranscript = event.kind === 'turn' || event.kind === 'response_completed';
+      return `<article class="event"><div class="event-head"><span class="event-kind">${esc(event.kind.replaceAll('_', ' '))}</span><time>${esc(time(event.at))}</time></div><div class="summary${isTranscript ? ' transcript' : ''}">${esc(summary(event))}</div>${details ? `<div class="details">${details}</div>` : ''}${resultText ? `<div class="result">${esc(resultText)}</div>` : ''}</article>`;
+    }
+    function show(payload) {
+      if (serverInstance && payload.instanceId !== serverInstance) {
+        serverInstance = payload.instanceId;
+        after = 0;
+        events.innerHTML = '<div class="empty">Voice service restarted; resuming transcript…</div>';
+        return;
+      }
+      serverInstance = payload.instanceId;
+      const satellite = payload.satellites?.[0];
+      document.querySelector('#satellite').innerHTML = satellite ? `<span class="${statusClass(satellite.connected)}">${satellite.connected ? 'Connected' : 'Disconnected'}</span> · ${esc(satellite.satelliteId)}` : 'Waiting for Indium';
+      payload.events.forEach(event => { events.querySelector('.empty')?.remove(); events.insertAdjacentHTML('afterbegin', render(event)); });
+      after = Math.max(after, payload.latestEventId || 0);
+    }
+    async function refreshHealth() {
+      const health = await fetch('/health', {cache:'no-store'}).then(response => response.json());
+      document.querySelector('#mode').innerHTML = `<span class="${health.shadowMode ? 'warn' : 'good'}">${health.shadowMode ? 'Shadow' : 'Live execution'}</span>${health.passiveExecutionEnabled ? ' · passive enabled' : ''}`;
+      document.querySelector('#pipeline').innerHTML = `<span class="${health.audio?.ok ? 'good' : 'bad'}">${health.audio?.ok ? 'Ready' : 'Unavailable'}</span> · ${health.audio?.satellitePipelines ?? 0} active`;
+    }
+    async function poll() {
+      try {
+        const payload = await fetch(`/v1/monitor/events?after=${after}`, {cache:'no-store'}).then(response => { if (!response.ok) throw new Error(response.status); return response.json(); });
+        show(payload); await refreshHealth();
+        document.querySelector('#connection').textContent = 'Live'; document.querySelector('#connection').className = 'live';
+      } catch (error) { document.querySelector('#connection').textContent = 'Disconnected'; document.querySelector('#connection').className = 'live bad'; }
+    }
+    poll(); setInterval(poll, 1000);
+  </script>
+</body>
+</html>

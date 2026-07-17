@@ -1,0 +1,324 @@
+# Stable contracts
+
+These interfaces isolate the LLM, model runtimes, capability providers, external
+Nova dashboard protocol, and satellite clients. Implementations may change
+without rewriting behavior policy or importing another repository.
+
+## Capability provider boundary
+
+```typescript
+type CapabilityManifest = {
+  id: string;
+  version: string;
+  contractVersion: string;
+  executionClass: "iridium_local" | "household_lan_service";
+  tools: SemanticToolSchema[];
+  skillFiles: string[];
+};
+
+interface CapabilityProvider {
+  manifest(): CapabilityManifest;
+  query(call: CapabilityToolCall, context: ExecutionContext): Promise<ToolResult>;
+  execute(call: CapabilityToolCall, context: ExecutionContext): Promise<ToolResult>;
+  verify(call: CapabilityToolCall, result: ToolResult): Promise<ToolResult>;
+  health(): Promise<ProviderHealth>;
+}
+
+type CapabilityToolCall = {
+  provider: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+};
+
+type PlannedAction = {
+  id: string;
+  order: number;
+  dependsOn: string[];
+  call: CapabilityToolCall;
+};
+```
+
+The core knows these interfaces only. Provider loading is allowlisted and local;
+manifests are validated before any schema enters an LLM request. Provider tools
+carry deterministic risk/confirmation/idempotency metadata that a skill cannot
+override. The Nova provider owns all dashboard-specific URLs, aliases, auth,
+mapping, and result verification. Any provider that performs a local-AI task
+must declare `iridium_local`; routing policy rejects attempts to run it on a
+satellite or another household device.
+
+The initial Nova manifest uses a Nova Voice-owned compatibility identifier such
+as `nova-provider-v1`. Dashboard `/api/version` build metadata is recorded for
+diagnostics, but is not treated as a semantic REST API version. Startup and CI
+conformance tests decide whether the deployed dashboard is compatible.
+
+## Utterance envelope
+
+```typescript
+type Utterance = {
+  id: string;
+  satelliteId: string;
+  roomId: string;
+  startedAt: string;
+  endedAt: string;
+  transcript: string;
+  transcriptConfidence: number;
+  wakeDetected: boolean;
+  wakeScore?: number;
+  conversationActive: boolean;
+  acoustic: {
+    durationMs: number;
+    rmsDb: number;
+    peakDb: number;
+    snrDb?: number;
+    pitchMedianRelative?: number;
+    pitchRange?: number;
+    syllablesPerSecond?: number;
+    pauseRatio?: number;
+  };
+};
+```
+
+Raw audio never enters an LLM request.
+
+## Interpretation result
+
+The LLM must produce schema-constrained data. Invalid or additional fields fail
+closed.
+
+```typescript
+type Interpretation = {
+  emotion: {
+    label: "neutral" | "calm" | "grumpy" | "angry" |
+           "excited" | "bored" | "sad" | "anxious";
+    confidence: number;
+    intensity: number;
+    evidence: ("lexical" | "energy" | "pitch" | "rate" | "context")[];
+  };
+  speechAct: "directive" | "desired_state" | "self_intention" |
+             "observation" | "question" | "third_party" |
+             "quoted_or_media" | "social" | "unclear";
+  addressedProbability: number;
+  decision: "execute" | "reply" | "clarify" | "ignore";
+  confidence: number;
+  activeGoal: {
+    summary: string;
+    status: "new" | "in_progress" | "needs_clarification" |
+            "satisfied" | "abandoned";
+    pending: string[];
+  };
+  actions: PlannedAction[];
+  responsePlan: {
+    acknowledgementStyle: string;
+    preActionSpeech?: string;
+    requiresPostToolRendering: boolean;
+  };
+};
+```
+
+Policy may downgrade `execute` to `clarify`/`ignore`; the model cannot upgrade a
+blocked action. `actions` is schema-bounded to at most four entries in v1.
+Dependencies must refer to earlier entries. The trusted planner/policy may run
+independent reversible actions in parallel, but defaults to ordered execution.
+No response field may claim an action succeeded before its verifier returns.
+
+## Initial LLM-facing Nova provider tools
+
+Expose these small semantic tools when the Nova provider is enabled.
+Other providers may register separate namespaced tools later; the runtime sends
+only tools relevant to the active goal rather than every installed schema.
+
+### `nova.query`
+
+```json
+{
+  "scope": "home|room|target|tasks|health",
+  "query": "optional natural target or room"
+}
+```
+
+Returns normalized target names, current state, units, room, and ambiguity
+candidates. It never returns secrets or the full raw HA snapshot.
+
+### `nova.control`
+
+```json
+{
+  "target": "lounge air con",
+  "action": "turn_on|turn_off|toggle|set_level|set_temperature|set_mode|set_color|set_timer|wake|sleep",
+  "value": 19,
+  "unit": "celsius",
+  "durationMinutes": 60,
+  "room": "lounge"
+}
+```
+
+Only `target` and `action` are generally required. The adapter resolves the
+target against its alias index, applies domain-specific schemas and configured
+bounds, calls the Nova REST endpoint, then verifies the resulting state.
+
+### `nova.lighting_shortcut`
+
+```json
+{
+  "scope": "indoors|all|outside",
+  "action": "on|off"
+}
+```
+
+A deterministic phrase mapper uses this tool for broad commands such as
+"turn all of the lights on" and "turn everything off". `indoors` targets the
+dashboard's Home/Everything lighting layer; its `on` endpoint applies the
+configured adaptive daylight/sunset preset. Outside lights remain excluded
+unless the user explicitly says outside or asks for all lights including outside.
+
+### `nova.task`
+
+```json
+{
+  "operation": "list|add|update|complete|dismiss|remove",
+  "id": "optional existing id",
+  "name": "optional task text",
+  "start": "optional ISO timestamp",
+  "end": "optional ISO timestamp"
+}
+```
+
+Relative dates are resolved by deterministic date code using the household
+timezone. Destructive/ambiguous edits require clarification.
+
+## Tool result
+
+```typescript
+type ToolResult = {
+  ok: boolean;
+  code: "ok" | "ambiguous" | "not_found" | "blocked" |
+        "invalid" | "timeout" | "unverified" | "backend_error";
+  target?: string;
+  requested?: Record<string, unknown>;
+  observed?: Record<string, unknown>;
+  candidates?: string[];
+  message: string;
+};
+```
+
+The response renderer says an action succeeded only when `ok=true` and the
+observed state is consistent. Retries use idempotency keys derived from the
+utterance/tool call ID.
+
+Verified dashboard-control results are passed to the persona-aware response
+renderer after verification, with a short deterministic confirmation available
+as a failure fallback. Partial failure and open-ended dialogue use the same
+resident LLM; this does not introduce another model.
+
+## External dashboard protocol mapping
+
+| Semantic operation | Existing fast path |
+| --- | --- |
+| state/alias refresh | `GET /api/state`, `/api/events` |
+| zone action | `POST /api/zone` |
+| entity action | `POST /api/entity` |
+| adaptive indoor lights on/off | `GET /api/lights/on`, `/api/lights/off` |
+| all indoor and outside lights | `GET /api/all-lights/on`, `/api/all-lights/off` |
+| outside lights only | `GET /api/outside-light/on`, `/api/outside-light/off` |
+| air-con timer | `POST /api/aircon/timer` |
+| panel heater timer | `POST /api/panel-heater/timer` |
+| computer wake/sleep | `POST /api/desktop/wake`, `/api/desktop/sleep` |
+| task operations | `/api/tasks` and `/api/tasks/:id/*` |
+| health/discovery/config | `POST /api/mcp` |
+
+This table documents protocol knowledge, not source-code reuse. Nova Voice owns
+its typed client, schemas, fixtures, and compatibility tests. No dashboard
+module, generated type, UI component, or internal route implementation is a
+Nova Voice dependency.
+
+Deployment benchmarks equivalent REST and MCP operations from Iridium. The
+adapter selects the measured hot path per semantic operation and keeps that
+choice out of the LLM schema. REST is not assumed faster merely because it is
+direct; MCP remains the default surface for discovery, health, and administration.
+
+MCP's mechanical `confirm: true` is set by the trusted adapter only after Nova
+Voice policy has established that the spoken request authorizes the reversible
+action. The LLM never sets it directly.
+
+## Satellite handshake
+
+```typescript
+type SatelliteHello = {
+  protocolVersion: 1;
+  satelliteId: string;
+  displayName: string;
+  roomId: string;
+  client: "linux-native" | "macos-native";
+  supervisor: "systemd" | "launchd";
+  capturePolicy: "always";
+  dashboardForeground?: boolean;
+  capabilities: {
+    microphone: boolean;
+    speaker: boolean;
+    echoCancellation: boolean;
+    noiseSuppression: boolean;
+    automaticGainControl: boolean;
+    playbackEvents?: boolean;
+  };
+};
+```
+
+Connection requires a locally provisioned per-device certificate and mutually
+authenticated TLS. An additional bearer token is not required in v1. After the
+JSON hello, audio uses a versioned binary envelope containing sequence, monotonic
+timestamp, stream direction, format, playback marker, and PCM payload. Native
+satellites continuously send audio while healthy; they do not use edge VAD to
+drop speech. Response PCM is returned on every connected speaker connection with
+the elected microphone's `roomId`, and never to a different room. `playback`,
+`playback_done`, and `playback_cancel` control messages start, finish, or
+immediately close each member speaker's copy of that room output stream.
+Clients advertising `playbackEvents` return `playback_started` with the matching
+`playbackId` when their audio renderer starts the first scheduled buffer, then
+`playback_finished` after the last buffer is audibly complete. Missing capability
+means Iridium retains the protocol-v1 first-PCM timing fallback.
+Small control frames carry capture state, RMS/SNR, optional wake
+telemetry, heartbeat, foreground context, and server backpressure. No browser,
+page-visibility event, or dashboard hook is part of the protocol.
+
+All satellites in one acoustic room must advertise the same stable `roomId`.
+Iridium stores one post-DSP playback reference and recent response-text window
+under that room id; every room microphone consults the shared reference before
+interpretation. This is distinct from source election, which still selects only
+one microphone segment for each household utterance.
+
+Speaking animation is not satellite audio routing. Nova Voice turns confirmed
+playback edges (or the legacy first-PCM fallback) into one best-effort
+speaking-state event for the dashboard service, whose shared event stream fans
+it out to every connected dashboard client.
+
+## Conversation and monitor contract
+
+Conversation context is in-memory and keyed by room. A wake-word turn opens it;
+each accepted turn refreshes a 20-second idle timeout. User and assistant text is
+appended in role order, and the complete context is cleared on timeout, explicit
+abandonment, or a direct speech interruption. System/persona and initial
+time/weather context are snapshotted once per conversation.
+
+The read-only voice monitor records both sides of the exchange as `User:` and
+`<Agent name>:` transcript lines. Its transcript-font selector is local UI state
+and does not alter agent behavior or retained transcript data.
+
+Iridium also sends each accepted user turn and spoken assistant response to
+Nova's `POST /api/voice/transcript` endpoint. The payload contains `role`
+(`user` or `assistant`), `text`, `at`, `agentName`, `wakeWords`, `satelliteId`, and `roomId`.
+Nova keeps a bounded process-local snapshot and fans new entries out as
+`voice-transcript` events on the shared dashboard SSE stream; Iridium remains
+the only durable transcript store and retains that data for at most 24 hours.
+
+## Persona contract
+
+Persona configuration may select:
+
+- name/backstory and concise speaking rules
+- compliant mood/attitude, including negative dispositions
+- one resident TTS voice and base voice instruction
+- complaint budget (maximum one sentence)
+- emotion mirroring strength
+
+It may not select tools, permission levels, transcript retention, or execution
+thresholds. See `config/persona.example.yaml`.

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>nz.co.skull.NovaVoiceSatellite</string>
+    <!-- Attribute this legacy LaunchAgent to the signed app.  This lets macOS
+         Local Network privacy show the app name and retain the user's choice. -->
+    <key>AssociatedBundleIdentifiers</key>
+    <string>nz.co.skull.NovaVoiceSatellite</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NOVA_VOICE_APP_PATH__/Contents/MacOS/NovaVoiceSatellite</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NOVA_VOICE_SERVER_URL</key><string>wss://192.168.8.20:8766/v1/satellites</string>
+        <key>NOVA_VOICE_SATELLITE_ID</key><string>indium</string>
+        <key>NOVA_VOICE_DISPLAY_NAME</key><string>Indium</string>
+        <key>NOVA_VOICE_ROOM_ID</key><string>office</string>
+        <key>NOVA_VOICE_IDENTITY_LABEL</key><string>indium</string>
+        <key>NOVA_VOICE_CLIENT_KEYCHAIN_PATH</key><string>__NOVA_VOICE_HOME__/Library/Application Support/NovaVoiceSatellite/client.keychain-db</string>
+        <key>NOVA_VOICE_CLIENT_KEYCHAIN_PASSWORD_PATH</key><string>__NOVA_VOICE_HOME__/Library/Application Support/NovaVoiceSatellite/client-keychain-password</string>
+        <key>NOVA_VOICE_CA_CERTIFICATE_PATH</key><string>__NOVA_VOICE_HOME__/Library/Application Support/NovaVoiceSatellite/ca.crt</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <!-- Headless audio capture should receive background scheduling while the
+         LaunchAgent still runs in the logged-in user's CoreAudio session. -->
+    <key>ProcessType</key><string>Background</string>
+    <key>ThrottleInterval</key><integer>5</integer>
+    <key>StandardOutPath</key><string>/dev/null</string>
+    <key>StandardErrorPath</key><string>__NOVA_VOICE_HOME__/Library/Logs/NovaVoiceSatellite.log</string>
+</dict>
+</plist>

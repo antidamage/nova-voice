@@ -1,0 +1,18 @@
+.env
+# Private household network/machine/PII reference — never commit or publish.
+PRIVATEREF.md
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+data/
+models/
+certs/
+inventory.local.json
+benchmark-results/
+output/
+.playwright-cli/

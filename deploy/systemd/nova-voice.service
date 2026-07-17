@@ -1,0 +1,37 @@
+[Unit]
+Description=Nova Voice local voice orchestration
+After=network-online.target nova-voice-llm.service nova-voice-tts.service nova-voice-dfn.service
+Wants=network-online.target nova-voice-dfn.service
+Requires=nova-voice-llm.service nova-voice-tts.service
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+EnvironmentFile=/etc/nova-voice/nova-voice.env
+Environment=HF_HOME=/opt/nova-voice/cache/huggingface
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=MPLCONFIGDIR=/opt/nova-voice/cache/matplotlib
+Environment=NUMBA_CACHE_DIR=/opt/nova-voice/cache/numba
+Environment=TRITON_CACHE_DIR=/opt/nova-voice/cache/triton
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nova-voice/venv/bin/nova-voice serve
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.168.8.0/24
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+--- a/vllm_omni/worker/gpu_model_runner.py
++++ b/vllm_omni/worker/gpu_model_runner.py
+@@ -1697,7 +1697,12 @@
+                     )
+ 
+                 offsets_t = torch.tensor(start_offsets_b, device=req_embeds.device, dtype=torch.long)
+-                inputs_embeds.index_copy_(0, offsets_t, req_embeds)
++                # Qwen3-TTS produces BF16 decode embeddings even when the AR
++                # model must run as FP16 on pre-Ampere GPUs. Match the model
++                # tensor at the boundary so Turing GPUs can execute streaming.
++                inputs_embeds.index_copy_(
++                    0, offsets_t, req_embeds.to(dtype=inputs_embeds.dtype)
++                )
+                 input_ids.index_copy_(0, offsets_t, req_input_ids.reshape(-1).to(dtype=input_ids.dtype))
+ 
+                 dst = slice(len(decode_req_ids), len(decode_req_ids) + len(req_ids_b))

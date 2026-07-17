@@ -1,0 +1,35 @@
+[Unit]
+Description=Nova Voice native always-on audio satellite
+After=pipewire.service wireplumber.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=120
+EnvironmentFile=%h/.config/nova-voice/satellite.env
+Environment=PULSE_SOURCE=nova_voice_aec
+Environment=PULSE_SINK=nova_voice_aec_sink
+ExecStartPre=/usr/bin/test -r %h/.config/nova-voice/tls/ca.crt
+ExecStartPre=/usr/bin/test -r %h/.config/nova-voice/tls/client.crt
+ExecStartPre=/usr/bin/test -r %h/.config/nova-voice/tls/client.key
+ExecStart=%h/.local/opt/nova-voice/venv/bin/nova-voice satellite
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/nova-voice %t
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.168.8.0/24
+
+[Install]
+WantedBy=default.target
