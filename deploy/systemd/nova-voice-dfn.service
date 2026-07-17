@@ -1,0 +1,22 @@
+[Unit]
+Description=Nova Voice DeepFilterNet3 noise-suppression sidecar
+After=network-online.target
+PartOf=nova-voice.service
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+Environment=DFN_PORT=8092
+Environment=HF_HOME=/opt/nova-voice/cache/huggingface
+Environment=XDG_CACHE_HOME=/opt/nova-voice/cache
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nova-voice/dfn-venv/bin/python /opt/nova-voice/current/ops/dfn_server.py
+Restart=always
+RestartSec=5
+MemoryMax=3G
+CPUWeight=50
+
+[Install]
+WantedBy=multi-user.target

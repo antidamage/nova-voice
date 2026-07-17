@@ -1,0 +1,26 @@
+[Unit]
+Description=Nova Voice local interpretation model
+After=network.target
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice
+ExecStart=/opt/nova-voice/runtime/llama.cpp/build/bin/llama-server --model /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf --alias Qwen3.5-4B --host 127.0.0.1 --port 8765 --ctx-size 4096 --parallel 1 --n-gpu-layers 99 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --no-webui
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nova-voice/cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

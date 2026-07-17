@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Nova Voice Lab</title>
+  <style>
+    :root {
+      --ink: #eef4ff;
+      --muted: #8797b6;
+      --panel: rgba(16, 25, 46, .82);
+      --panel-strong: #121d35;
+      --line: rgba(151, 178, 224, .16);
+      --cyan: #54d9ff;
+      --violet: #927dff;
+      --mint: #55e6b1;
+      --amber: #ffca6b;
+      --danger: #ff7285;
+      --radius: 24px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 13% 0%, rgba(75, 126, 255, .22), transparent 35rem),
+        radial-gradient(circle at 88% 9%, rgba(122, 86, 255, .18), transparent 28rem),
+        #07101f;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .22;
+      background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: linear-gradient(to bottom, black, transparent 82%);
+    }
+
+    button, input, select { font: inherit; }
+
+    .shell {
+      position: relative;
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 50px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 26px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 15px; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 46px;
+      height: 46px;
+      border: 1px solid rgba(84, 217, 255, .45);
+      border-radius: 15px;
+      background: linear-gradient(145deg, rgba(84,217,255,.16), rgba(146,125,255,.14));
+      box-shadow: 0 0 34px rgba(84, 217, 255, .13);
+    }
+
+    .brand-mark span {
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--cyan);
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 4px #0b1528, 0 0 14px rgba(84,217,255,.5);
+    }
+
+    h1 { margin: 0; font-size: 18px; letter-spacing: .08em; text-transform: uppercase; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+
+    .health-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 36px;
+      padding: 0 13px;
+      color: #c8d5ed;
+      background: rgba(12, 21, 39, .72);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 13px;
+    }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+    .dot.ok { background: var(--mint); box-shadow: 0 0 12px rgba(85,230,177,.72); }
+    .dot.bad { background: var(--danger); box-shadow: 0 0 12px rgba(255,114,133,.55); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(310px, .82fr) minmax(420px, 1.3fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      overflow: hidden;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, .25);
+      backdrop-filter: blur(18px);
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 66px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .mode-badge {
+      padding: 6px 9px;
+      color: var(--mint);
+      background: rgba(85, 230, 177, .08);
+      border: 1px solid rgba(85, 230, 177, .22);
+      border-radius: 8px;
+      font: 700 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .mode-badge.warn { color: var(--amber); border-color: rgba(255,202,107,.24); background: rgba(255,202,107,.08); }
+    .capture { padding: 25px 22px 22px; }
+
+    .field { margin-bottom: 17px; }
+    label { display: block; margin-bottom: 8px; color: #aab8d1; font-size: 12px; font-weight: 650; }
+    select, input[type="text"] {
+      width: 100%;
+      height: 44px;
+      padding: 0 12px;
+      color: var(--ink);
+      background: #0b1528;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      outline: none;
+    }
+
+    select:focus, input[type="text"]:focus { border-color: rgba(84,217,255,.52); box-shadow: 0 0 0 3px rgba(84,217,255,.08); }
+    .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 0 2px;
+    }
+
+    .toggle-copy strong { display: block; font-size: 13px; }
+    .toggle-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .track { position: absolute; inset: 0; border-radius: 999px; background: #27324a; cursor: pointer; transition: .2s; }
+    .track::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; border-radius: 50%; background: #e8eefc; transition: .2s; }
+    .switch input:checked + .track { background: linear-gradient(90deg, #347ee8, #765be2); }
+    .switch input:checked + .track::before { transform: translateX(18px); }
+
+    .record-zone {
+      margin-top: 25px;
+      padding: 22px 14px 17px;
+      text-align: center;
+      background: linear-gradient(180deg, rgba(84,217,255,.045), transparent);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+    }
+
+    .record-button {
+      position: relative;
+      width: 82px;
+      height: 82px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      color: #07101f;
+      background: linear-gradient(145deg, #70e6ff, #8e7bff);
+      box-shadow: 0 0 0 9px rgba(84,217,255,.06), 0 14px 40px rgba(70,120,255,.3);
+      cursor: pointer;
+      transition: transform .18s, box-shadow .18s;
+    }
+
+    .record-button:hover { transform: translateY(-2px); box-shadow: 0 0 0 11px rgba(84,217,255,.075), 0 18px 44px rgba(70,120,255,.38); }
+    .record-button:disabled { cursor: wait; filter: saturate(.35); opacity: .7; transform: none; }
+    .record-button.starting { cursor: wait; animation: pulse 1.2s infinite; }
+    .record-button .mic { display: block; width: 18px; height: 26px; margin: auto; border: 3px solid currentColor; border-radius: 12px; }
+    .record-button .mic::after { content: ""; display: block; width: 28px; height: 15px; margin: 13px 0 0 -8px; border: 3px solid currentColor; border-top: 0; border-radius: 0 0 18px 18px; }
+    .record-button.recording { color: white; background: linear-gradient(145deg, #ff5c76, #d73560); animation: pulse 1.5s infinite; }
+    .record-button.recording .mic { width: 22px; height: 22px; border: 0; border-radius: 6px; background: currentColor; }
+    .record-button.recording .mic::after { display: none; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 15px rgba(255,92,118,.07), 0 15px 45px rgba(255,70,100,.3); } }
+
+    #captureTitle { margin: 17px 0 4px; font-size: 14px; font-weight: 700; }
+    #captureHint { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .meter { height: 4px; margin: 20px 2px 10px; overflow: hidden; background: #1c2941; border-radius: 999px; }
+    #level { width: 0; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--violet), var(--danger)); transition: width .08s linear; }
+    canvas { display: block; width: 100%; height: 50px; opacity: .8; }
+
+    .privacy {
+      display: flex;
+      gap: 9px;
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .lock { color: var(--mint); font-size: 14px; }
+
+    .results { min-height: 690px; }
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .stage { padding: 14px 16px; background: rgba(11,21,40,.92); }
+    .stage span { display: block; color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .stage strong { display: block; margin-top: 6px; font-size: 12px; }
+    .stage.active strong { color: var(--cyan); }
+    .stage.done strong { color: var(--mint); }
+    .stage.error strong { color: var(--danger); }
+
+    .result-body { padding: 22px; }
+    .empty {
+      display: grid;
+      min-height: 515px;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+    }
+    .empty-ring { width: 80px; height: 80px; margin: 0 auto 18px; border: 1px solid var(--line); border-radius: 50%; box-shadow: inset 0 0 30px rgba(84,217,255,.06); }
+    .empty h2 { margin: 0 0 8px; color: #c9d5e9; font-size: 16px; }
+    .empty p { max-width: 320px; margin: 0; font-size: 12px; line-height: 1.6; }
+
+    #resultContent[hidden], #emptyState[hidden] { display: none; }
+    .block { padding: 17px; background: rgba(8,16,31,.64); border: 1px solid var(--line); border-radius: 15px; }
+    .block + .block { margin-top: 12px; }
+    .block h3 { margin: 0 0 10px; color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+    .quote { margin: 0; color: #f3f7ff; font-size: 17px; line-height: 1.52; }
+    .response { color: #dbe8ff; }
+
+    .facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+    .fact { min-width: 0; padding: 11px; background: #0b1528; border-radius: 10px; }
+    .fact span { display: block; overflow: hidden; color: var(--muted); font-size: 9px; letter-spacing: .08em; text-overflow: ellipsis; text-transform: uppercase; }
+    .fact strong { display: block; margin-top: 6px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; }
+
+    .tone { display: flex; align-items: center; gap: 9px; margin-top: 11px; color: #b7c5dd; font-size: 11px; line-height: 1.4; }
+    .tone-mark { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--violet); box-shadow: 0 0 12px rgba(146,125,255,.65); }
+
+    audio { width: 100%; height: 38px; margin-top: 14px; }
+    .timings { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    .timing { padding: 6px 8px; color: #9eb0cc; background: #0b1528; border-radius: 8px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    details { margin-top: 13px; color: var(--muted); font-size: 11px; }
+    summary { cursor: pointer; user-select: none; }
+    pre { max-height: 260px; overflow: auto; padding: 13px; color: #a9b9d3; background: #07101f; border-radius: 10px; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+
+    .error-box { padding: 14px; color: #ffd9df; background: rgba(255,114,133,.09); border: 1px solid rgba(255,114,133,.22); border-radius: 12px; font-size: 12px; line-height: 1.5; }
+
+    footer { margin-top: 17px; color: #657590; font-size: 10px; text-align: center; letter-spacing: .04em; }
+
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .results { min-height: 620px; }
+      header { align-items: flex-start; flex-direction: column; }
+    }
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 18px, 1180px); padding-top: 18px; }
+      .inline, .facts { grid-template-columns: 1fr 1fr; }
+      .panel-head, .capture, .result-body { padding-left: 16px; padding-right: 16px; }
+    }
+    @media (max-width: 430px) {
+      .inline { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span></div>
+        <div>
+          <h1>Nova Voice Lab</h1>
+          <p>Local microphone → STT → interpretation → TTS</p>
+        </div>
+      </div>
+      <div class="health-pill" role="status">
+        <span id="healthDot" class="dot"></span>
+        <span id="healthText">Checking Iridium…</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="captureHeading">
+        <div class="panel-head">
+          <span id="captureHeading" class="eyebrow">Input capture</span>
+          <span class="mode-badge">Push to record</span>
+        </div>
+        <div class="capture">
+          <div class="field">
+            <label for="microphone">Microphone source</label>
+            <select id="microphone">
+              <option value="">System default microphone</option>
+            </select>
+          </div>
+
+          <div class="inline">
+            <div class="field">
+              <label for="room">Room context</label>
+              <input id="room" type="text" value="office" maxlength="64" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="processing">Browser DSP</label>
+              <select id="processing">
+                <option value="on">AEC + noise control</option>
+                <option value="off">Unprocessed</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="toggle-row">
+            <div class="toggle-copy">
+              <strong>Affirmative test turn</strong>
+              <span>Marks this recording as wake-addressed.</span>
+            </div>
+            <label class="switch" aria-label="Affirmative test turn">
+              <input id="wake" type="checkbox" checked>
+              <span class="track"></span>
+            </label>
+          </div>
+
+          <div class="record-zone">
+            <button id="record" class="record-button" type="button" aria-label="Start recording">
+              <span class="mic" aria-hidden="true"></span>
+            </button>
+            <p id="captureTitle" role="status" aria-live="polite">Ready to listen</p>
+            <p id="captureHint">Press once, speak naturally, then press again.</p>
+            <div class="meter" aria-hidden="true"><div id="level"></div></div>
+            <canvas id="waveform" width="640" height="100" aria-label="Microphone waveform"></canvas>
+          </div>
+
+          <div class="privacy">
+            <span class="lock" aria-hidden="true">⌁</span>
+            <span>Audio is held in this tab and Iridium’s bounded request memory only. It is never saved; the resulting development transcript follows the 24-hour deletion policy.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel results" aria-labelledby="resultHeading">
+        <div class="panel-head">
+          <span id="resultHeading" class="eyebrow">Turn inspection</span>
+          <span id="shadowBadge" class="mode-badge warn">Loading mode</span>
+        </div>
+
+        <div class="pipeline" aria-label="Pipeline progress">
+          <div id="stageStt" class="stage"><span>01 · STT</span><strong>Waiting</strong></div>
+          <div id="stageLlm" class="stage"><span>02 · LLM</span><strong>Waiting</strong></div>
+          <div id="stageTts" class="stage"><span>03 · Voice</span><strong>Waiting</strong></div>
+        </div>
+
+        <div class="result-body">
+          <div id="emptyState" class="empty">
+            <div>
+              <div class="empty-ring"></div>
+              <h2>No turn captured yet</h2>
+              <p>Use a clear command, question, or emotionally delivered phrase. Nova will show the transcript, speech act, probable tone, policy outcome, response, and timing.</p>
+            </div>
+          </div>
+
+          <div id="resultContent" hidden>
+            <div id="errorBox" class="error-box" hidden></div>
+
+            <div id="resultBlocks">
+              <article class="block">
+                <h3>Heard</h3>
+                <p id="transcript" class="quote"></p>
+                <div class="facts">
+                  <div class="fact"><span>Confidence</span><strong id="confidence">—</strong></div>
+                  <div class="fact"><span>Speech act</span><strong id="speechAct">—</strong></div>
+                  <div class="fact"><span>Decision</span><strong id="decision">—</strong></div>
+                  <div class="fact"><span>Addressed</span><strong id="addressed">—</strong></div>
+                </div>
+              </article>
+
+              <article class="block">
+                <h3>Probable emotional tone</h3>
+                <div class="facts">
+                  <div class="fact"><span>Label</span><strong id="emotion">—</strong></div>
+                  <div class="fact"><span>Confidence</span><strong id="emotionConfidence">—</strong></div>
+                  <div class="fact"><span>Intensity</span><strong id="intensity">—</strong></div>
+                  <div class="fact"><span>Policy</span><strong id="policy">—</strong></div>
+                </div>
+                <div class="tone"><span class="tone-mark"></span><span id="toneInstruction">—</span></div>
+              </article>
+
+              <article class="block">
+                <h3>Nova response</h3>
+                <p id="response" class="quote response"></p>
+                <audio id="responseAudio" controls preload="none" hidden></audio>
+                <div id="timings" class="timings"></div>
+              </article>
+
+              <details>
+                <summary>Structured turn details</summary>
+                <pre id="rawJson"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer>DEVELOPMENT DIAGNOSTIC · SAME-ORIGIN MTLS · NO DASHBOARD DEPENDENCY</footer>
+  </main>
+
+  <script>
+    const ui = Object.fromEntries([
+      "healthDot", "healthText", "microphone", "room", "processing", "wake", "record",
+      "captureTitle", "captureHint", "level", "waveform", "shadowBadge", "emptyState",
+      "resultContent", "errorBox", "resultBlocks", "transcript", "confidence", "speechAct",
+      "decision", "addressed", "emotion", "emotionConfidence", "intensity", "policy",
+      "toneInstruction", "response", "responseAudio", "timings", "rawJson", "stageStt",
+      "stageLlm", "stageTts"
+    ].map(id => [id, document.getElementById(id)]));
+
+    const state = {
+      recording: false,
+      starting: false,
+      busy: false,
+      stream: null,
+      context: null,
+      source: null,
+      processor: null,
+      silent: null,
+      chunks: [],
+      sampleCount: 0,
+      startedAt: 0,
+      timer: null,
+      maxSeconds: 30,
+      socket: null,
+      transport: null,
+      socketDone: null,
+      socketDoneResolve: null,
+      socketDoneReject: null,
+      socketFinished: false,
+      streamChunks: [],
+      streamSampleCount: 0,
+      playbackContext: null,
+      playbackReady: null,
+      playbackNextTime: 0,
+      playbackRate: 24000,
+      playbackChunks: [],
+      playbackUrl: null,
+      captureRate: 16000,
+    };
+
+    const BrowserAudioContext = window.AudioContext || window.webkitAudioContext;
+
+    function setHealth(ok, text) {
+      ui.healthDot.className = `dot ${ok ? "ok" : "bad"}`;
+      ui.healthText.textContent = text;
+    }
+
+    function percent(value) {
+      return `${Math.round(Number(value || 0) * 100)}%`;
+    }
+
+    function stage(element, status, text) {
+      element.className = `stage ${status}`;
+      element.querySelector("strong").textContent = text;
+    }
+
+    function resetStages() {
+      stage(ui.stageStt, "", "Waiting");
+      stage(ui.stageLlm, "", "Waiting");
+      stage(ui.stageTts, "", "Waiting");
+    }
+
+    async function refreshHealth() {
+      try {
+        const response = await fetch("/health", { cache: "no-store" });
+        const health = await response.json();
+        if (!response.ok) throw new Error(`Health returned ${response.status}`);
+        const audio = health.audio || {};
+        const stt = audio.stt?.model ? "STT" : "audio";
+        const tts = audio.tts?.model ? "TTS" : "voice";
+        setHealth(Boolean(health.ok), health.ok ? `Iridium ready · ${stt} + ${tts} resident` : "Iridium reports a degraded component");
+        ui.shadowBadge.textContent = health.shadowMode ? "Shadow · no actions" : "Live execution";
+        ui.shadowBadge.className = `mode-badge ${health.shadowMode ? "warn" : ""}`;
+        state.maxSeconds = Number(health.diagnostics?.maxAudioSeconds || 30);
+      } catch (error) {
+        setHealth(false, `Backend unavailable · ${error.message}`);
+      }
+    }
+
+    async function listMicrophones() {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const selected = ui.microphone.value;
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === "audioinput");
+      ui.microphone.replaceChildren(new Option("System default microphone", ""));
+      devices.forEach((device, index) => {
+        ui.microphone.add(new Option(device.label || `Microphone ${index + 1}`, device.deviceId));
+      });
+      if ([...ui.microphone.options].some(option => option.value === selected)) ui.microphone.value = selected;
+    }
+
+    function drawWave(samples) {
+      const canvas = ui.waveform;
+      const context = canvas.getContext("2d");
+      const width = canvas.width;
+      const height = canvas.height;
+      context.clearRect(0, 0, width, height);
+      context.strokeStyle = "rgba(84, 217, 255, .75)";
+      context.lineWidth = 2;
+      context.beginPath();
+      const stride = Math.max(1, Math.floor(samples.length / width));
+      for (let x = 0; x < width; x++) {
+        const sample = samples[Math.min(samples.length - 1, x * stride)] || 0;
+        const y = height / 2 + sample * height * .42;
+        if (x === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      }
+      context.stroke();
+    }
+
+    function updateMeter(samples) {
+      let sum = 0;
+      for (const sample of samples) sum += sample * sample;
+      const rms = Math.sqrt(sum / Math.max(1, samples.length));
+      ui.level.style.width = `${Math.min(100, Math.max(1, rms * 420))}%`;
+      drawWave(samples);
+    }
+
+    async function startRecording() {
+      state.starting = true;
+      ui.record.classList.add("starting");
+      ui.record.setAttribute("aria-label", "Starting microphone");
+      ui.captureTitle.textContent = "Waiting for microphone permission...";
+      ui.captureHint.textContent = "Choose Allow if your browser asks to use the microphone.";
+      resetStages();
+      stage(ui.stageStt, "active", "Starting microphone");
+
+      if (!window.isSecureContext) {
+        throw new Error("Microphone access requires this HTTPS certificate to be trusted by the browser.");
+      }
+      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode || !BrowserAudioContext) {
+        throw new Error("This browser does not provide the microphone audio features required by Voice Lab.");
+      }
+      try {
+        const permission = await navigator.permissions?.query?.({ name: "microphone" });
+        if (permission?.state === "denied") {
+          throw new Error("Microphone permission is blocked for this site. Enable it in the browser site settings and try again.");
+        }
+      } catch (error) {
+        if (String(error?.message || error).includes("blocked for this site")) throw error;
+      }
+      const processed = ui.processing.value === "on";
+      const deviceId = ui.microphone.value;
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: {
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+          channelCount: { ideal: 1 },
+          echoCancellation: processed,
+          noiseSuppression: processed,
+          autoGainControl: processed,
+        }
+      });
+      await listMicrophones();
+      ui.captureTitle.textContent = "Connecting live speech stream...";
+      ui.captureHint.textContent = "Microphone ready; connecting to Iridium.";
+      stage(ui.stageStt, "active", "Connecting");
+
+      state.context = new BrowserAudioContext({ latencyHint: "interactive" });
+      state.captureRate = state.context.sampleRate;
+      const processorSource = `
+        class NovaCaptureProcessor extends AudioWorkletProcessor {
+          process(inputs) {
+            const channel = inputs[0] && inputs[0][0];
+            if (channel) this.port.postMessage(channel.slice());
+            return true;
+          }
+        }
+        registerProcessor("nova-capture", NovaCaptureProcessor);
+      `;
+      const moduleUrl = URL.createObjectURL(new Blob([processorSource], { type: "application/javascript" }));
+      try {
+        await state.context.audioWorklet.addModule(moduleUrl);
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
+      }
+
+      state.source = state.context.createMediaStreamSource(state.stream);
+      state.processor = new AudioWorkletNode(state.context, "nova-capture");
+      state.silent = state.context.createGain();
+      state.silent.gain.value = 0;
+      state.source.connect(state.processor);
+      state.processor.connect(state.silent).connect(state.context.destination);
+      state.chunks = [];
+      state.sampleCount = 0;
+      state.streamChunks = [];
+      state.streamSampleCount = 0;
+      state.processor.port.onmessage = event => {
+        if (!state.recording) return;
+        const values = new Float32Array(event.data);
+        state.chunks.push(values);
+        state.sampleCount += values.length;
+        state.streamChunks.push(values);
+        state.streamSampleCount += values.length;
+        if (state.streamSampleCount >= Math.round(state.captureRate * 0.16)) flushStreamAudio();
+        updateMeter(values);
+      };
+      await state.context.resume();
+      try {
+        await openTurnStream(16000);
+        state.transport = "websocket";
+      } catch (error) {
+        // Chrome can reject a follow-up mTLS WebSocket upgrade even though
+        // regular same-origin HTTPS requests remain authenticated. Keep the
+        // lab functional through its bounded HTTP turn endpoint in that case.
+        cancelTurnStream();
+        state.transport = "http";
+      }
+
+      state.starting = false;
+      state.recording = true;
+      ui.record.classList.remove("starting");
+      state.startedAt = performance.now();
+      ui.record.classList.add("recording");
+      ui.record.setAttribute("aria-label", "Stop and process recording");
+      ui.captureTitle.textContent = state.transport === "websocket" ? "Listening…" : "Listening (compatibility mode)";
+      ui.captureHint.textContent = state.transport === "websocket"
+        ? "Press again when you finish speaking."
+        : "Live streaming is unavailable; press again to send this recording.";
+      resetStages();
+      stage(ui.stageStt, "active", state.transport === "websocket" ? "Capturing" : "Capturing locally");
+      state.timer = setInterval(() => {
+        const seconds = (performance.now() - state.startedAt) / 1000;
+        ui.captureTitle.textContent = `Listening · ${seconds.toFixed(1)} s`;
+        if (seconds >= state.maxSeconds) stopAndProcess();
+      }, 100);
+    }
+
+    function flattenChunks() {
+      const output = new Float32Array(state.sampleCount);
+      let offset = 0;
+      state.chunks.forEach(chunk => { output.set(chunk, offset); offset += chunk.length; });
+      return output;
+    }
+
+    function resample(input, inputRate, outputRate) {
+      if (inputRate === outputRate) return input;
+      const ratio = inputRate / outputRate;
+      const length = Math.max(1, Math.round(input.length / ratio));
+      const output = new Float32Array(length);
+      for (let index = 0; index < length; index++) {
+        const start = index * ratio;
+        const end = Math.min(input.length, (index + 1) * ratio);
+        const first = Math.floor(start);
+        const last = Math.max(first + 1, Math.ceil(end));
+        let sum = 0;
+        let weight = 0;
+        for (let source = first; source < last && source < input.length; source++) {
+          const overlap = Math.max(0, Math.min(end, source + 1) - Math.max(start, source));
+          sum += input[source] * overlap;
+          weight += overlap;
+        }
+        output[index] = weight ? sum / weight : input[Math.min(input.length - 1, first)] || 0;
+      }
+      return output;
+    }
+
+    function pcm16(samples) {
+      const data = new ArrayBuffer(samples.length * 2);
+      const view = new DataView(data);
+      samples.forEach((sample, index) => {
+        const value = Math.max(-1, Math.min(1, sample));
+        view.setInt16(index * 2, value < 0 ? value * 32768 : value * 32767, true);
+      });
+      return data;
+    }
+
+    function flushStreamAudio() {
+      if (!state.streamSampleCount) return;
+      const samples = new Float32Array(state.streamSampleCount);
+      let offset = 0;
+      state.streamChunks.forEach(chunk => { samples.set(chunk, offset); offset += chunk.length; });
+      state.streamChunks = [];
+      state.streamSampleCount = 0;
+      const normalized = resample(samples, state.captureRate, 16000);
+      if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(pcm16(normalized));
+    }
+
+    function pcmWavBlob(chunks, sampleRate) {
+      const payloadLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+      const output = new ArrayBuffer(44 + payloadLength);
+      const view = new DataView(output);
+      const write = (offset, value) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+      write(0, "RIFF");
+      view.setUint32(4, 36 + payloadLength, true);
+      write(8, "WAVE");
+      write(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      write(36, "data");
+      view.setUint32(40, payloadLength, true);
+      const bytes = new Uint8Array(output, 44);
+      let offset = 0;
+      chunks.forEach(chunk => { bytes.set(new Uint8Array(chunk), offset); offset += chunk.byteLength; });
+      return new Blob([output], { type: "audio/wav" });
+    }
+
+    async function beginPlayback(sampleRate) {
+      if (state.playbackContext && state.playbackContext.state !== "closed") {
+        await state.playbackContext.close();
+      }
+      state.playbackRate = sampleRate;
+      state.playbackChunks = [];
+      state.playbackContext = new BrowserAudioContext({ latencyHint: "interactive" });
+      await state.playbackContext.resume();
+      state.playbackNextTime = state.playbackContext.currentTime + 0.06;
+    }
+
+    function queuePlayback(payload) {
+      const copy = payload.slice(0);
+      state.playbackChunks.push(copy);
+      const view = new DataView(copy);
+      const samples = new Float32Array(Math.floor(copy.byteLength / 2));
+      for (let index = 0; index < samples.length; index++) {
+        samples[index] = view.getInt16(index * 2, true) / 32768;
+      }
+      const buffer = state.playbackContext.createBuffer(1, samples.length, state.playbackRate);
+      buffer.copyToChannel(samples, 0);
+      const source = state.playbackContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(state.playbackContext.destination);
+      const startAt = Math.max(state.playbackNextTime, state.playbackContext.currentTime + 0.02);
+      source.start(startAt);
+      state.playbackNextTime = startAt + samples.length / state.playbackRate;
+    }
+
+    function exposeStreamedAudio() {
+      if (!state.playbackChunks.length) return;
+      if (state.playbackUrl) URL.revokeObjectURL(state.playbackUrl);
+      state.playbackUrl = URL.createObjectURL(pcmWavBlob(state.playbackChunks, state.playbackRate));
+      ui.responseAudio.src = state.playbackUrl;
+      ui.responseAudio.hidden = false;
+    }
+
+    function handleTurnMessage(event) {
+      if (event.data instanceof ArrayBuffer) {
+        state.playbackReady?.then(() => queuePlayback(event.data)).catch(error => {
+          state.socketDoneReject?.(error);
+        });
+        return;
+      }
+      let message;
+      try { message = JSON.parse(event.data); } catch (_) { return; }
+      if (message.type === "ready") return;
+      if (message.type === "transcript") {
+        ui.captureHint.textContent = message.text || "Listening for speechâ€¦";
+        stage(ui.stageStt, "active", message.text ? "Live transcript" : "Listening");
+        return;
+      }
+      if (message.type === "result") {
+        renderResult(message.result, { streamingAudio: Boolean(message.result.responseText) });
+        return;
+      }
+      if (message.type === "audio_start") {
+        stage(ui.stageTts, "active", "Streaming");
+        state.playbackReady = beginPlayback(Number(message.sampleRate));
+        return;
+      }
+      if (message.type === "error") {
+        state.socketDoneReject?.(new Error(message.detail || "Voice turn failed"));
+        return;
+      }
+      if (message.type === "done") {
+        state.socketFinished = true;
+        exposeStreamedAudio();
+        stage(ui.stageTts, state.playbackChunks.length ? "done" : "", state.playbackChunks.length ? "Streamed" : "No reply");
+        state.socketDoneResolve?.();
+      }
+    }
+
+    async function openTurnStream(sampleRate) {
+      const room = ui.room.value.trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(room)) throw new Error("Room may contain letters, numbers, hyphens, and underscores only.");
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${scheme}//${location.host}/v1/diagnostics/stream`);
+      socket.binaryType = "arraybuffer";
+      state.socket = socket;
+      state.socketFinished = false;
+      state.socketDone = new Promise((resolve, reject) => {
+        state.socketDoneResolve = resolve;
+        state.socketDoneReject = reject;
+      });
+      await new Promise((resolve, reject) => {
+        let ready = false;
+        const timeout = setTimeout(() => {
+          socket.close();
+          reject(new Error("The live voice stream did not connect within 8 seconds."));
+        }, 8000);
+        socket.addEventListener("open", () => {
+          socket.send(JSON.stringify({
+            type: "start",
+            roomId: room,
+            wakeDetected: ui.wake.checked,
+            sampleRate,
+          }));
+        }, { once: true });
+        socket.addEventListener("message", event => {
+          if (!ready && typeof event.data === "string") {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === "ready") {
+                ready = true;
+                clearTimeout(timeout);
+                resolve();
+              }
+            } catch (_) {}
+          }
+          handleTurnMessage(event);
+        });
+        socket.addEventListener("error", () => {
+          clearTimeout(timeout);
+          reject(new Error("Could not open the live voice stream."));
+        }, { once: true });
+        socket.addEventListener("close", event => {
+          clearTimeout(timeout);
+          if (!ready) reject(new Error(event.reason || "The live voice stream was refused."));
+          else if (!state.socketFinished) state.socketDoneReject?.(new Error(event.reason || "The live voice stream closed early."));
+        });
+      });
+    }
+
+    function cancelTurnStream() {
+      if (state.socket?.readyState === WebSocket.OPEN && !state.socketFinished) {
+        state.socket.send(JSON.stringify({ type: "cancel" }));
+      }
+      state.socket?.close();
+      state.socket = null;
+    }
+
+    async function releaseCapture() {
+      clearInterval(state.timer);
+      state.timer = null;
+      state.starting = false;
+      state.recording = false;
+      ui.record.classList.remove("starting");
+      ui.record.classList.remove("recording");
+      ui.record.setAttribute("aria-label", "Start recording");
+      try { state.source?.disconnect(); } catch (_) {}
+      try { state.processor?.disconnect(); } catch (_) {}
+      try { state.silent?.disconnect(); } catch (_) {}
+      state.stream?.getTracks().forEach(track => track.stop());
+      if (state.context && state.context.state !== "closed") await state.context.close();
+      state.stream = state.context = state.source = state.processor = state.silent = null;
+      ui.level.style.width = "0";
+    }
+
+    function showError(error) {
+      ui.emptyState.hidden = true;
+      ui.resultContent.hidden = false;
+      ui.resultBlocks.hidden = true;
+      ui.errorBox.hidden = false;
+      ui.errorBox.textContent = error.message || String(error);
+      stage(ui.stageStt, "error", "Failed");
+      stage(ui.stageLlm, "", "Waiting");
+      stage(ui.stageTts, "", "Waiting");
+    }
+
+    function renderResult(result, { streamingAudio = false } = {}) {
+      const interpretation = result.interpretation;
+      const emotion = interpretation.emotion;
+      ui.emptyState.hidden = true;
+      ui.resultContent.hidden = false;
+      ui.errorBox.hidden = true;
+      ui.resultBlocks.hidden = false;
+      ui.transcript.textContent = `“${result.transcript}”`;
+      ui.confidence.textContent = percent(result.transcriptConfidence);
+      ui.speechAct.textContent = interpretation.speech_act.replaceAll("_", " ");
+      ui.decision.textContent = interpretation.decision;
+      ui.addressed.textContent = percent(interpretation.addressed_probability);
+      ui.emotion.textContent = emotion.label;
+      ui.emotionConfidence.textContent = percent(emotion.confidence);
+      ui.intensity.textContent = percent(emotion.intensity);
+      ui.policy.textContent = result.shadowed ? "shadowed" : result.policyReason;
+      ui.toneInstruction.textContent = result.responseToneInstruction || "Natural conversational delivery.";
+      ui.response.textContent = result.responseText || "No spoken response was generated for this turn.";
+      ui.timings.replaceChildren(...Object.entries(result.timingsMs || {}).map(([name, value]) => {
+        const item = document.createElement("span");
+        item.className = "timing";
+        item.textContent = `${name} ${Number(value).toFixed(0)} ms`;
+        return item;
+      }));
+      ui.rawJson.textContent = JSON.stringify(result, null, 2);
+      if (result.responseAudioWavBase64) {
+        ui.responseAudio.src = `data:audio/wav;base64,${result.responseAudioWavBase64}`;
+        ui.responseAudio.hidden = false;
+        ui.responseAudio.play().catch(() => {});
+      } else if (!streamingAudio) {
+        ui.responseAudio.pause();
+        ui.responseAudio.removeAttribute("src");
+        ui.responseAudio.hidden = true;
+      }
+      stage(ui.stageStt, "done", "Transcribed");
+      stage(ui.stageLlm, "done", "Interpreted");
+      stage(
+        ui.stageTts,
+        result.responseAudioWavBase64 ? "done" : (streamingAudio ? "active" : ""),
+        result.responseAudioWavBase64 ? "Rendered" : (streamingAudio ? "Starting stream" : "No reply")
+      );
+    }
+
+    async function submit(samples, inputRate) {
+      const normalized = resample(samples, inputRate, 16000);
+      if (normalized.length < 3200) throw new Error("Record at least 200 ms of audio.");
+      stage(ui.stageStt, "active", "Transcribing");
+      stage(ui.stageLlm, "", "Queued");
+      stage(ui.stageTts, "", "Queued");
+      const room = ui.room.value.trim();
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(room)) throw new Error("Room may contain letters, numbers, hyphens, and underscores only.");
+      const parameters = new URLSearchParams({ room_id: room, wake_detected: String(ui.wake.checked) });
+      const response = await fetch(`/v1/diagnostics/turn?${parameters}`, {
+        method: "POST",
+        headers: { "Content-Type": "audio/L16;rate=16000;channels=1" },
+        cache: "no-store",
+        body: pcm16(normalized),
+      });
+      let result;
+      try { result = await response.json(); } catch (_) { result = {}; }
+      if (!response.ok) throw new Error(result.detail || `Nova Voice returned ${response.status}`);
+      renderResult(result);
+    }
+
+    async function stopAndProcess() {
+      if (!state.recording || state.busy) return;
+      state.busy = true;
+      ui.record.disabled = true;
+      const samples = flattenChunks();
+      const inputRate = state.captureRate;
+      flushStreamAudio();
+      await releaseCapture();
+      try {
+        if (state.transport === "http") {
+          ui.captureTitle.textContent = "Processing recorded turn…";
+          ui.captureHint.textContent = "Sending the recorded audio to Iridium.";
+          await submit(samples, inputRate);
+        } else {
+          ui.captureTitle.textContent = "Processing turn…";
+          ui.captureHint.textContent = "Finalizing the live transcript and response.";
+          if (state.socket?.readyState !== WebSocket.OPEN) throw new Error("The live voice stream is not connected.");
+          state.socket.send(JSON.stringify({ type: "commit" }));
+          await state.socketDone;
+        }
+        ui.captureTitle.textContent = "Ready for another turn";
+        ui.captureHint.textContent = "Press once to record a new phrase.";
+      } catch (error) {
+        showError(error);
+        ui.captureTitle.textContent = "Turn failed";
+        ui.captureHint.textContent = "Review the result panel, then try again.";
+      } finally {
+        state.socket?.close();
+        state.socket = null;
+        state.transport = null;
+        state.busy = false;
+        ui.record.disabled = false;
+      }
+    }
+
+    ui.record.addEventListener("click", async () => {
+      if (state.busy || state.starting) return;
+      if (state.recording) return stopAndProcess();
+      try {
+        await startRecording();
+      } catch (error) {
+        await releaseCapture();
+        cancelTurnStream();
+        showError(error);
+        const permissionProblem = /permission|certificate|https|microphone access/i.test(error.message || "");
+        ui.captureTitle.textContent = permissionProblem ? "Microphone blocked" : "Voice stream unavailable";
+        ui.captureHint.textContent = error.message || "Check browser permission and the selected input.";
+      }
+    });
+
+    navigator.mediaDevices?.addEventListener?.("devicechange", () => listMicrophones().catch(() => {}));
+    resetStages();
+    refreshHealth();
+    listMicrophones().catch(() => {});
+  </script>
+</body>
+</html>
