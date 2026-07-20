@@ -12,6 +12,7 @@ class ConversationMessage:
     role: Literal["user", "assistant"]
     content: str
     speaker_name: str | None = None
+    speaker_pronouns: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,13 +132,16 @@ class ConversationTracker:
         assistant: str | None,
         *,
         speaker_name: str | None = None,
+        speaker_pronouns: str | None = None,
     ) -> None:
         session = self._rooms.get(self._key(room_id))
         if session is None:
             return
         if session.messages is None:
             session.messages = []
-        session.messages.append(ConversationMessage("user", user, speaker_name))
+        session.messages.append(
+            ConversationMessage("user", user, speaker_name, speaker_pronouns)
+        )
         if assistant:
             session.messages.append(ConversationMessage("assistant", assistant))
         if len(session.messages) > self.MESSAGE_HISTORY_LIMIT:

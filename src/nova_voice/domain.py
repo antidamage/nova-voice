@@ -214,6 +214,9 @@ class ToolResult(StrictModel):
 class HandleResult(StrictModel):
     utterance_id: str
     interpretation: Interpretation
+    # Final current-turn identity after any name/pronoun disclosure was bound.
+    # Audio runtimes use this to upgrade the already-published user transcript.
+    speaker: SpeakerIdentity | None = None
     executed: bool
     shadowed: bool
     policy_reason: str
