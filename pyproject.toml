@@ -27,14 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = [
-  "ai-edge-litert>=2.1,<3",
   "onnxruntime>=1.20,<2",
   "silero-vad>=6.2,<7",
   "sounddevice>=0.5,<1",
 ]
-# openWakeWord is installed separately by ops/prepare-voice-models.sh with
-# --no-deps: its 0.6.0 metadata requires tflite-runtime, which has no Linux
-# CPython 3.12 wheel. The runtime maps that import to ai-edge-litert.
 satellite = [
   "sounddevice>=0.5,<1",
 ]

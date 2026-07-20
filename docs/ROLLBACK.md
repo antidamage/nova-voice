@@ -1,7 +1,9 @@
 # Rollback and stop procedure
 
 Nova Voice is deliberately removable from the hot path. Stopping it does not
-stop Home Assistant, the dashboard, or their existing Assist/Wyoming path.
+stop Home Assistant or the dashboard. (The legacy HA Assist/Wyoming voice path
+has been retired; stopping Nova Voice leaves the household without voice
+control until it is restarted.)
 
 On Iridium, an administrator can stop only the new services:
 

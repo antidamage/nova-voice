@@ -4,7 +4,6 @@ qwen-tts==0.1.1
 # qwen-tts -> librosa leaves numba unconstrained; uv's multi-index ordering can
 # otherwise select the ancient 0.53 release, which cannot run on Python 3.12.
 numba==0.66.0
-ai-edge-litert==2.1.6
 onnxruntime==1.27.0
 silero-vad==6.2.1
 sounddevice==0.5.5

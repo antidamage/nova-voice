@@ -84,7 +84,8 @@ Implemented in this increment:
 - read-only Iridium inventory and REST/MCP latency probes;
 - macOS keychain provisioning that repairs an existing keychain missing its
   private-key identity instead of silently leaving mTLS unusable.
-- rollback/stop procedures that leave the existing HA/Wyoming path untouched;
+- rollback/stop procedures that stop only Nova Voice services (the legacy
+  HA/Wyoming path has since been retired);
 - a CA-preserving, device-scoped satellite identity issuer and an explicit
   native-satellite rollout guide, now including a dedicated browser-diagnostics
   client identity;

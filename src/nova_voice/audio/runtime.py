@@ -29,7 +29,6 @@ from nova_voice.audio.speech_timing import (
     estimate_speech_duration_ms,
 )
 from nova_voice.audio.vocab import SimplifiedEnglishGate
-from nova_voice.audio.wake import OpenWakeWordDetector
 from nova_voice.domain import AcousticFeatures, HandleResult, Utterance
 from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
@@ -219,7 +218,6 @@ class SatelliteAudioRuntime:
         stt: SpeechToText,
         tts: TextToSpeech,
         segmenter_factory,
-        wake_detector_factory=None,
         monitor_sink: MonitorSink | None = None,
         *,
         denoiser: NoiseSuppressor | None = None,
@@ -241,10 +239,7 @@ class SatelliteAudioRuntime:
         self.stt = stt
         self.tts = tts
         self.segmenter_factory = segmenter_factory
-        self.wake_detector_factory = wake_detector_factory
         self._segmenters: dict[str, SpeechSegmenter] = {}
-        self._wake_detectors: dict[str, OpenWakeWordDetector] = {}
-        self._wake_pending: set[str] = set()
         self._election = election if election is not None else SegmentElection()
         self._arbiter = arbiter if arbiter is not None else TurnArbiter()
         self._arbitration_scope = arbitration_scope
@@ -651,13 +646,6 @@ class SatelliteAudioRuntime:
     ) -> PendingAudioTurn | None:
         """Consume one ordered mic frame and return a completed elected segment."""
 
-        if self.wake_detector_factory is not None:
-            detector = self._wake_detectors.get(satellite_id)
-            if detector is None:
-                detector = self.wake_detector_factory()
-                self._wake_detectors[satellite_id] = detector
-            if await asyncio.to_thread(detector.accept, frame):
-                self._wake_pending.add(satellite_id)
         segmenter = self._segmenters.get(satellite_id)
         if segmenter is None:
             segmenter = self.segmenter_factory()
@@ -669,13 +657,12 @@ class SatelliteAudioRuntime:
         if segment is None:
             return None
         scope_id = self._scope_id(room_id)
-        has_wake = wake_detected or satellite_id in self._wake_pending
+        has_wake = wake_detected
         # Turn gate: while another satellite owns an in-flight turn (through
         # the end of its response playback) this microphone is off.  The
         # winning satellite's own segments pass so follow-ups and direct
         # interruptions keep working.
         if self._arbiter.is_gated(scope_id, satellite_id):
-            self._wake_pending.discard(satellite_id)
             await self._record_monitor(
                 "segment_suppressed",
                 satelliteId=satellite_id,
@@ -691,7 +678,6 @@ class SatelliteAudioRuntime:
         elected = await self._election.elect(
             satellite_id, segment, wake_detected=has_wake, room_id=room_id, scope_id=scope_id
         )
-        self._wake_pending.discard(satellite_id)
         if not elected:
             await self._record_monitor(
                 "segment_suppressed",

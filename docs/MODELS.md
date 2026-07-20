@@ -14,7 +14,7 @@ Selection is finalized only after the simultaneous Iridium benchmark.
 | TTS quality candidate | Qwen3-TTS 12Hz 1.7B CustomVoice | qwen-tts, BF16 where supported | streaming, direct emotion/prosody instructions, stronger English content-consistency results than 0.6B |
 | TTS selected on Iridium | Qwen3-TTS 12Hz 0.6B CustomVoice | vLLM-Omni 0.24, FP16 + Turing compatibility patch | true async PCM chunks from the unchanged checkpoint; warm short-phrase first audio measured at 206–266 ms |
 | TTS blind challenger | current Chatterbox V3 and original English Chatterbox | pinned upstream runtime | independent naturalness comparison; deploy only if measured emotion control, latency, and residency win |
-| Wake | optional Beemo openWakeWord model | ONNX/TFLite on CPU | transcript-first matching is always available; add an acoustic model after Beemo tuning |
+| Wake | transcript-first matching (no acoustic model) | in-process | wake words are matched in ASR transcripts; the openWakeWord acoustic chain was removed as unused |
 
 This is a pre-deployment bake-off, not a runtime ensemble. Exactly one LLM, one
 STT, and one TTS are pinned after testing. Qwen3-TTS's 0.6B model card reports
@@ -27,11 +27,11 @@ pin in production without tests. Benchmark Transformers-only STT candidates in
 an isolated environment; prefer the NeMo runtime for an STT selected to share
 the production PyTorch process with Qwen TTS. Install only the compatible winner.
 
-The previous household asset was `hey_nova.tflite`, not ONNX. The legacy
-`tflite-runtime` dependency has no Python 3.12 Linux wheel, so Nova Voice maps
-openWakeWord's interpreter import to Google's current `ai-edge-litert` package.
-This preserves the existing trained model without downgrading Python, loading a
-second wake model, or adding a legacy sidecar process.
+Wake detection is transcript-first only: the configured wake words are matched
+in streaming ASR output. The optional openWakeWord/TFLite acoustic wake chain
+(and the legacy `hey_nova.tflite` asset) was removed after it went unused in
+production; see `docs/CUSTOM-WAKE-WORDS.md` for the custom-wake-word options
+that replace it.
 
 ## Why these models
 
@@ -168,7 +168,6 @@ GPU starvation between simultaneous streams.
 - Nemotron 3.5 ASR model card: https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b
 - Parakeet TDT 0.6B v3 card: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 - llama.cpp JSON Schema/GBNF: https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md
-- openWakeWord: https://github.com/dscripka/openWakeWord
 - Pipecat WebSocket transport: https://docs.pipecat.ai/api-reference/client/js/transports/websocket
 - Apple LaunchAgents and `KeepAlive`: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
 - Apple modern helper registration: https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos

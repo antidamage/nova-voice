@@ -28,7 +28,7 @@ printf '%s\n' '--- audio ---'
 (pactl list short sources; pactl list short sinks) 2>/dev/null || true
 (wpctl status) 2>/dev/null || true
 printf '%s\n' '--- services and listeners ---'
-systemctl --no-pager --plain list-units --type=service --state=running | grep -Ei 'nova|voice|llama|wyoming' || true
+systemctl --no-pager --plain list-units --type=service --state=running | grep -Ei 'nova|voice|llama' || true
 ss -ltnp | grep -E '8765|8766' || true
 printf '%s\n' '--- network names ---'
 # Peer host names are passed as arguments; see PRIVATEREF.md#1 for the set.

@@ -31,7 +31,6 @@ def test_development_defaults_do_not_enable_audio_or_passive_execution() -> None
     assert settings.conversation_idle_seconds == 60
     assert settings.denoise_base_url == "http://127.0.0.1:8092"
     assert settings.playback_preroll_ms == 700
-    assert settings.wake_model_path is None
 
 
 def test_lan_binding_requires_mutual_tls() -> None:
