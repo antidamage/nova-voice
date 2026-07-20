@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 from typing import Any
@@ -9,7 +10,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from nova_voice.audio.conversation import ConversationSnapshot
-from nova_voice.domain import ActiveGoal, Interpretation, ToolResult, Utterance
+from nova_voice.domain import (
+    ActiveGoal,
+    Interpretation,
+    SelfProfileUpdate,
+    ToolResult,
+    Utterance,
+)
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
     bounded_long_reply,
@@ -17,6 +24,8 @@ from nova_voice.interpretation.response_length import (
     spoken_word_count,
 )
 from nova_voice.interpretation.speech_cues import has_explicit_self_intention
+
+logger = logging.getLogger(__name__)
 
 _TIME_RELEVANCE = re.compile(
     r"\b(?:time\s+is\s+it|current\s+time|what(?:'s|\s+is)\s+the\s+time|"
@@ -95,14 +104,12 @@ Critical distinctions:
 - Persona/tone never changes the requested action.
 - utterance.speaker describes only the current acoustic turn. A recognized profile may
   personalize the reply; an unknown speaker must never inherit identity from conversation history.
-- Set selfProfileUpdate only for an explicit first-person disclosure in this exact utterance
-  (for example "my name is Addie", "call me Addie", or "I use she/her pronouns"). Copy a
-  verbatim supporting phrase into evidence. Never infer a name or pronouns from voice,
-  grammar, stereotypes, another person's statement, quoted/media speech, or prior turns.
+- Always set selfProfileUpdate to null. A separate current-turn identity extractor owns
+  name/pronoun disclosure detection and securely binds accepted values to the voice template.
 - You have a local speaker-profile capability that can remember a person's explicitly stated
   name and pronouns against their voice. If someone asks how to correct either value, explain
   that they can tell you directly, for example "call me Addie" or "I use she/her pronouns".
-  Treat a correction as selfProfileUpdate under the same exact-current-utterance rules above.
+  The separate identity extractor handles any correction; keep selfProfileUpdate null here.
 - Never invent provider names, tool names, entity IDs, services, rooms, or success.
 - In each action, copy call.tool exactly from semanticTools.function.name, including namespace.
 - Return zero to four actions. Dependencies refer only to earlier action IDs.
@@ -133,6 +140,23 @@ Decision mapping:
 Return only the JSON object described by the response schema.
 """
 
+IDENTITY_DISCLOSURE_PROMPT = """You are a narrow identity-disclosure extractor.
+Inspect only the supplied current-turn transcript. Decide whether the current speaker
+explicitly states or corrects their own name, their own pronouns, or both.
+
+Rules:
+- Accept first-person disclosures such as "my name is Adeline", "call me Addie",
+  "I go by Adeline", "my pronouns are she her", or "I use she/her pronouns".
+- Never infer identity from voice, grammar, stereotypes, prior turns, or assistant context.
+- Reject names/pronouns said about another person, quoted text, examples, media dialogue,
+  questions about how profiles work, and requests that do not themselves disclose a value.
+- evidence must be one exact contiguous substring copied verbatim from the transcript.
+- Normalize pronouns to slash form when the speaker says separators aloud: "she her" and
+  "she and her" both become "she/her". Preserve explicitly supplied forms otherwise.
+- If neither value is explicitly disclosed, return disclosed=false with all other fields null.
+- If disclosed=true, include at least one of name or pronouns and include exact evidence.
+Return only the JSON object described by the response schema."""
+
 
 class InterpretationError(RuntimeError):
     pass
@@ -142,6 +166,26 @@ class RenderedResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=500)
+
+
+class IdentityDisclosure(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    disclosed: bool
+    name: str | None
+    pronouns: str | None
+    evidence: str | None
+
+    def profile_update(self) -> SelfProfileUpdate | None:
+        if not self.disclosed or (self.name is None and self.pronouns is None):
+            return None
+        if not self.evidence:
+            return None
+        return SelfProfileUpdate(
+            name=self.name,
+            pronouns=self.pronouns,
+            evidence=self.evidence,
+        )
 
 
 class LlamaCppInterpreter(Interpreter):
@@ -176,6 +220,47 @@ class LlamaCppInterpreter(Interpreter):
             timeout=timeout_seconds,
             transport=transport,
         )
+
+    async def extract_self_profile_update(
+        self, utterance: Utterance
+    ) -> SelfProfileUpdate | None:
+        """Run a small context-free pass for this turn's identity disclosure."""
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": IDENTITY_DISCLOSURE_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"transcript": utterance.transcript}, separators=(",", ":")
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 120,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_identity_disclosure",
+                    "strict": True,
+                    "schema": IdentityDisclosure.model_json_schema(),
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            return IdentityDisclosure.model_validate_json(content).profile_update()
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Identity learning is best-effort and must never take down the
+            # household's normal interpretation/reply path.
+            logger.warning("identity disclosure extraction unavailable: %s", error)
+            return None
 
     async def interpret(
         self,

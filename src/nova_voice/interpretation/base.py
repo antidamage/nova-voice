@@ -4,10 +4,28 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from nova_voice.audio.conversation import ConversationSnapshot
-from nova_voice.domain import ActiveGoal, Interpretation, ToolResult, Utterance
+from nova_voice.domain import (
+    ActiveGoal,
+    Interpretation,
+    SelfProfileUpdate,
+    ToolResult,
+    Utterance,
+)
 
 
 class Interpreter(ABC):
+    async def extract_self_profile_update(
+        self, utterance: Utterance
+    ) -> SelfProfileUpdate | None:
+        """Extract an explicit current-speaker name/pronoun disclosure.
+
+        Backends may implement this as a small independent model pass. Keeping
+        the default empty lets deterministic/test interpreters opt out without
+        coupling identity persistence to the general interpretation schema.
+        """
+
+        return None
+
     @abstractmethod
     async def interpret(
         self,

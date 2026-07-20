@@ -16,6 +16,7 @@ from nova_voice.domain import (
     ToolResult,
 )
 from nova_voice.interpretation.llama_cpp import (
+    IDENTITY_DISCLOSURE_PROMPT,
     SYSTEM_PROMPT,
     LlamaCppInterpreter,
     bounded_long_reply,
@@ -30,6 +31,73 @@ def test_interpretation_prompt_explains_speaker_profile_corrections() -> None:
     assert "local speaker-profile capability" in SYSTEM_PROMPT
     assert '"call me Addie"' in SYSTEM_PROMPT
     assert '"I use she/her pronouns"' in SYSTEM_PROMPT
+    assert "Always set selfProfileUpdate to null" in SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_dedicated_identity_pass_extracts_only_the_current_transcript(
+    utterance,
+) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "disclosed": True,
+                                    "name": "Adeline",
+                                    "pronouns": "she/her",
+                                    "evidence": (
+                                        "my name is Adeline and my pronouns are she her"
+                                    ),
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    spoken = utterance.model_copy(
+        update={
+            "transcript": (
+                "By the way, my name is Adeline and my pronouns are she her"
+            )
+        }
+    )
+
+    update = await interpreter.extract_self_profile_update(spoken)
+
+    assert update == SelfProfileUpdate(
+        name="Adeline",
+        pronouns="she/her",
+        evidence="my name is Adeline and my pronouns are she her",
+    )
+    assert len(requests) == 1
+    payload = requests[0]
+    assert payload["response_format"]["json_schema"]["name"] == (
+        "nova_identity_disclosure"
+    )
+    assert payload["max_tokens"] == 120
+    assert payload["messages"][0]["content"] == IDENTITY_DISCLOSURE_PROMPT
+    assert json.loads(payload["messages"][1]["content"]) == {
+        "transcript": spoken.transcript
+    }
+    assert len(payload["messages"]) == 2
+
+    await interpreter.close()
 
 
 @pytest.mark.asyncio

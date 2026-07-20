@@ -28,13 +28,25 @@ from nova_voice.service import (
 
 
 class _Interpreter(Interpreter):
-    def __init__(self, value, *, rendered: str | None = None) -> None:
+    def __init__(
+        self,
+        value,
+        *,
+        rendered: str | None = None,
+        profile_update: SelfProfileUpdate | None = None,
+    ) -> None:
         self.value = value
         self.rendered = rendered
+        self.profile_update = profile_update
         self.contexts: list[dict[str, Any]] = []
         self.conversations = []
         self.active_goals = []
         self.render_calls: list[dict[str, Any]] = []
+        self.profile_calls = []
+
+    async def extract_self_profile_update(self, utterance):
+        self.profile_calls.append(utterance)
+        return self.profile_update
 
     async def interpret(
         self,
@@ -253,12 +265,17 @@ def test_explicit_profile_fallback_extracts_clear_addressed_identity_claims() ->
         ["Nova"],
     )
     introduction = explicit_self_profile_update("Nova, this is Adeline speaking", ["Nova"])
+    conversational = explicit_self_profile_update(
+        "By the way, my name is Adeline and my pronouns are she her", ["Nova"]
+    )
 
     assert combined is not None
     assert combined.name == "Addie"
     assert combined.pronouns == "she/her"
     assert introduction is not None
     assert introduction.name == "Adeline"
+    assert conversational is not None
+    assert conversational.name == "Adeline"
 
 
 @pytest.mark.parametrize(
@@ -431,16 +448,20 @@ async def test_unaddressed_ambient_speech_is_classified_but_not_retained(utteran
 
 @pytest.mark.asyncio
 async def test_current_addressed_self_disclosure_updates_current_speaker(utterance) -> None:
-    value = interpretation(decision=Decision.REPLY).model_copy(
-        update={
-            "self_profile_update": SelfProfileUpdate(
-                name="Addie",
-                pronouns="she/her",
-                evidence="my name is Addie and I use she/her",
-            )
-        }
+    profile_update = SelfProfileUpdate(
+        name="Addie",
+        pronouns="she/her",
+        evidence="my name is Addie and I use she/her",
     )
-    interpreter = _Interpreter(value, rendered="Nice to meet you.")
+    value = interpretation(
+        decision=Decision.REPLY,
+        speech_act=SpeechAct.SELF_INTENTION,
+    )
+    interpreter = _Interpreter(
+        value,
+        rendered="Nice to meet you.",
+        profile_update=profile_update,
+    )
     provider = _Provider()
     store = _Store()
     profiles = _SpeakerProfiles()
@@ -466,8 +487,57 @@ async def test_current_addressed_self_disclosure_updates_current_speaker(utteran
     await service.handle(spoken)
 
     assert len(profiles.calls) == 1
+    assert interpreter.profile_calls == [spoken]
     assert store.saved[0][0].speaker.display_name == "Addie"
     assert interpreter.render_calls[0]["utterance"].speaker.person_id == "person-a"
+    assert interpreter.render_calls[0]["interpretation"].self_profile_update == (
+        profile_update
+    )
+
+
+@pytest.mark.asyncio
+async def test_dedicated_identity_result_replaces_general_interpreter_value(
+    utterance,
+) -> None:
+    stale = SelfProfileUpdate(name="Wrong", evidence="my name is Wrong")
+    extracted = SelfProfileUpdate(
+        name="Adeline",
+        pronouns="she/her",
+        evidence="my name is Adeline and my pronouns are she her",
+    )
+    value = interpretation(
+        decision=Decision.REPLY,
+        speech_act=SpeechAct.SELF_INTENTION,
+    ).model_copy(update={"self_profile_update": stale})
+    interpreter = _Interpreter(value, profile_update=extracted)
+    profiles = _SpeakerProfiles()
+    provider = _Provider()
+    store = _Store()
+    service = NovaVoiceService(
+        Settings(),
+        interpreter,
+        _Registry(provider),
+        provider,
+        store,
+        _Persona(),
+        speaker_profiles=profiles,
+    )
+    spoken = utterance.model_copy(
+        update={
+            "conversation_active": True,
+            "transcript": (
+                "By the way, my name is Adeline and my pronouns are she her"
+            ),
+            "speaker": SpeakerIdentity(
+                status="provisional", template_id="voice-a", confidence=0.83
+            ),
+        }
+    )
+
+    result = await service.handle(spoken)
+
+    assert profiles.calls == [(spoken.speaker, extracted, spoken.transcript)]
+    assert result.interpretation.self_profile_update == extracted
 
 
 @pytest.mark.asyncio

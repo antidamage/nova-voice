@@ -44,6 +44,52 @@ def test_delayed_claim_promotes_after_three_consistent_samples(tmp_path) -> None
     assert third.pronouns == "she/her"
 
 
+def test_spoken_pronouns_are_normalized_and_bound_with_the_name(tmp_path) -> None:
+    store = SpeakerProfileStore(
+        tmp_path / "voice.sqlite3",
+        activation_samples=1,
+    )
+    store.initialize_sync()
+    identity = store.recognize_sync(embedding(1, 0, 0))
+
+    recognized = store.apply_disclosure_sync(
+        identity,
+        SelfProfileUpdate(
+            name="Adeline",
+            pronouns="she/her",
+            evidence="my name is Adeline and my pronouns are she her",
+        ),
+        "By the way, my name is Adeline and my pronouns are she her",
+    )
+
+    assert recognized.status == "recognized"
+    assert recognized.display_name == "Adeline"
+    assert recognized.pronouns == "she/her"
+
+
+def test_unsupported_pronoun_claim_does_not_veto_valid_name(tmp_path) -> None:
+    store = SpeakerProfileStore(
+        tmp_path / "voice.sqlite3",
+        activation_samples=1,
+    )
+    store.initialize_sync()
+    identity = store.recognize_sync(embedding(1, 0, 0))
+
+    recognized = store.apply_disclosure_sync(
+        identity,
+        SelfProfileUpdate(
+            name="Addie",
+            pronouns="she/her",
+            evidence="my name is Addie",
+        ),
+        "Hey Football, my name is Addie. Your name is Football.",
+    )
+
+    assert recognized.status == "recognized"
+    assert recognized.display_name == "Addie"
+    assert recognized.pronouns is None
+
+
 def test_conversation_affinity_activates_claim_despite_large_turn_variance(tmp_path) -> None:
     store = SpeakerProfileStore(tmp_path / "voice.sqlite3")
     store.initialize_sync()
