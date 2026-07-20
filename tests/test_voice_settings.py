@@ -4,11 +4,21 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from nova_voice.agent_settings import AgentSettings
 from nova_voice.api import create_app
 from nova_voice.config import Settings
 from nova_voice.domain import Emotion, EmotionLabel
 from nova_voice.persona import Persona
 from nova_voice.voice_settings import VoiceAccent, VoiceSettings, VoiceSpeaker
+
+
+def test_speaker_recognition_defaults_on_and_can_be_disabled() -> None:
+    assert VoiceSettings().speaker_recognition_enabled is True
+    assert (
+        VoiceSettings.model_validate({"speakerRecognitionEnabled": False})
+        .speaker_recognition_enabled
+        is False
+    )
 
 
 def test_dashboard_voice_contract_compiles_deterministic_tts_instructions() -> None:
@@ -90,9 +100,13 @@ class _Service:
     def __init__(self, client: _DashboardClient) -> None:
         self.nova_provider = _Provider(client)
         self.applied: VoiceSettings | None = None
+        self.applied_agent: AgentSettings | None = None
 
     def apply_voice_settings(self, settings: VoiceSettings) -> None:
         self.applied = settings
+
+    def apply_agent_settings(self, settings: AgentSettings) -> None:
+        self.applied_agent = settings
 
 
 class _Audio:
@@ -128,10 +142,13 @@ async def test_refresh_signal_fetches_then_applies_nova_voice_settings() -> None
     app = create_app(Settings(), service=service, audio_runtime=audio)
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="https://voice-server.test") as session:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://voice-server.test"
+    ) as session:
         response = await session.post("/v1/settings/refresh")
 
     assert response.status_code == 200
+    assert response.json()["agent"]["ralphLoopEnabled"] is True
     assert response.json()["voice"]["speaker"] == "Sohee"
     assert client.collections == 1
     assert service.applied is not None and service.applied.speech_rate == 90
@@ -140,9 +157,30 @@ async def test_refresh_signal_fetches_then_applies_nova_voice_settings() -> None
     assert service.applied.wake_words == ["beemo", "bimo", "beamoh"]
     assert service.applied.wake_prefix_list() == ["yo", "hey", "ok"]
     assert service.applied.personality == "You are a dry, deadpan butler."
+    assert service.applied_agent == AgentSettings()
     assert audio.applied is not None and audio.applied.language.value == "Korean"
     assert audio.applied.volume_day == 85
     assert audio.applied.volume_night == 25
+
+
+def test_agent_settings_contract_is_bounded_and_uses_dashboard_aliases() -> None:
+    settings = AgentSettings.model_validate(
+        {
+            "ralphLoopEnabled": False,
+            "ralphLoopMaxIterations": 7,
+            "ralphLoopSleepMs": 300,
+            "ralphLoopFailureSeconds": 12,
+        }
+    )
+
+    assert not settings.ralph_loop_enabled
+    assert settings.ralph_loop_max_iterations == 7
+    assert settings.model_dump(mode="json", by_alias=True)["ralphLoopSleepMs"] == 300
+
+    with pytest.raises(ValidationError):
+        AgentSettings.model_validate({"ralphLoopMaxIterations": 0})
+    with pytest.raises(ValidationError):
+        AgentSettings.model_validate({"ralphLoopSleepMs": 350})
 
 
 def test_voice_contract_rejects_off_step_volumes_and_oversized_personality() -> None:
@@ -164,6 +202,29 @@ def test_voice_settings_keeps_current_temperature_scale_and_migrates_legacy_valu
 
     assert settings.temperature == 5
     assert legacy_settings.temperature == 1
+
+
+def test_display_name_allows_emoji_and_spoken_name_uses_pronunciation() -> None:
+    # The display name accepts emoji/symbols (dashboard branding).
+    settings = VoiceSettings.model_validate(
+        {"agentName": "✨ Nova 🤖", "agentNamePronunciation": "Nova"}
+    )
+    assert settings.agent_name == "✨ Nova 🤖"
+    assert settings.agent_name_pronunciation == "Nova"
+    # The spoken/ASR-facing identity comes from the pronunciation.
+    assert settings.spoken_name == "Nova"
+
+
+def test_spoken_name_falls_back_to_display_name_without_pronunciation() -> None:
+    # Existing installs with no pronunciation keep their old spoken name.
+    settings = VoiceSettings.model_validate({"agentName": "Bandit"})
+    assert settings.agent_name_pronunciation == ""
+    assert settings.spoken_name == "Bandit"
+    # Blank/whitespace pronunciation is treated as "unset".
+    blanked = VoiceSettings.model_validate(
+        {"agentName": "Bandit", "agentNamePronunciation": "   "}
+    )
+    assert blanked.spoken_name == "Bandit"
 
 
 def test_beemo_variants_are_the_default_wake_words() -> None:
@@ -212,3 +273,34 @@ def test_satellite_rooms_are_normalized_and_forgiving() -> None:
 
     assert VoiceSettings().satellite_rooms == {}
     assert VoiceSettings.model_validate({"satelliteRooms": None}).satellite_rooms == {}
+
+
+def test_pronouns_default_to_neutral_and_are_forgiving() -> None:
+    assert VoiceSettings().pronouns.slash_form == "they/them/theirs"
+
+    # Casefolded and trimmed; a blank or non-string form falls back per field
+    # without failing the whole settings parse.
+    settings = VoiceSettings.model_validate(
+        {"pronouns": {"subjective": " She ", "objective": 7, "possessive": ""}}
+    )
+    assert settings.pronouns.subjective == "she"
+    assert settings.pronouns.objective == "them"
+    assert settings.pronouns.possessive == "theirs"
+
+    assert (
+        VoiceSettings.model_validate({"pronouns": None}).pronouns.slash_form
+        == "they/them/theirs"
+    )
+
+
+def test_pronoun_instruction_labels_each_grammatical_form() -> None:
+    instruction = VoiceSettings.model_validate(
+        {"pronouns": {"subjective": "xe", "objective": "xem", "possessive": "xyrs"}}
+    ).pronoun_instruction()
+    assert "xe/xem/xyrs" in instruction
+    assert "subjective 'xe'" in instruction
+    assert "objective 'xem'" in instruction
+    assert "possessive 'xyrs'" in instruction
+    assert "'I' is a valid pronoun for you" in instruction
+    assert "first-person pronouns 'I', 'me', and 'my'" in instruction
+    assert "Your third-person pronouns are" in instruction

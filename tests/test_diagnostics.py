@@ -24,6 +24,7 @@ from nova_voice.domain import (
     HandleResult,
     Interpretation,
     ResponsePlan,
+    SpeakerIdentity,
     SpeechAct,
 )
 from nova_voice.monitor import VoiceMonitor
@@ -395,6 +396,59 @@ class ConversationService(FakeService):
         self.conversations.end(room_id)
 
 
+class RecordingSpeakerRecognizer:
+    def __init__(self) -> None:
+        self.preferred_template_ids: list[str | None] = []
+
+    async def extract(self, _pcm16: bytes, *, duration_ms: int):
+        assert duration_ms > 0
+        return object()
+
+    async def resolve(
+        self,
+        _embedding,
+        *,
+        eligible: bool,
+        preferred_template_id: str | None = None,
+    ) -> SpeakerIdentity:
+        assert eligible
+        self.preferred_template_ids.append(preferred_template_id)
+        return SpeakerIdentity(
+            status="provisional",
+            template_id=preferred_template_id or "voice-a",
+            confidence=0.9,
+        )
+
+
+async def test_runtime_reuses_the_conversation_speaker_template_on_followups() -> None:
+    conversations = ConversationTracker()
+    service = ConversationService(conversations)
+    recognizer = RecordingSpeakerRecognizer()
+    runtime = SatelliteAudioRuntime(
+        service,
+        QueueStt("Bandit, hello", "and how are you"),
+        FakeTts(),
+        lambda: None,
+        conversations=conversations,
+        speaker_recognizer=recognizer,  # type: ignore[arg-type]
+    )
+
+    await runtime.process_pcm(
+        satellite_id="lounge-microphone",
+        room_id="lounge",
+        pcm16=b"\x00\x00" * 16_000,
+        wake_detected=True,
+    )
+    await runtime.process_pcm(
+        satellite_id="lounge-microphone",
+        room_id="lounge",
+        pcm16=b"\x00\x00" * 16_000,
+    )
+
+    assert recognizer.preferred_template_ids == [None, "voice-a"]
+    assert conversations.speaker_template("lounge") == "voice-a"
+
+
 async def test_response_audio_is_room_local_while_speaking_animation_is_global() -> None:
     conversations = ConversationTracker()
     service = ConversationService(conversations)
@@ -437,9 +491,16 @@ async def test_response_audio_is_room_local_while_speaking_animation_is_global()
     assert source_audio == [b"\x01\x00" * 50, b"\x02\x00" * 50]
     assert runtime.speaking_satellite("lounge") is None
     assert [payload["phase"] for payload in announcer.payloads] == ["start", "end"]
-    assert [payload["role"] for payload in announcer.transcripts] == ["user", "assistant"]
+    # A shadowed directive is a dashboard command: the user line is announced
+    # live, then upgraded in place with the [COMMAND] tag once interpretation
+    # completes, and the spoken response carries the same tag.
+    assert [payload["role"] for payload in announcer.transcripts] == ["user", "user", "assistant"]
     assert announcer.transcripts[0]["text"] == "Bandit, hello"
-    assert announcer.transcripts[1]["text"] == "Done"
+    assert "kind" not in announcer.transcripts[0]
+    assert announcer.transcripts[1]["replacesId"] == announcer.transcripts[0]["id"]
+    assert announcer.transcripts[1]["kind"] == "command"
+    assert announcer.transcripts[2]["text"] == "Done"
+    assert announcer.transcripts[2]["kind"] == "command"
     assert all(payload["agentName"] == "Nova" for payload in announcer.transcripts)
     assert all(payload["wakeWords"][0] == "beemo" for payload in announcer.transcripts)
 

@@ -69,7 +69,9 @@ and STT errors. Do not solve the suite with exact-string rules.
 ## Goal closure suite
 
 - one successful light action -> reply, `satisfied`, close
-- failed verification -> `in_progress`, report failure, no duplicate action
+- stale immediate state -> bounded refresh loop observes success, no duplicate action
+- failed verification after either Ralph bound -> `in_progress`, report failure,
+  no duplicate action
 - missing temperature -> `needs_clarification`, keep session open
 - answer delivered with no follow-up question -> close
 - assistant asks a question -> remain open
@@ -127,8 +129,10 @@ would-have-executed false positive on household media/background speech.
 - no loss of negation in the mandatory suite
 - stable interim text never dispatches an action before the final utterance
 - two simultaneous satellites retain independent streaming caches
-- continuous PCM from both primary satellites reaches central VAD; edge silence
-  handling cannot discard a labelled speech segment
+- locally gated PCM from each enabled primary satellite reaches central VAD;
+  pre-roll/tail handling cannot discard a labelled speech segment
+- the dashboard noise-gate bypass switches connected satellites back to
+  continuous 20 ms PCM without a process restart
 
 ## Latency and resource gates
 

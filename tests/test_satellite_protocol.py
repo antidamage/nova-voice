@@ -93,6 +93,7 @@ def test_legacy_satellite_defaults_playback_events_off() -> None:
     )
 
     assert hello.capabilities.playback_events is False
+    assert hello.capabilities.local_vad is False
 
 
 def test_server_closes_the_source_socket_for_legacy_playback_cancellation() -> None:
@@ -108,3 +109,57 @@ def test_server_routes_confirmed_playback_lifecycle_events() -> None:
     assert 'control.get("type") == "playback_started"' in source
     assert 'control.get("type") == "playback_finished"' in source
     assert '"playbackId": self.playback_id' in source
+
+
+def _browser_hello(capture_policy: str = "push-to-talk", supervisor: str = "none") -> dict:
+    return {
+        "protocolVersion": 1,
+        "satelliteId": "web-lounge-tablet",
+        "displayName": "Lounge Tablet",
+        "roomId": "lounge",
+        "client": "browser",
+        "supervisor": supervisor,
+        "capturePolicy": capture_policy,
+        "capabilities": {"microphone": True, "speaker": True, "playbackEvents": True},
+    }
+
+
+def test_browser_hello_accepts_push_to_talk() -> None:
+    hello = SatelliteHello.model_validate(_browser_hello())
+    hello.validate_protocol()
+    assert hello.is_browser
+
+
+def test_browser_hello_accepts_always_capture() -> None:
+    hello = SatelliteHello.model_validate(_browser_hello(capture_policy="always"))
+    hello.validate_protocol()
+
+
+def test_browser_hello_rejects_os_supervisor() -> None:
+    hello = SatelliteHello.model_validate(_browser_hello(supervisor="systemd"))
+    with pytest.raises(ValueError, match="no OS supervisor"):
+        hello.validate_protocol()
+
+
+def test_native_hello_rejects_none_supervisor() -> None:
+    hello = SatelliteHello.model_validate(
+        {
+            "protocolVersion": 1,
+            "satelliteId": "nocturnium",
+            "displayName": "Nocturnium",
+            "roomId": "lounge",
+            "client": "linux-native",
+            "supervisor": "none",
+            "capturePolicy": "always",
+            "capabilities": {},
+        }
+    )
+    with pytest.raises(ValueError, match="OS supervisor"):
+        hello.validate_protocol()
+
+
+def test_server_arms_wake_on_browser_begin_turn() -> None:
+    source = inspect.getsource(api.create_app)
+
+    assert 'control.get("type") == "begin_turn"' in source
+    assert 'turn_signal["wake_armed"] = True' in source

@@ -101,6 +101,28 @@ def test_low_confidence_interpretation_never_executes_passively(utterance) -> No
     assert "confidence" in outcome.reason
 
 
+def test_early_execute_plan_is_deterministically_treated_as_addressed(utterance) -> None:
+    value = interpretation(
+        speech_act=SpeechAct.DIRECTIVE,
+        decision=Decision.EXECUTE,
+        addressed=0.8,
+        confidence=0.9,
+        actions=[action()],
+    )
+
+    normalized = enforce_decision_consistency(
+        utterance,
+        value,
+        addressed_threshold=0.55,
+    )
+
+    assert normalized.addressed_probability == 1.0
+    settings = Settings(shadow_mode=False, passive_execution_enabled=True)
+    outcome = ExecutionPolicy(settings).evaluate(utterance, normalized, session_active=False)
+    assert outcome.execute
+    assert outcome.reason == "allowed"
+
+
 @pytest.mark.parametrize(
     "transcript",
     [

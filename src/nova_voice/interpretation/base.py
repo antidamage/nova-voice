@@ -27,7 +27,10 @@ class Interpreter(ABC):
         *,
         persona: str,
         environment: dict[str, Any] | None = None,
+        relevant_state: dict[str, Any] | None = None,
         conversation: ConversationSnapshot | None = None,
+        temperature: float | None = None,
+        command_max_words: int | None = None,
     ) -> str | None:
         return None
 

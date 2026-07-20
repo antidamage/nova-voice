@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${LLM_BENCHMARK_ROOT:-/opt/llm-benchmark}"
+RESULTS_DIR="${LLM_BENCHMARK_RESULTS_DIR:-/var/lib/llm-benchmark/results}"
+MODELS_FILE="${LLM_BENCHMARK_MODELS_FILE:-$ROOT/config/models.yml}"
+export HOME="${LLM_BENCHMARK_CLIENT_HOME:-/var/lib/llm-benchmark/client}"
+export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11435}"
+
+if ! curl -fsS "$OLLAMA_HOST/api/version" >/dev/null; then
+  echo "Benchmark Ollama is unavailable at $OLLAMA_HOST" >&2
+  echo "Start it with: sudo systemctl start llm-benchmark-ollama.service" >&2
+  exit 1
+fi
+
+cd "$RESULTS_DIR"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  exec "$ROOT/venv/bin/llm_benchmark" run --help
+fi
+
+if (( $# == 0 )); then
+  set -- --custombenchmark "$MODELS_FILE"
+fi
+
+# Keep hardware identifiers and benchmark results local. A custom benchmark
+# also disables upload inside llm-benchmark itself, but retain this explicit
+# guard for every invocation.
+exec "$ROOT/venv/bin/llm_benchmark" run --no-sendinfo "$@"

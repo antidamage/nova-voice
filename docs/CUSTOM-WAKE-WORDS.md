@@ -43,17 +43,32 @@ decoding config (`rnnt_decoding.strategy="greedy_batch"` plus a
 change, so it composes with the dashboard `wakeWords` list at settings-refresh
 time.
 
-## Integration sketch
+## Implementation (live)
 
-1. On startup and on `/v1/settings/refresh`, take the dashboard `wakeWords`
-   list (plus the agent display name), build the boosting-tree config, and
-   call `change_decoding_strategy` on the loaded model inside the GPU
-   execution gate.
-2. Nothing else changes: `WakePhraseMatcher` already accepts the boosted
-   spellings, and boosted transcripts flow to the LLM unchanged, which covers
-   conversational recognition too.
-3. Keep the alias list (`bimo`, `bemo`, `beamo`…) — boosting shifts
+This is now implemented, not a sketch:
+
+1. `NemoSpeechToText.set_boosted_phrases` (`src/nova_voice/inference/stt.py`)
+   rebuilds `greedy.boosting_tree` + `greedy.boosting_tree_alpha` via
+   `change_decoding_strategy` under the GPU execution gate, clearing live
+   stream state so old hypotheses cannot seed the replaced decoder. A Triton
+   kernel failure falls back to the pure-PyTorch tree; any rebuild failure
+   leaves the previous decoding instance serving un-boosted and surfaces in
+   `/health` under `stt.contextBiasing.error`.
+2. `SatelliteAudioRuntime.apply_voice_settings` boosts the dashboard
+   `wakeWords` plus the agent name on startup and on every settings refresh.
+   `boosting_phrase_variants` generates lowercase and capitalized renderings
+   because the model emits punctuation and capitalization.
+3. Config: `NOVA_VOICE_STT_CONTEXT_BIASING_ENABLED` (default true) and
+   `NOVA_VOICE_STT_BOOST_ALPHA` (default 1.0, the shallow-fusion weight).
+4. Keep the alias list (`bimo`, `bemo`, `beamo`…) — boosting shifts
    probability, it does not guarantee one canonical spelling.
+
+Code inspection of the pinned NeMo 2.7.3 resolved the streaming question in
+our favour: `GreedyBatchedRNNTInfer` merges `partial_hypotheses[i].dec_state`
+into a `BatchedLabelLoopingState` whose `fusion_states_list` carries the
+boosting-tree state, and splits it back after each call — so boost state
+persists across cache-aware streaming chunks by design (the checkpoint's
+default strategy is already `greedy_batch` with label looping).
 
 ## Reliability expectations
 

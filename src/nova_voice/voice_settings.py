@@ -121,7 +121,8 @@ def voice_catalog() -> dict:
             "volumeDay": {"min": 0, "max": 100, "step": 5, "default": 100},
             "volumeNight": {"min": 0, "max": 100, "step": 5, "default": 100},
             "conversationIdleSeconds": {"min": 10, "max": 300, "step": 5, "default": 60},
-            "ttsPrerollMs": {"min": 200, "max": 2000, "step": 50, "default": 700},
+            "longResponseProbability": {"min": 0.0, "max": 1.0, "step": 0.05, "default": 0.0},
+            "ttsPrerollMs": {"min": 20, "max": 2000, "step": 10, "default": 700},
             "ttsFrameMs": {"min": 20, "max": 200, "step": 10, "default": 100},
         },
         "wake": {
@@ -136,6 +137,73 @@ def voice_catalog() -> dict:
     }
 
 
+class VoicePronouns(BaseModel):
+    """The agent's third-person pronouns, in the three forms the language model
+    is told to use for itself.
+
+    Each form is stored (and, in the prompt, labelled) by its grammatical role
+    so neo-pronoun sets — where one form cannot be inferred from another — are
+    represented exactly rather than guessed by the model.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    subjective: str = Field(default="they", min_length=1, max_length=20)
+    objective: str = Field(default="them", min_length=1, max_length=20)
+    possessive: str = Field(default="theirs", min_length=1, max_length=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def clean(cls, value: object) -> object:
+        # Be permissive: the dashboard already constrains these to short words,
+        # but a stray/blank/non-string form must never break the settings pull.
+        # Keep only usable strings (casefolded, trimmed, length-capped); any
+        # missing form falls back to its neutral default.
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return value
+        cleaned: dict[str, str] = {}
+        for key in ("subjective", "objective", "possessive"):
+            form = value.get(key)
+            if isinstance(form, str) and form.strip():
+                cleaned[key] = form.strip().casefold()[:20]
+        return cleaned
+
+    @property
+    def slash_form(self) -> str:
+        return f"{self.subjective}/{self.objective}/{self.possessive}"
+
+
+class VoiceAffectations(BaseModel):
+    """Deterministic speech quirks applied to the agent's finished reply text.
+
+    Each flag is a dashboard "Affectations" checkbox saved with the voice
+    personality. The transforms themselves live in ``nova_voice.affectations``
+    and run on the final reply string (spoken and transcribed), not in the
+    language-model prompt, so a quirk applies reliably on every turn.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=_to_camel,
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+    # Drop the first "I"/"we" of each sentence from replies
+    # ("I'm checking the weather" -> "Am checking the weather").
+    pronoun_drop: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def clean(cls, value: object) -> object:
+        # Permissive like pronouns: a stray/malformed value must never break
+        # the settings pull; it just means every quirk is off.
+        if not isinstance(value, dict):
+            return {}
+        return value
+
+
 class VoiceSettings(BaseModel):
     model_config = ConfigDict(
         alias_generator=_to_camel,
@@ -143,13 +211,36 @@ class VoiceSettings(BaseModel):
         extra="ignore",
     )
 
+    # Display name: what the dashboard shows (title bar, transcripts). Emoji and
+    # symbols are allowed, so this is length-bounded only. The spoken/ASR-facing
+    # identity comes from ``spoken_name`` (pronunciation, or this as a fallback).
     agent_name: str = Field(
         default="Nova",
         min_length=1,
         max_length=40,
-        pattern=r"^[\w][\w .'-]{0,39}$",
     )
-    speaker: VoiceSpeaker = VoiceSpeaker.SERENA
+    # Optional plain-text pronunciation of the agent name. Empty means "use the
+    # display name". This is the name the ASR is biased toward, the LLM persona
+    # refers to, and the TTS speaks — see ``spoken_name``.
+    agent_name_pronunciation: str = Field(default="", max_length=40)
+    # System-wide voice killswitch. When false, the voice runtime drops every
+    # incoming microphone frame and immediately closes any open conversation, so
+    # voice is disabled for the entire household until it is turned back on.
+    # Default true preserves existing behaviour.
+    system_voice_enabled: bool = True
+    # Learn local biometric voice templates and use confidently recognized
+    # household profiles for conversational personalization.
+    speaker_recognition_enabled: bool = True
+    # Per-satellite killswitch: satellite ids whose microphone frames the runtime
+    # drops. A soft, instant off-switch for a single satellite while testing other
+    # devices — the process keeps running (no SSH stop, no fighting its watchdog).
+    # Nocturnium is muted by default so a fresh/reset config processes only the
+    # primary Indium microphone. An explicit empty list enables every satellite.
+    disabled_satellites: list[str] = Field(default_factory=lambda: ["nocturnium"])
+    # Global live override for the native satellites' local transport gate.
+    # False is a diagnostic mode that streams every captured frame.
+    satellite_noise_gate_enabled: bool = True
+    speaker: VoiceSpeaker = VoiceSpeaker.RYAN
     language: VoiceLanguage = VoiceLanguage.ENGLISH
     accent: VoiceAccent = VoiceAccent.NEW_ZEALAND
     speech_rate: int = Field(default=100, ge=70, le=130, multiple_of=5)
@@ -159,6 +250,15 @@ class VoiceSettings(BaseModel):
     # LLM sampling temperature for the spoken-response renderer.  Zero keeps
     # replies deterministic (and TTS-cacheable); higher values add variety.
     temperature: float = Field(default=0.0, ge=0.0, le=5.0)
+    # Chance (0-1) that a conversational reply is rendered long-form (two to
+    # four sentences) instead of the standard single sentence. Rolled per
+    # response; zero keeps every reply short.
+    long_response_probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Maximum spoken-word length of a verified command acknowledgement. The
+    # actual length is rolled fresh per reply as a random value in [0, this], so
+    # zero yields a silent acknowledgement and higher values allow a short,
+    # varied phrase instead of a fixed one-word confirmation.
+    command_reply_max_words: int = Field(default=3, ge=0, le=10)
     # Accepted transcript spellings for the spoken wake phrase. Keeping ASR
     # near-misses explicit makes the matching surface visible and tunable.
     wake_words: list[str] = Field(
@@ -180,13 +280,19 @@ class VoiceSettings(BaseModel):
     # absorbing short TTS/network scheduling bursts. Lower values start audio
     # sooner at the cost of headroom against a stutter; live health reports
     # the pacing deficit so this can be tuned from evidence.
-    tts_preroll_ms: int = Field(default=700, ge=200, le=2000, multiple_of=50)
+    tts_preroll_ms: int = Field(default=700, ge=20, le=2000, multiple_of=10)
     # Steady-state audio frame size sent to satellites once the fast-start
     # first chunk has gone out.
     tts_frame_ms: int = Field(default=100, ge=20, le=200, multiple_of=10)
     # Operator-authored personality description appended to the interpretation
     # and response-rendering system prompts.  Empty string disables it.
     personality: str = Field(default="You are a bright, bubbly helper!", max_length=2000)
+    # The agent's third-person pronouns, passed to the language model so it
+    # refers to itself correctly. Part of a saved voice personality.
+    pronouns: VoicePronouns = Field(default_factory=VoicePronouns)
+    # Deterministic speech quirks (dashboard "Affectations" checkboxes) applied
+    # to the finished reply text. Part of a saved voice personality.
+    affectations: VoiceAffectations = Field(default_factory=VoiceAffectations)
     # Dashboard-configured satellite room assignments (satellite id -> room
     # id).  The dashboard roster is authoritative: a satellite's own env-file
     # room can be reset by redeploys and is only a fallback.
@@ -243,6 +349,42 @@ class VoiceSettings(BaseModel):
                 rooms[satellite] = room
         return rooms
 
+    @field_validator("disabled_satellites", mode="before")
+    @classmethod
+    def normalize_disabled_satellites(cls, value: object) -> object:
+        # Permissive: a malformed value must never break the settings pull. It
+        # falls back to the safe single-mic default; an explicit empty list still
+        # enables every satellite. Ids are casefolded and de-duplicated in order.
+        if not isinstance(value, (list, tuple)):
+            return ["nocturnium"]
+        seen: dict[str, None] = {}
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                seen.setdefault(item.strip().casefold(), None)
+        return list(seen)
+
+    @field_validator("agent_name_pronunciation", mode="before")
+    @classmethod
+    def normalize_pronunciation(cls, value: object) -> object:
+        # Be permissive on input: coerce None/blank to "" and trim. The dashboard
+        # already constrains this to plain text; a stray value must never break
+        # the settings pull.
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @property
+    def spoken_name(self) -> str:
+        """The plain, spoken/ASR-facing agent name.
+
+        Uses the explicit pronunciation when set, otherwise falls back to the
+        display name (unchanged behaviour for installs without a pronunciation).
+        """
+
+        return self.agent_name_pronunciation.strip() or self.agent_name
+
     @field_validator("temperature", mode="before")
     @classmethod
     def normalize_legacy_temperature(cls, value: object) -> object:
@@ -269,6 +411,22 @@ class VoiceSettings(BaseModel):
     @property
     def emotion_mirroring_strength(self) -> float:
         return self.emotion_mirroring / 100
+
+    def pronoun_instruction(self) -> str:
+        """A one-line instruction telling the model its own pronouns.
+
+        Each form is labelled by grammatical role so neo-pronoun sets are used
+        correctly rather than inferred from an assumed common set.
+        """
+
+        p = self.pronouns
+        return (
+            "'I' is a valid pronoun for you. When speaking about yourself, use the "
+            "first-person pronouns 'I', 'me', and 'my'. "
+            f"Your third-person pronouns are {p.slash_form}: subjective '{p.subjective}', "
+            f"objective '{p.objective}', possessive '{p.possessive}'; these forms are only for "
+            "when the user or someone else refers to you."
+        )
 
     def style_instruction(self) -> str:
         # Pitch is deliberately absent: the TTS model ignores pitch

@@ -40,6 +40,22 @@ ABANDONMENT_PHRASES = frozenset(
         "that'll be all",
         "we're done",
         "we are done",
+        # Direct dismissals that must close the conversation, not just barge in
+        # on the current reply.  "shut up"/"be quiet"/"stop talking" also match
+        # SPEECH_INTERRUPT (playback barge-in); listing them here additionally
+        # ends the conversation on the turn-handling path, including when a wake
+        # word opened it in the same breath ("beemo, be quiet").
+        "be quiet",
+        "quiet",
+        "shut up",
+        "shut it",
+        "stop talking",
+        "goodbye",
+        "good bye",
+        "bye",
+        "bye bye",
+        "goodnight",
+        "good night",
     }
 )
 # Greeting/courtesy tokens that may wrap an abandonment without changing it.
@@ -167,6 +183,20 @@ def enforce_decision_consistency(
     """
 
     if utterance.conversation_active and interpretation.addressed_probability < 1:
+        interpretation = interpretation.model_copy(update={"addressed_probability": 1.0})
+
+    # An executable direct command is itself proof of address. The structured
+    # early pass has already classified the speech act, selected ``execute``,
+    # and produced a bounded action plan. Letting a second model-authored score
+    # veto that result made clear passive commands fail unless a wake word first
+    # opened a conversation. Negative/quoted/self-intention speech is repaired
+    # before this function or rejected by deterministic execution policy.
+    if (
+        interpretation.decision == Decision.EXECUTE
+        and interpretation.actions
+        and interpretation.speech_act in {SpeechAct.DIRECTIVE, SpeechAct.DESIRED_STATE}
+        and interpretation.addressed_probability < 1
+    ):
         interpretation = interpretation.model_copy(update={"addressed_probability": 1.0})
 
     # The compact model sometimes uses an abandoned goal to mean "this social

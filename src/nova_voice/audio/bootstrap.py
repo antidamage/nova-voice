@@ -11,6 +11,7 @@ from nova_voice.audio.segmenter import SileroVad, SpeechSegmenter
 from nova_voice.audio.vocab import SimplifiedEnglishGate
 from nova_voice.config import Settings
 from nova_voice.inference.scheduler import GpuExecutionGate
+from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import NemoSpeechToText
 from nova_voice.inference.tts import QwenTextToSpeech, VllmQwenTextToSpeech
 from nova_voice.service import NovaVoiceService
@@ -22,6 +23,9 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
         str(settings.stt_model_path) if settings.stt_model_path else settings.stt_model,
         stream_chunk_ms=settings.stt_stream_chunk_ms,
         execution_gate=execution_gate,
+        boost_alpha=(
+            settings.stt_boost_alpha if settings.stt_context_biasing_enabled else 0.0
+        ),
     )
     if settings.tts_backend == "vllm":
         # The remote OpenAI-compatible server validates its served model id;
@@ -54,6 +58,21 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             end_silence_ms=settings.vad_end_silence_ms,
         )
 
+    speaker_recognizer = (
+        SpeakerRecognizer(
+            service.speaker_profiles,
+            str(settings.speaker_model_path)
+            if settings.speaker_model_path and settings.speaker_model_path.exists()
+            else settings.speaker_model,
+            enabled=settings.speaker_recognition_enabled,
+            min_duration_ms=settings.speaker_min_duration_ms,
+            timeout_seconds=settings.speaker_timeout_seconds,
+            conversation_match_threshold=settings.speaker_conversation_match_threshold,
+        )
+        if service.speaker_profiles is not None
+        else None
+    )
+
     return SatelliteAudioRuntime(
         service,
         stt,
@@ -67,6 +86,7 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             if settings.denoise_base_url
             else None
         ),
+        speaker_recognizer=speaker_recognizer,
         echo_guard=(
             PlaybackEchoGuard(correlation_threshold=settings.echo_correlation_threshold)
             if settings.echo_guard_enabled

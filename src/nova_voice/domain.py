@@ -67,6 +67,17 @@ class AcousticFeatures(StrictModel):
     pause_ratio: float | None = Field(default=None, ge=0, le=1)
 
 
+class SpeakerIdentity(StrictModel):
+    """Best-effort biometric identity attached to this one acoustic turn."""
+
+    status: Literal["unknown", "provisional", "pending", "recognized"] = "unknown"
+    template_id: str | None = None
+    person_id: str | None = None
+    display_name: str | None = None
+    pronouns: str | None = None
+    confidence: float | None = Field(default=None, ge=-1, le=1)
+
+
 class Utterance(StrictModel):
     id: str
     satellite_id: str
@@ -82,6 +93,7 @@ class Utterance(StrictModel):
     conversation_active: bool = False
     dashboard_foreground: bool | None = None
     acoustic: AcousticFeatures = Field(default_factory=AcousticFeatures)
+    speaker: SpeakerIdentity = Field(default_factory=SpeakerIdentity)
 
     @classmethod
     def text(
@@ -131,6 +143,20 @@ class ResponsePlan(StrictModel):
     requires_post_tool_rendering: bool = False
 
 
+class SelfProfileUpdate(StrictModel):
+    """Explicit first-person identity information present in this utterance."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    pronouns: str | None = Field(default=None, min_length=1, max_length=80)
+    evidence: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def require_profile_value(self) -> SelfProfileUpdate:
+        if self.name is None and self.pronouns is None:
+            raise ValueError("a self profile update must contain a name or pronouns")
+        return self
+
+
 class Interpretation(StrictModel):
     emotion: Emotion
     speech_act: SpeechAct
@@ -140,6 +166,7 @@ class Interpretation(StrictModel):
     active_goal: ActiveGoal
     actions: list[PlannedAction] = Field(default_factory=list, max_length=4)
     response_plan: ResponsePlan = Field(default_factory=ResponsePlan)
+    self_profile_update: SelfProfileUpdate | None = None
 
     @model_validator(mode="after")
     def validate_plan(self) -> Interpretation:

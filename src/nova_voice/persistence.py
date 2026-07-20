@@ -43,6 +43,20 @@ class TranscriptStore:
                     ON transcripts(expires_at);
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(transcripts)").fetchall()
+            }
+            for name, declaration in (
+                ("speaker_template_id", "TEXT"),
+                ("speaker_person_id", "TEXT"),
+                ("speaker_name", "TEXT"),
+                ("speaker_confidence", "REAL"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE transcripts ADD COLUMN {name} {declaration}"
+                    )
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self.initialize_sync)
@@ -56,8 +70,9 @@ class TranscriptStore:
                 """
                 INSERT OR REPLACE INTO transcripts (
                     utterance_id, satellite_id, room_id, transcribed_at, expires_at,
-                    transcript, transcript_confidence, wake_detected, interpretation_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    transcript, transcript_confidence, wake_detected, interpretation_json,
+                    speaker_template_id, speaker_person_id, speaker_name, speaker_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     utterance.id,
@@ -69,6 +84,10 @@ class TranscriptStore:
                     utterance.transcript_confidence,
                     int(utterance.wake_detected),
                     interpretation_json,
+                    utterance.speaker.template_id,
+                    utterance.speaker.person_id,
+                    utterance.speaker.display_name,
+                    utterance.speaker.confidence,
                 ),
             )
 

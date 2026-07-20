@@ -90,7 +90,9 @@ class Persona:
     def with_voice_settings(self, settings: VoiceSettings) -> Persona:
         return replace(
             self,
-            display_name=settings.agent_name,
+            # The persona/LLM refers to itself by the spoken name, not the emoji
+            # display name, so responses stay speakable.
+            display_name=settings.spoken_name,
             emotion_mirroring_strength=settings.emotion_mirroring_strength,
             voice_style_instruction=settings.style_instruction(),
             baseline_mood_natural=settings.emotion == VoiceEmotion.NATURAL,

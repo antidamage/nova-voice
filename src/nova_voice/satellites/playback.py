@@ -256,12 +256,31 @@ class RoomPlaybackRouter:
     def set_buffer_ms(self, buffer_ms: int) -> None:
         """Live-tune the client jitter-buffer preroll (dashboard-hot-reloaded)."""
 
-        self.buffer_ms = max(200, min(2000, int(buffer_ms)))
+        self.buffer_ms = max(20, min(2000, int(buffer_ms)))
 
     def set_frame_ms(self, frame_ms: int) -> None:
         """Live-tune the steady-state audio frame size (dashboard-hot-reloaded)."""
 
         self.frame_ms = max(20, min(200, int(frame_ms)))
+
+    async def set_local_vad_enabled(self, enabled: bool) -> None:
+        """Push the dashboard's diagnostic gate override to live satellites."""
+
+        message = json.dumps({"type": "local_vad", "enabled": bool(enabled)})
+        connections = [connection for room in self._rooms.values() for connection in room.values()]
+
+        async def send(connection: SatellitePlaybackConnection) -> None:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_text(message)
+            except Exception:
+                logger.warning(
+                    "failed to update satellite local VAD id=%s",
+                    connection.satellite_id,
+                    exc_info=True,
+                )
+
+        await asyncio.gather(*(send(connection) for connection in connections))
 
     def register(self, connection: SatellitePlaybackConnection) -> None:
         self._rooms.setdefault(connection.room_id, {})[connection.satellite_id] = connection

@@ -10,18 +10,20 @@ from dataclasses import replace
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-from pydantic import ValidationError
+from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel, ValidationError
 
+from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.bootstrap import build_audio_runtime
 from nova_voice.audio.pcm import BYTES_PER_FRAME, SAMPLE_RATE
+from nova_voice.audio.pitch import StreamingPitchShifter
 from nova_voice.audio.runtime import (
     ProcessedAudioTurn,
     SatelliteAudioRuntime,
 )
 from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
-from nova_voice.diagnostics import page_html, pcm16_wav_base64
+from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
 from nova_voice.interpretation.llama_cpp import InterpretationError
 from nova_voice.monitor import VoiceMonitor
@@ -41,6 +43,39 @@ from nova_voice.service import NovaVoiceService
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on preview speech. The dashboard's Test button normally sends
+# nothing and the server asks the LLM a random question; this bounds both a
+# long generated reply and an explicit verbatim override so a synthesis request
+# can never balloon.
+PREVIEW_TEXT_MAX = 400
+
+
+class VoicePreviewRequest(BaseModel):
+    # Speak this verbatim, skipping the language model entirely.
+    text: str | None = None
+    # Ask the language model this specific question instead of a random one.
+    question: str | None = None
+
+
+class SpeakerProfileUpdateRequest(BaseModel):
+    display_name: str | None = None
+    pronouns: str | None = None
+
+
+class SpeakerTemplateAssignmentRequest(BaseModel):
+    person_id: str
+
+
+def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
+    """Trim preview speech to a sane length at a word boundary."""
+
+    trimmed = text.strip()
+    if len(trimmed) <= limit:
+        return trimmed
+    clipped = trimmed[:limit]
+    head = clipped.rsplit(" ", 1)[0]
+    return (head or clipped).rstrip()
 
 
 def _diagnostic_turn_payload(
@@ -95,18 +130,24 @@ def create_app(
 
     attach_monitor()
 
-    async def collect_voice_settings() -> VoiceSettings:
+    async def collect_voice_settings() -> tuple[VoiceSettings, AgentSettings]:
         payload = await selected_service.nova_provider.client.voice_settings()
         value = payload.get("voice")
         if not isinstance(value, dict):
             raise NovaDashboardError("dashboard returned no voice settings object")
+        agent_value = payload.get("agent", {})
+        if not isinstance(agent_value, dict):
+            raise NovaDashboardError("dashboard returned an invalid agent settings object")
         voice = VoiceSettings.model_validate(value)
+        agent = AgentSettings.model_validate(agent_value)
         if selected_audio is not None:
             await selected_audio.apply_voice_settings(voice)
         selected_service.apply_voice_settings(voice)
+        selected_service.apply_agent_settings(agent)
         room_playback.set_buffer_ms(voice.tts_preroll_ms)
         room_playback.set_frame_ms(voice.tts_frame_ms)
-        return voice
+        await room_playback.set_local_vad_enabled(voice.satellite_noise_gate_enabled)
+        return voice, agent
 
     async def upgrade_probe_watchdog() -> None:
         """Self-heal the uvicorn WebSocket upgrade wedge.
@@ -255,10 +296,140 @@ def create_app(
         )
         return payload
 
+    @app.get("/v1/speaker-profiles")
+    async def speaker_profiles() -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            return {"profiles": [], "provisionalTemplates": [], "enabled": False}
+        live_settings = selected_service.voice_settings
+        enabled = (
+            live_settings.speaker_recognition_enabled
+            if live_settings is not None
+            else selected_settings.speaker_recognition_enabled
+        )
+        return {**(await store.list_profiles()), "enabled": enabled}
+
+    @app.patch("/v1/speaker-profiles/{person_id}")
+    async def update_speaker_profile(
+        person_id: str, payload: SpeakerProfileUpdateRequest
+    ) -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
+        if not payload.model_fields_set:
+            raise HTTPException(status_code=422, detail="No profile fields were supplied")
+        display_name = payload.display_name
+        if "display_name" in payload.model_fields_set and not (display_name or "").strip():
+            raise HTTPException(status_code=422, detail="Display name cannot be empty")
+        updated = await store.update_person(
+            person_id,
+            display_name=display_name,
+            pronouns=(
+                payload.pronouns or ""
+                if "pronouns" in payload.model_fields_set
+                else None
+            ),
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Speaker profile was not found")
+        return {"ok": True, **(await store.list_profiles())}
+
+    @app.delete("/v1/speaker-profiles/{person_id}")
+    async def delete_speaker_profile(person_id: str) -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
+        if not await store.delete_person(person_id):
+            raise HTTPException(status_code=404, detail="Speaker profile was not found")
+        return {"ok": True}
+
+    @app.delete("/v1/speaker-templates/{template_id}")
+    async def delete_speaker_template(template_id: str) -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
+        if not await store.delete_template(template_id):
+            raise HTTPException(status_code=404, detail="Speaker template was not found")
+        return {"ok": True}
+
+    @app.delete("/v1/speaker-templates")
+    async def delete_all_speaker_templates() -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
+        deleted = await store.delete_all_templates()
+        return {"ok": True, "deleted": deleted}
+
+    @app.patch("/v1/speaker-templates/{template_id}")
+    async def assign_speaker_template(
+        template_id: str, payload: SpeakerTemplateAssignmentRequest
+    ) -> dict:
+        store = selected_service.speaker_profiles
+        if store is None:
+            raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
+        if not await store.assign_template(template_id, payload.person_id):
+            raise HTTPException(status_code=404, detail="Speaker profile or template was not found")
+        return {"ok": True, **(await store.list_profiles())}
+
+    @app.post("/v1/voices/preview", include_in_schema=False)
+    async def preview_voice(payload: VoicePreviewRequest) -> Response:
+        """Audition the current voice by asking the LLM and speaking its reply.
+
+        The dashboard's personality Test button plays this in the browser so the
+        whole configured voice — how it *sounds* and how it *talks* — can be
+        heard before committing anything. By default the live language model
+        answers a random question (exercising temperature, personality,
+        pronouns, and language), then the reply is synthesized with the live
+        voice, accent, mood, rate, and pitch. Every setting is applied live, so
+        this matches a real spoken turn. A caller may pin the question, or pass
+        `text` to speak a line verbatim and skip the model.
+        """
+
+        runtime = selected_audio
+        if runtime is None or getattr(runtime, "tts", None) is None:
+            raise HTTPException(status_code=503, detail="Audio inference is disabled")
+        voice = getattr(selected_service, "voice_settings", None)
+        verbatim = (payload.text or "").strip()
+        if verbatim:
+            text = _bounded_preview_text(verbatim)
+        else:
+            generated: str | None = None
+            render = getattr(selected_service, "render_preview_reply", None)
+            if callable(render):
+                try:
+                    generated = await render(payload.question)
+                except Exception as error:  # noqa: BLE001 - fall back to a fixed line
+                    logger.warning("voice preview render failed: %s", error)
+            spoken = voice.spoken_name if voice is not None else "your voice assistant"
+            fallback = f"Hi, I'm {spoken}. This is how I sound right now."
+            text = _bounded_preview_text(generated or "") or fallback
+        instruction = (
+            voice.style_instruction()
+            if voice is not None
+            else "Natural conversational delivery."
+        )
+        try:
+            pcm16, sample_rate = await runtime.tts.synthesize(text, instruction)
+        except Exception as error:  # noqa: BLE001 - any synth failure is a 503 to the caller
+            logger.warning("voice preview synthesis failed: %s", error)
+            raise HTTPException(
+                status_code=503, detail="Voice preview synthesis failed"
+            ) from error
+        # Pitch is applied as DSP on the synthesized PCM, mirroring the live
+        # response path, so the preview matches what a satellite would play.
+        if voice is not None and voice.pitch:
+            shifter = StreamingPitchShifter(voice.pitch, sample_rate)
+            pcm16 = await asyncio.to_thread(shifter.process, pcm16)
+        return Response(
+            content=pcm16_wav_bytes(pcm16, sample_rate),
+            media_type="audio/wav",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.post("/v1/settings/refresh")
     async def refresh_voice_settings() -> dict:
         try:
-            voice = await collect_voice_settings()
+            voice, agent = await collect_voice_settings()
         except NovaDashboardError as error:
             raise HTTPException(
                 status_code=502,
@@ -276,6 +447,7 @@ def create_app(
             ) from error
         return {
             "ok": True,
+            "agent": agent.model_dump(mode="json", by_alias=True),
             "voice": voice.model_dump(mode="json", by_alias=True),
         }
 
@@ -556,6 +728,11 @@ def create_app(
                         "protocolVersion": hello.protocol_version,
                         "satelliteId": hello.satellite_id,
                         "capturePolicy": "always",
+                        "localVadEnabled": (
+                            selected_service.voice_settings.satellite_noise_gate_enabled
+                            if selected_service.voice_settings is not None
+                            else True
+                        ),
                     }
                 )
             )
@@ -575,6 +752,13 @@ def create_app(
             queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=750)
             last_sequence = -1
             stream_started = time.monotonic()
+            # Push-to-talk arming for browser satellites: a CONTROL "begin_turn"
+            # frame arms the wake so the next completed segment is treated as
+            # wake-initiated (wide vocabulary, spoken reply) without a spoken
+            # wake word. Native/always-on clients never set this and keep normal
+            # wake-word gating. A mutable holder bridges the control-frame loop
+            # and the audio worker task, which share this closure.
+            turn_signal = {"wake_armed": False}
 
             async def process_audio() -> None:
                 nonlocal processed_frames
@@ -667,11 +851,15 @@ def create_app(
                                 satellite_id=hello.satellite_id,
                                 room_id=room_id,
                                 frame=frame.payload,
+                                wake_detected=turn_signal["wake_armed"],
                                 playback_active=bool(frame.flags & FLAG_PLAYBACK_ACTIVE),
                                 dashboard_foreground=hello.dashboard_foreground,
                             )
                             processed_frames += 1
                             if pending is not None:
+                                # One armed tap forces exactly one wake-initiated
+                                # segment; follow-ups ride the conversation window.
+                                turn_signal["wake_armed"] = False
                                 task = asyncio.create_task(run_turn(pending))
                                 turn_tasks.add(task)
                                 task.add_done_callback(turn_tasks.discard)
@@ -705,6 +893,11 @@ def create_app(
                     try:
                         control = json.loads(control_text)
                     except json.JSONDecodeError:
+                        continue
+                    # Browser push-to-talk: arm the wake for the next segment.
+                    if control.get("type") == "begin_turn":
+                        if hello.is_browser:
+                            turn_signal["wake_armed"] = True
                         continue
                     playback_id = control.get("playbackId")
                     playback_events = None

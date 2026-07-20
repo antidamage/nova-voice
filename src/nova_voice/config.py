@@ -46,6 +46,37 @@ class Settings(BaseSettings):
     stt_model: str = "nvidia/nemotron-speech-streaming-en-0.6b"
     stt_model_path: Path | None = None
     stt_stream_chunk_ms: int = Field(default=160, ge=80, le=2000)
+    # Decode-time context biasing (NeMo GPU phrase-boosting tree): the
+    # dashboard wake words and agent name are boosted during RNNT decoding so
+    # invented names survive the model's internal language model. Alpha is the
+    # shallow-fusion weight; zero or disabled keeps stock decoding.
+    stt_context_biasing_enabled: bool = True
+    stt_boost_alpha: float = Field(default=1.0, ge=0.0, le=10.0)
+    # Text-independent household speaker identification. TitaNet stays on CPU
+    # so it cannot consume the GPU headroom reserved for ASR/LLM/TTS.
+    speaker_recognition_enabled: bool = True
+    speaker_model: str = "nvidia/speakerverification_en_titanet_large"
+    speaker_model_path: Path | None = Path(
+        "/opt/nova-voice/models/speakerverification-en-titanet-large/"
+        "speakerverification_en_titanet_large.nemo"
+    )
+    speaker_min_duration_ms: int = Field(default=1200, ge=500, le=10_000)
+    speaker_timeout_seconds: float = Field(default=1.5, gt=0, le=10)
+    speaker_candidate_retention_days: int = Field(default=30, ge=1, le=365)
+    speaker_activation_samples: int = Field(default=3, ge=1, le=20)
+    speaker_match_threshold: float = Field(default=0.65, ge=-1, le=1)
+    speaker_match_margin: float = Field(default=0.03, ge=0, le=1)
+    speaker_cluster_threshold: float = Field(default=0.60, ge=-1, le=1)
+    # Once a wake-opened conversation has a speaker, keep ordinary embedding
+    # variance on that template. Only a much lower score indicates a real
+    # speaker hand-off within the same conversation.
+    speaker_conversation_match_threshold: float = Field(default=0.35, ge=-1, le=1)
+    # Very short commands are easy to trigger accidentally from media or a
+    # guest's stray speech. Keep them non-executable until the current voice
+    # resolves to an enrolled household profile. Longer explicit requests
+    # still pass through the normal addressing and execution policy.
+    speaker_short_execute_requires_recognition: bool = True
+    speaker_short_execute_max_words: int = Field(default=4, ge=1, le=20)
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
     tts_model_path: Path | None = None
     tts_backend: Literal["qwen", "vllm"] = "qwen"
@@ -58,8 +89,8 @@ class Settings(BaseSettings):
     # Turing/pre-BF16 CUDA devices. Explicit FP16 requires deployment testing.
     tts_dtype: Literal["auto", "float16", "bfloat16", "float32"] = "auto"
     # Input-handling pipeline: DeepFilterNet3 sidecar (stage 1), playback-echo
-    # AEC (stage 2), the narrow simplified-English pass (stage 3), and the
-    # wake-word conversation window (stage 4).
+    # AEC (stage 2), optional legacy narrow-English prefilter (stage 3), then
+    # structured interpretation and the wake-word conversation window.
     # DeepFilterNet3 runs as a CPU-only sidecar so it cannot contend with the
     # resident STT/LLM/TTS CUDA workloads.  It is best-effort at runtime, but
     # enabled by default when the packaged systemd sidecar is present.
@@ -67,7 +98,11 @@ class Settings(BaseSettings):
     denoise_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     echo_guard_enabled: bool = True
     echo_correlation_threshold: float = Field(default=0.55, ge=0, le=1)
-    narrow_gate_enabled: bool = True
+    # Legacy pre-interpretation vocabulary filtering is opt-in. Command intent
+    # belongs to the structured interpretation pass; dropping multiword speech
+    # here prevents valid commands with names or unusual aliases from ever
+    # reaching that classifier.
+    narrow_gate_enabled: bool = False
     narrow_gate_max_oov_ratio: float = Field(default=0.34, ge=0, le=1)
     conversation_idle_seconds: float = Field(default=60.0, ge=2, le=600)
     # Multiple satellites in earshot of each other form one arbitration scope:
@@ -106,7 +141,7 @@ class Settings(BaseSettings):
     # Both this and tts_frame_ms are boot defaults only: the dashboard's
     # VoiceSettings (ttsPrerollMs/ttsFrameMs) override them live once the
     # first settings pull completes, with no service restart required.
-    playback_preroll_ms: int = Field(default=700, ge=200, le=2000)
+    playback_preroll_ms: int = Field(default=700, ge=20, le=2000)
     # Steady-state audio frame size sent to satellites once the fast-start
     # first chunk has gone out. Below this, TCP/WS overhead per frame starts
     # to matter; above it, chunk-to-chunk latency grows.

@@ -1,7 +1,7 @@
 # Nova Voice
 
 Nova Voice is Nova's fully local, room-aware voice interface.  Its runtime
-runs on Iridium.  It receives continuously framed microphone audio from native
+runs on Iridium.  It receives locally activity-gated microphone audio from native
 satellites, determines whether a person is addressing Nova, interprets the
 request, executes permitted household actions through documented providers,
 and returns synthesized audio to the one satellite that captured the request.
@@ -27,7 +27,7 @@ Indium / Nocturnium --mTLS PCM--> satellite ingress --> VAD/election --> STT
   microphones.  They capture and play audio whether or not the dashboard is
   open.
 - The satellite transport is a mutually authenticated local-TLS WebSocket.
-  It carries continuously framed 16 kHz mono PCM audio plus a versioned hello,
+  It carries 16 kHz mono PCM audio during probable speech plus a versioned hello,
   health, timing, and playback-lifecycle control protocol.
 - Central audio runtime applies VAD, speaker/room election, echo suppression,
   STT, session policy, interpretation, action execution, and TTS.  Individual
@@ -47,6 +47,28 @@ configuration, not inferred from hostnames.  Indium and Nocturnium are both
 physically in the lounge, but `roomId` is used for election/arbiter scoping
 and echo referencing only — it is not a playback fan-out list.  Whichever of
 the two wins the utterance is the only one that speaks the response.
+
+A system-wide killswitch (`systemVoiceEnabled` in the voice settings, default
+true) gates the whole pipeline: while off, the runtime drops every incoming mic
+frame before any VAD/STT/election work and closes all open conversations, so
+voice is fully disabled for the household until it is turned back on.
+The per-satellite killswitch defaults Nocturnium off, leaving Indium as the one
+active co-located microphone unless Nocturnium is explicitly enabled.
+
+Native clients keep their microphones open but run a lightweight local
+activity/noise gate before network transmission. Three active 20 ms frames open
+the gate after a one-second local noise-floor calibration; a 400 ms pre-roll
+protects word onsets and an 800 ms silence tail lets
+Iridium's authoritative Silero VAD close the segment. The shared
+`satelliteNoiseGateEnabled` setting defaults on and is pushed over live satellite
+sockets; its config-page switch can bypass the gate completely for diagnostics,
+without restarting the clients.
+
+TTS voice identity depends on the Qwen3-TTS "talker" sampling. Because the
+selected voice is soft conditioning rather than a hard speaker embedding, the
+stage-0 talker runs at a low sampling temperature (`deploy/vllm/*.yaml`) so the
+timbre, pronunciation, and accent stay stable across utterances instead of
+drifting per reply; the stage-1 vocoder decode is deterministic.
 
 ### One utterance, one handler
 
@@ -112,6 +134,25 @@ device exists; the process must actually capture the virtual AEC source.
 
 ## Runtime and interpretation
 
+### Household speaker profiles
+
+Speaker recognition is local, text-independent, and used only for personalization. A
+CPU-resident NeMo TitaNet model extracts an embedding from each sufficiently long addressed
+turn while GPU ASR runs. Unmatched embeddings form provisional templates that expire after
+30 inactive days. One explicit first-person identity claim plus three consistent samples
+promotes a template; multiple acoustically distinct templates may belong to the same person.
+
+Names and pronouns are accepted only when explicitly stated by the current speaker in the
+current utterance. Pronouns are never inferred from acoustic characteristics. A recognized
+speaker may update their profile directly. Ambiguous matches remain anonymous and raw enrollment
+audio is never persisted. Voice identity never grants authorization by itself; it does lift a
+conservative execution gate which otherwise ignores commands of four words or fewer from an
+unrecognized voice. Longer explicit guest requests still pass through the normal execution policy.
+
+Nova's interpretation and response prompts describe this capability explicitly. When asked,
+Nova can tell a household member to correct a stored name or pronouns by stating the new value
+directly, and it acknowledges a correction only when the current voice template accepted it.
+
 The central pipeline is selected through explicit interfaces and deployment
 configuration:
 
@@ -130,10 +171,15 @@ configuration:
   silent startup downgrade.
 
 Audio is continuously sent to Iridium.  Central VAD frames speech segments;
-each final transcript receives structured interpretation.  A transcript-first,
+each multiword final transcript receives structured interpretation.  The
+structured pass owns command-intent classification; the legacy narrow-vocabulary
+prefilter is disabled by default so valid aliases and imperfect transcripts are
+not dropped before interpretation.  A transcript-first,
 editable wake list recognises `beemo`, common ASR spellings, and optional
 greeting prefixes.  Direct requests or explicit desired states may act without
-the wake word, while ambient speech has a much higher execution threshold.
+the wake word.  A validated executable directive with a bounded action plan is
+treated as addressed, while ambient speech still has a much higher interpretation
+confidence threshold.
 Statements about what a person intends to do themselves never become actions.
 
 The session engine tracks active conversation state, transcript confidence,
@@ -170,6 +216,8 @@ user service for its kiosk user's PipeWire graph; a restricted system service
 is appropriate only for direct ALSA capture.  Their processes and default
 capture policy are always on.  Dashboard foreground state may be supplied as
 interpretation context but never controls capture or process lifetime.
+Always-on capture does not mean continuous transmission: steady idle audio stays
+on the satellite unless the diagnostic noise-gate bypass is active.
 
 The health and diagnostics surfaces expose registered satellite pipelines,
 room membership, protocol/AEC capability, playback state, provider readiness,
