@@ -744,6 +744,11 @@ class NovaVoiceService:
                         if utterance.speaker.status == "recognized"
                         else None
                     ),
+                    speaker_pronouns=(
+                        utterance.speaker.pronouns
+                        if utterance.speaker.status == "recognized"
+                        else None
+                    ),
                 )
                 observations = _dashboard_observations(interpretation, results)
                 if observations:
@@ -762,6 +767,7 @@ class NovaVoiceService:
         return HandleResult(
             utterance_id=utterance.id,
             interpretation=interpretation,
+            speaker=utterance.speaker,
             executed=outcome.execute,
             shadowed=outcome.shadowed,
             policy_reason=outcome.reason,

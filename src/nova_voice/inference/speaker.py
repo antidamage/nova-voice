@@ -21,64 +21,110 @@ class NemoSpeakerEmbedder:
         self.device = device
         self._model = None
         self._torch = None
-        self._load_attempted = False
+        # A missing Python dependency never resolves at runtime, so that one
+        # failure latches (``_deps_missing``). Every *other* load failure is
+        # treated as potentially transient and stays retryable: NeMo's ``.nemo``
+        # restore mutates process-global state (it ``os.chdir()``s into a temp
+        # dir) and is not reentrant, so a load that happens lazily on the first
+        # addressed turn — racing the live audio path — can fail once and then
+        # succeed on a later attempt. Latching that first failure for the whole
+        # process lifetime is exactly what turns a one-off race into "speaker
+        # recognition is dead until someone restarts the service", so we do not.
+        self._deps_missing = False
         self._load_error: RuntimeError | None = None
+        self._load_attempts = 0
+
+    def _import_backend(self):
+        """Import the heavy optional backends. Split out so the retry/latch
+        policy in ``_load`` can be exercised without NeMo/PyTorch installed."""
+        import nemo.collections.asr as nemo_asr
+        import torch
+
+        return nemo_asr, torch
+
+    def _build_model(self, nemo_asr, torch):
+        """Restore the TitaNet model. Split from ``_load`` so tests can drive
+        the transient-failure retry path without a real checkpoint."""
+        source = Path(self.model_name)
+        if source.exists():
+            # This is the deployment-pinned NVIDIA checkpoint. NeMo 2.7.3
+            # forces weights_only=True, which cannot read this older .nemo
+            # archive under PyTorch 2.6+. Use an isolated connector for the
+            # trusted local artifact rather than weakening torch.load
+            # process-wide.
+            from nemo.core.connectors.save_restore_connector import (
+                SaveRestoreConnector,
+            )
+
+            class TrustedLocalCheckpointConnector(SaveRestoreConnector):
+                @staticmethod
+                def _load_state_dict_from_disk(
+                    model_weights, map_location="cpu"
+                ):
+                    return torch.load(
+                        model_weights,
+                        map_location=map_location,
+                        weights_only=False,
+                    )
+
+            model = nemo_asr.models.EncDecSpeakerLabelModel.restore_from(
+                restore_path=str(source),
+                map_location=self.device,
+                save_restore_connector=TrustedLocalCheckpointConnector(),
+            )
+        else:
+            model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
+                model_name=self.model_name, map_location=self.device
+            )
+        model = model.to(self.device)
+        model.eval()
+        return model
 
     def _load(self) -> None:
         if self._model is not None:
             return
-        if self._load_attempted:
-            raise self._load_error or RuntimeError("speaker model load previously failed")
-        self._load_attempted = True
+        if self._deps_missing:
+            raise self._load_error or RuntimeError(
+                "speaker model dependencies are unavailable"
+            )
         try:
-            import nemo.collections.asr as nemo_asr
-            import torch
+            nemo_asr, torch = self._import_backend()
         except ImportError as error:
+            self._deps_missing = True
             self._load_error = RuntimeError(
                 "NeMo speaker recognition and PyTorch are not installed"
             )
             raise self._load_error from error
+        self._load_attempts += 1
         try:
-            source = Path(self.model_name)
-            if source.exists():
-                # This is the deployment-pinned NVIDIA checkpoint. NeMo 2.7.3
-                # forces weights_only=True, which cannot read this older .nemo
-                # archive under PyTorch 2.6+. Use an isolated connector for the
-                # trusted local artifact rather than weakening torch.load
-                # process-wide.
-                from nemo.core.connectors.save_restore_connector import (
-                    SaveRestoreConnector,
-                )
-
-                class TrustedLocalCheckpointConnector(SaveRestoreConnector):
-                    @staticmethod
-                    def _load_state_dict_from_disk(
-                        model_weights, map_location="cpu"
-                    ):
-                        return torch.load(
-                            model_weights,
-                            map_location=map_location,
-                            weights_only=False,
-                        )
-
-                model = nemo_asr.models.EncDecSpeakerLabelModel.restore_from(
-                    restore_path=str(source),
-                    map_location=self.device,
-                    save_restore_connector=TrustedLocalCheckpointConnector(),
-                )
-            else:
-                model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
-                    model_name=self.model_name, map_location=self.device
-                )
-            model = model.to(self.device)
-            model.eval()
+            model = self._build_model(nemo_asr, torch)
             self._model = model
             self._torch = torch
+            self._load_error = None
         except Exception as error:
+            # Deliberately not latched: the next ``embed`` call or the startup
+            # warmup retries. The error is still surfaced to this caller and,
+            # via the recognizer, to /health.
             self._load_error = RuntimeError(
                 f"speaker model failed to load: {type(error).__name__}: {error}"
             )
             raise self._load_error from error
+
+    def warmup(self) -> bool:
+        """Load the model ahead of the first turn, at a quiescent moment.
+
+        Returns True once the model is resident. A failed warmup is neither
+        fatal nor latched — the next ``embed`` retries lazily — so startup can
+        call this without risking a boot loop when a load transiently fails.
+        """
+        try:
+            self._load()
+        except Exception as error:
+            logger.warning(
+                "speaker model warmup failed; will retry lazily: %s", error
+            )
+            return False
+        return True
 
     def embed(self, pcm16: bytes, sample_rate: int = 16_000) -> np.ndarray:
         if sample_rate != 16_000:
@@ -181,6 +227,22 @@ class SpeakerRecognizer:
     ) -> SpeakerIdentity:
         embedding = await self.extract(pcm16, duration_ms=duration_ms)
         return await self.resolve(embedding, eligible=eligible)
+
+    async def warmup(self) -> bool:
+        """Preload the embedding model before any turn is processed.
+
+        Loading TitaNet lazily on the first addressed turn races the live audio
+        path and NeMo's non-reentrant restore; doing it here — at startup, while
+        the process is quiescent — is the same single-threaded window in which
+        the STT model already loads. Returns True when the model is resident.
+        """
+        if not self.enabled:
+            return False
+        async with self._inference_lock:
+            loaded = await asyncio.to_thread(self.embedder.warmup)
+        if loaded:
+            self._last_error = None
+        return loaded
 
     def configure(self, *, enabled: bool) -> None:
         self.enabled = enabled

@@ -212,6 +212,11 @@ def create_app(
         await selected_service.initialize()
         if selected_settings.audio_enabled and selected_audio is None:
             selected_audio = build_audio_runtime(selected_settings, selected_service)
+        if selected_audio is not None:
+            # Load the speaker model now, in the single-threaded startup window,
+            # rather than lazily on the first addressed turn where it races the
+            # live audio path and NeMo's non-reentrant restore.
+            await selected_audio.warmup()
         attach_monitor()
         try:
             await collect_voice_settings()

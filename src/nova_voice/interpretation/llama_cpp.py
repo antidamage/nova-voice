@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from nova_voice.audio.conversation import ConversationSnapshot
+from nova_voice.audio.conversation import ConversationMessage, ConversationSnapshot
 from nova_voice.domain import (
     ActiveGoal,
     Interpretation,
@@ -79,6 +79,32 @@ def select_environment_context(
     if _WEATHER_RELEVANCE.search(transcript) and environment.get("weather") is not None:
         selected["weather"] = environment["weather"]
     return selected or None
+
+
+def _current_speaker_context(utterance: Utterance) -> str | None:
+    speaker = utterance.speaker
+    if speaker.status != "recognized" or not speaker.display_name:
+        return None
+    profile = {
+        "name": speaker.display_name,
+        "pronouns": speaker.pronouns,
+    }
+    return (
+        "Authoritative current-speaker identity for this exact acoustic turn: "
+        + json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+        + ". Use this person's name and stated pronouns naturally when relevant. "
+        "If earlier conversation messages name a different speaker, the user has changed; "
+        "never carry the previous speaker's name or pronouns onto this turn."
+    )
+
+
+def _conversation_message_content(message: ConversationMessage) -> str:
+    if message.role != "user" or not message.speaker_name:
+        return message.content
+    identity = f"Speaker: {message.speaker_name}"
+    if message.speaker_pronouns:
+        identity += f"; pronouns: {message.speaker_pronouns}"
+    return f"[{identity}] {message.content}"
 
 SYSTEM_PROMPT = """You are {agent_name}'s interpretation engine, not a general chat UI.
 The assistant's accepted spoken wake words are {wake_words}; an utterance whose first
@@ -298,6 +324,9 @@ class LlamaCppInterpreter(Interpreter):
                 [*self.wake_words, self.agent_name], separators=(",", ":")
             ),
         )
+        speaker_context = _current_speaker_context(utterance)
+        if speaker_context:
+            system += "\n\n" + speaker_context
         personality = (
             conversation.personality
             if conversation is not None and conversation.personality
@@ -342,11 +371,7 @@ class LlamaCppInterpreter(Interpreter):
             messages.extend(
                 {
                     "role": message.role,
-                    "content": (
-                        f"[Speaker: {message.speaker_name}] {message.content}"
-                        if message.role == "user" and message.speaker_name
-                        else message.content
-                    ),
+                    "content": _conversation_message_content(message),
                 }
                 for message in conversation.messages
             )
@@ -484,17 +509,9 @@ is false, do not claim the correction was saved. {length_instruction} When the
 responseInstruction asks for a single word,
 return exactly one word. For a greeting, do not spend the complaint budget;
 greet briefly and offer help. Return only the response JSON schema."""
-        if utterance.speaker.status == "recognized" and utterance.speaker.display_name:
-            system += (
-                "\nThe current speaker is the recognized household member "
-                f"{utterance.speaker.display_name}. Address them naturally by that name only when "
-                "it improves the reply; do not repeat it mechanically."
-            )
-            if utterance.speaker.pronouns:
-                system += (
-                    " Their stated pronouns are "
-                    f"{utterance.speaker.pronouns}; use those exactly when referring to them."
-                )
+        speaker_context = _current_speaker_context(utterance)
+        if speaker_context:
+            system += "\n" + speaker_context
         personality = (
             conversation.personality
             if conversation is not None and conversation.personality
@@ -522,11 +539,7 @@ greet briefly and offer help. Return only the response JSON schema."""
             messages.extend(
                 {
                     "role": message.role,
-                    "content": (
-                        f"[Speaker: {message.speaker_name}] {message.content}"
-                        if message.role == "user" and message.speaker_name
-                        else message.content
-                    ),
+                    "content": _conversation_message_content(message),
                 }
                 for message in conversation.messages
             )

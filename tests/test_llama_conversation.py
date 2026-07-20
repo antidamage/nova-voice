@@ -101,6 +101,84 @@ async def test_dedicated_identity_pass_extracts_only_the_current_transcript(
 
 
 @pytest.mark.asyncio
+async def test_recognized_current_speaker_overrides_prior_speaker_context(
+    utterance,
+) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": interpretation(
+                                decision=Decision.REPLY
+                            ).model_dump_json(by_alias=True)
+                        }
+                    }
+                ]
+            },
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    conversation = ConversationSnapshot(
+        id="conversation-1",
+        room_id="lounge",
+        initial_environment=None,
+        personality="",
+        persona_prompt="",
+        messages=(
+            ConversationMessage(
+                "user",
+                "What is on?",
+                speaker_name="Alex",
+                speaker_pronouns="he/him",
+            ),
+        ),
+    )
+    spoken = utterance.model_copy(
+        update={
+            "transcript": "What about now?",
+            "conversation_active": True,
+            "speaker": SpeakerIdentity(
+                status="recognized",
+                template_id="voice-adeline",
+                person_id="person-adeline",
+                display_name="Adeline",
+                pronouns="she/her",
+                confidence=0.92,
+            ),
+        }
+    )
+
+    await interpreter.interpret(
+        spoken,
+        active_goal=None,
+        relevant_state={"room": "lounge"},
+        tools=[],
+        conversation=conversation,
+    )
+
+    system = requests[0]["messages"][0]["content"]
+    assert '"name":"Adeline"' in system
+    assert '"pronouns":"she/her"' in system
+    assert "the user has changed" in system
+    assert requests[0]["messages"][1]["content"] == (
+        "[Speaker: Alex; pronouns: he/him] What is on?"
+    )
+
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
 async def test_renderer_receives_confirmation_that_profile_correction_was_applied(
     utterance,
 ) -> None:
@@ -151,6 +229,8 @@ async def test_renderer_receives_confirmation_that_profile_correction_was_applie
     system = payload["messages"][0]["content"]
     facts = json.loads(payload["messages"][-1]["content"])
     assert "If asked\nhow to fix them" in system
+    assert '"name":"Adeline"' in system
+    assert '"pronouns":"she/her"' in system
     assert facts["selfProfileUpdate"] == {
         "name": "Adeline",
         "pronouns": "she/her",

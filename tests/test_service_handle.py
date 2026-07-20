@@ -484,7 +484,7 @@ async def test_current_addressed_self_disclosure_updates_current_speaker(utteran
         }
     )
 
-    await service.handle(spoken)
+    result = await service.handle(spoken)
 
     assert len(profiles.calls) == 1
     assert interpreter.profile_calls == [spoken]
@@ -493,6 +493,9 @@ async def test_current_addressed_self_disclosure_updates_current_speaker(utteran
     assert interpreter.render_calls[0]["interpretation"].self_profile_update == (
         profile_update
     )
+    assert result.speaker is not None
+    assert result.speaker.display_name == "Addie"
+    assert result.speaker.pronouns == "she/her"
 
 
 @pytest.mark.asyncio

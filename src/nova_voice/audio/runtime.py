@@ -29,7 +29,7 @@ from nova_voice.audio.speech_timing import (
     estimate_speech_duration_ms,
 )
 from nova_voice.audio.vocab import SimplifiedEnglishGate
-from nova_voice.domain import AcousticFeatures, HandleResult, Utterance
+from nova_voice.domain import AcousticFeatures, HandleResult, SpeakerIdentity, Utterance
 from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
@@ -424,6 +424,44 @@ class SatelliteAudioRuntime:
             # Observability must not be able to interrupt a spoken command.
             logger.warning("voice monitor sink failed", exc_info=True)
 
+    async def warmup(self) -> None:
+        """Preload heavyweight recognition models at startup instead of on the
+        first addressed turn. NeMo's model restore is not concurrency-safe with
+        the live audio path (it mutates process-global cwd), so loading it
+        lazily during a conversation fails intermittently and then stays broken
+        for the process; doing it here keeps that load in a quiescent window."""
+        if self._speaker_recognizer is not None:
+            await self._speaker_recognizer.warmup()
+
+    async def _resolve_current_speaker(
+        self,
+        speaker_task: asyncio.Task[Any] | None,
+        *,
+        room_id: str,
+        conversation_active: bool,
+        eligible: bool,
+    ) -> SpeakerIdentity | None:
+        if self._speaker_recognizer is None or speaker_task is None:
+            return None
+        embedding = await speaker_task
+        conversation_template_id = (
+            self._conversations.speaker_template(room_id)
+            if self._conversations is not None and conversation_active
+            else None
+        )
+        identity = await self._speaker_recognizer.resolve(
+            embedding,
+            eligible=eligible,
+            preferred_template_id=conversation_template_id,
+        )
+        if (
+            self._conversations is not None
+            and conversation_active
+            and identity.template_id is not None
+        ):
+            self._conversations.bind_speaker_template(room_id, identity.template_id)
+        return identity
+
     def _announce_speaking(self, payload: dict[str, Any]) -> None:
         if self._speech_announcer is None:
             return
@@ -444,6 +482,7 @@ class SatelliteAudioRuntime:
         replaces_id: str | None = None,
         visible: bool = True,
         kind: str | None = None,
+        speaker_name: str | None = None,
     ) -> str:
         announce_id = replaces_id or uuid4().hex
         # ``visible=False`` still hands back an id so dedup bookkeeping stays
@@ -467,6 +506,8 @@ class SatelliteAudioRuntime:
             # The dashboard's transcript header tags each turn [COMMAND] or
             # [EXCHANGE]; absent means exchange, so only command turns send it.
             payload["kind"] = kind
+        if role == "user" and speaker_name:
+            payload["speakerName"] = speaker_name
         if replaces_id is not None:
             # The dashboard upgrades the existing line in place instead of
             # appending a near-duplicate.
@@ -663,19 +704,44 @@ class SatelliteAudioRuntime:
         return self._volume_night_percent
 
     async def health(self) -> dict:
-        stt = await self.stt.health()
-        tts = await self.tts.health()
+        # These probes are independent I/O — a GPU-memory read, two sidecar HTTP
+        # round trips, and a SQLite read. Run them concurrently so /health costs
+        # one probe's latency instead of their sum: the dashboard polls this
+        # every few seconds on the same event loop that drives live audio, and a
+        # serial chain of awaits made the poll queue behind that work (the
+        # 70-140 ms "network latency" the status strip was showing).
+        stt_probe = asyncio.ensure_future(self.stt.health())
+        tts_probe = asyncio.ensure_future(self.tts.health())
+        denoise_probe = (
+            asyncio.ensure_future(self._denoiser.health())
+            if self._denoiser is not None
+            else None
+        )
+        speaker_probe = (
+            asyncio.ensure_future(self._speaker_recognizer.health())
+            if self._speaker_recognizer is not None
+            else None
+        )
+        await asyncio.gather(
+            *(
+                probe
+                for probe in (stt_probe, tts_probe, denoise_probe, speaker_probe)
+                if probe is not None
+            )
+        )
+        stt = stt_probe.result()
+        tts = tts_probe.result()
         payload = {
             "ok": bool(stt.get("ok") and tts.get("ok")),
             "stt": stt,
             "tts": tts,
             "satellitePipelines": len(self._segmenters),
         }
-        if self._denoiser is not None:
+        if denoise_probe is not None:
             # The sidecar is best-effort; report it without failing overall health.
-            payload["noiseSuppression"] = await self._denoiser.health()
-        if self._speaker_recognizer is not None:
-            payload["speakerRecognition"] = await self._speaker_recognizer.health()
+            payload["noiseSuppression"] = denoise_probe.result()
+        if speaker_probe is not None:
+            payload["speakerRecognition"] = speaker_probe.result()
         else:
             payload["speakerRecognition"] = {"ok": True, "enabled": False}
         payload["aec"] = (
@@ -1027,11 +1093,23 @@ class SatelliteAudioRuntime:
         if has_speech_interrupt(transcript, self._wake_matcher.words) and (
             conversation_active or scope_id in self._speech_cancel_events
         ):
+            interrupt_speaker = await self._resolve_current_speaker(
+                speaker_task,
+                room_id=room_id,
+                conversation_active=conversation_active,
+                eligible=True,
+            )
             self._announce_transcript(
                 "user",
                 spoken_transcript,
                 satellite_id=satellite_id,
                 room_id=room_id,
+                speaker_name=(
+                    interrupt_speaker.display_name
+                    if interrupt_speaker is not None
+                    and interrupt_speaker.status == "recognized"
+                    else None
+                ),
             )
             interrupted = await self.interrupt_speech(room_id)
             self.service.end_conversation(room_id)
@@ -1147,6 +1225,19 @@ class SatelliteAudioRuntime:
             )
             self.release_turn(arbiter_claim)
             return None
+        speaker_started = time.perf_counter()
+        speaker_identity = await self._resolve_current_speaker(
+            speaker_task,
+            room_id=room_id,
+            conversation_active=conversation_active,
+            eligible=addressed,
+        )
+        speaker_ms = round((time.perf_counter() - speaker_started) * 1000, 3)
+        announced_speaker_name = (
+            speaker_identity.display_name
+            if speaker_identity is not None and speaker_identity.status == "recognized"
+            else None
+        )
         announce_id = self._announce_transcript(
             "user",
             spoken_transcript,
@@ -1154,6 +1245,7 @@ class SatelliteAudioRuntime:
             room_id=room_id,
             replaces_id=dedup_verdict.replace_announce_id,
             visible=addressed,
+            speaker_name=announced_speaker_name,
         )
         self._dedup.record(
             scope_id=scope_id,
@@ -1163,29 +1255,6 @@ class SatelliteAudioRuntime:
             announce_id=announce_id,
             addressed=addressed,
         )
-        speaker_started = time.perf_counter()
-        speaker_identity = None
-        if self._speaker_recognizer is not None and speaker_task is not None:
-            embedding = await speaker_task
-            conversation_template_id = (
-                self._conversations.speaker_template(room_id)
-                if self._conversations is not None and conversation_active
-                else None
-            )
-            speaker_identity = await self._speaker_recognizer.resolve(
-                embedding,
-                eligible=addressed,
-                preferred_template_id=conversation_template_id,
-            )
-            if (
-                self._conversations is not None
-                and conversation_active
-                and speaker_identity.template_id is not None
-            ):
-                self._conversations.bind_speaker_template(
-                    room_id, speaker_identity.template_id
-                )
-        speaker_ms = round((time.perf_counter() - speaker_started) * 1000, 3)
         now = datetime.now(UTC)
         service_started = time.perf_counter()
         try:
@@ -1215,6 +1284,24 @@ class SatelliteAudioRuntime:
                 errorType=type(error).__name__,
             )
             raise
+        if result.speaker is not None:
+            speaker_identity = result.speaker
+        final_speaker_name = (
+            speaker_identity.display_name
+            if speaker_identity is not None and speaker_identity.status == "recognized"
+            else None
+        )
+        if addressed and final_speaker_name != announced_speaker_name:
+            # A disclosure can promote/rename the profile during service.handle.
+            # Upgrade the existing line rather than showing a second utterance.
+            self._announce_transcript(
+                "user",
+                spoken_transcript,
+                satellite_id=satellite_id,
+                room_id=room_id,
+                replaces_id=announce_id,
+                speaker_name=final_speaker_name,
+            )
         service_ms = round((time.perf_counter() - service_started) * 1000, 3)
         # Conversation lifecycle: real turns keep the window open; an explicit
         # abandonment ("never mind", "that's all") closes it immediately.
@@ -1253,6 +1340,7 @@ class SatelliteAudioRuntime:
                 room_id=room_id,
                 replaces_id=announce_id,
                 kind="command",
+                speaker_name=final_speaker_name,
             )
         # Log the outcome (output side): the decision, whether a command took
         # effect, and what (if anything) will be spoken back.  ``said=None``

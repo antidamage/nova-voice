@@ -88,6 +88,24 @@ def test_speaker_template_affinity_lasts_only_for_the_live_conversation() -> Non
     clock.advance(20)
     assert conversations.speaker_template("lounge") is None
 
+
+def test_recognized_speaker_name_and_pronouns_are_retained_per_turn() -> None:
+    conversations = ConversationTracker()
+    conversations.start("lounge")
+
+    conversations.append_turn(
+        "lounge",
+        "What is on?",
+        "The lounge light.",
+        speaker_name="Adeline",
+        speaker_pronouns="she/her",
+    )
+
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    assert snapshot.messages[0].speaker_name == "Adeline"
+    assert snapshot.messages[0].speaker_pronouns == "she/her"
+
     conversations.start("lounge")
     assert conversations.speaker_template("lounge") is None
 

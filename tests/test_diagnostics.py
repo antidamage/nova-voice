@@ -30,7 +30,11 @@ from nova_voice.domain import (
 from nova_voice.monitor import VoiceMonitor
 
 
-def handle_result(*, response_text: str | None = "Done") -> HandleResult:
+def handle_result(
+    *,
+    response_text: str | None = "Done",
+    speaker: SpeakerIdentity | None = None,
+) -> HandleResult:
     return HandleResult(
         utterance_id="turn-1",
         interpretation=Interpretation(
@@ -42,6 +46,7 @@ def handle_result(*, response_text: str | None = "Done") -> HandleResult:
             active_goal=ActiveGoal(status=GoalStatus.SATISFIED),
             response_plan=ResponsePlan(),
         ),
+        speaker=speaker,
         executed=False,
         shadowed=True,
         policy_reason="shadow_mode",
@@ -88,7 +93,10 @@ class FakeStreamingAudio(FakeDiagnosticAudio):
 
 async def request(app, method: str, path: str, **kwargs) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="https://voice-server.test") as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="https://voice-server.test",
+    ) as client:
         return await client.request(method, path, **kwargs)
 
 
@@ -278,6 +286,21 @@ class FakeService:
         return handle_result()
 
 
+class ProfilePromotingService(FakeService):
+    async def handle(self, utterance):
+        self.utterance = utterance
+        return handle_result(
+            speaker=SpeakerIdentity(
+                status="recognized",
+                template_id="voice-adeline",
+                person_id="person-adeline",
+                display_name="Adeline",
+                pronouns="she/her",
+                confidence=0.91,
+            )
+        )
+
+
 async def test_explicit_pcm_turn_reuses_stt_service_and_tts() -> None:
     service = FakeService()
     runtime = SatelliteAudioRuntime(service, FakeStt(), FakeTts(), lambda: None)
@@ -397,8 +420,9 @@ class ConversationService(FakeService):
 
 
 class RecordingSpeakerRecognizer:
-    def __init__(self) -> None:
+    def __init__(self, identity: SpeakerIdentity | None = None) -> None:
         self.preferred_template_ids: list[str | None] = []
+        self.identity = identity
 
     async def extract(self, _pcm16: bytes, *, duration_ms: int):
         assert duration_ms > 0
@@ -413,6 +437,8 @@ class RecordingSpeakerRecognizer:
     ) -> SpeakerIdentity:
         assert eligible
         self.preferred_template_ids.append(preferred_template_id)
+        if self.identity is not None:
+            return self.identity
         return SpeakerIdentity(
             status="provisional",
             template_id=preferred_template_id or "voice-a",
@@ -447,6 +473,74 @@ async def test_runtime_reuses_the_conversation_speaker_template_on_followups() -
 
     assert recognizer.preferred_template_ids == [None, "voice-a"]
     assert conversations.speaker_template("lounge") == "voice-a"
+
+
+async def test_runtime_labels_user_transcripts_with_recognized_profile_name() -> None:
+    conversations = ConversationTracker()
+    announcer = RecordingAnnouncer()
+    recognizer = RecordingSpeakerRecognizer(
+        SpeakerIdentity(
+            status="recognized",
+            template_id="voice-adeline",
+            person_id="person-adeline",
+            display_name="Adeline",
+            pronouns="she/her",
+            confidence=0.93,
+        )
+    )
+    runtime = SatelliteAudioRuntime(
+        ConversationService(conversations),
+        QueueStt("Bandit, hello"),
+        FakeTts(),
+        lambda: None,
+        conversations=conversations,
+        speaker_recognizer=recognizer,  # type: ignore[arg-type]
+        speech_announcer=announcer,
+    )
+
+    await runtime.process_pcm(
+        satellite_id="lounge-microphone",
+        room_id="lounge",
+        pcm16=b"\x00\x00" * 16_000,
+        wake_detected=True,
+    )
+
+    user_payloads = [
+        payload for payload in announcer.transcripts if payload["role"] == "user"
+    ]
+    assert user_payloads
+    assert all(payload["speakerName"] == "Adeline" for payload in user_payloads)
+    assert user_payloads[0]["speakerName"] == "Adeline"
+
+
+async def test_runtime_upgrades_transcript_when_profile_is_learned_on_that_turn() -> None:
+    conversations = ConversationTracker()
+    announcer = RecordingAnnouncer()
+    runtime = SatelliteAudioRuntime(
+        ProfilePromotingService(),
+        QueueStt("Bandit, my name is Adeline"),
+        FakeTts(),
+        lambda: None,
+        conversations=conversations,
+        speaker_recognizer=RecordingSpeakerRecognizer(),  # type: ignore[arg-type]
+        speech_announcer=announcer,
+    )
+
+    await runtime.process_pcm(
+        satellite_id="lounge-microphone",
+        room_id="lounge",
+        pcm16=b"\x00\x00" * 16_000,
+        wake_detected=True,
+    )
+
+    user_payloads = [
+        payload for payload in announcer.transcripts if payload["role"] == "user"
+    ]
+    assert "speakerName" not in user_payloads[0]
+    promoted = next(
+        payload for payload in user_payloads if payload.get("speakerName") == "Adeline"
+    )
+    assert promoted["replacesId"] == user_payloads[0]["id"]
 
 
 async def test_response_audio_is_room_local_while_speaking_animation_is_global() -> None:
