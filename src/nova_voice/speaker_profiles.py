@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,94 @@ def _clean(value: str | None) -> str | None:
         return None
     cleaned = " ".join(value.split()).strip()
     return cleaned or None
+
+
+_DISCLOSURE_WORD_RE = re.compile(
+    r"[^\W_]+(?:['\N{RIGHT SINGLE QUOTATION MARK}.\-][^\W_]+)*",
+    re.UNICODE,
+)
+
+
+def _words(value: str) -> list[str]:
+    return _DISCLOSURE_WORD_RE.findall(value.casefold())
+
+
+def _terms_appear_in_order(terms: list[str], evidence: str) -> bool:
+    if not terms:
+        return False
+    evidence_words = _words(evidence)
+    cursor = 0
+    for term in terms:
+        try:
+            cursor = evidence_words.index(term, cursor) + 1
+        except ValueError:
+            return False
+    return True
+
+
+def _normalize_pronouns(value: str | None) -> str | None:
+    cleaned = _clean(value)
+    if cleaned is None:
+        return None
+    terms = _words(cleaned)
+    if terms and terms[-1] in {"pronoun", "pronouns"}:
+        terms = terms[:-1]
+    if 2 <= len(terms) <= 3:
+        return "/".join(terms)
+    return cleaned
+
+
+def validated_self_profile_update(
+    update: SelfProfileUpdate,
+    transcript: str,
+) -> SelfProfileUpdate | None:
+    """Keep only current-turn identity fields supported by exact evidence."""
+
+    evidence = " ".join(update.evidence.casefold().split())
+    spoken = " ".join(transcript.casefold().split())
+    if not evidence or evidence not in spoken:
+        return None
+    proposed_name = _clean(update.name)
+    proposed_pronouns = _normalize_pronouns(update.pronouns)
+    name = (
+        proposed_name
+        if proposed_name is not None
+        and proposed_name.casefold() in evidence
+        and any(
+            cue in evidence
+            for cue in (
+                "my name",
+                "call me",
+                "this is",
+                "i'm",
+                "i am",
+                "i go by",
+                "i'm called",
+            )
+        )
+        else None
+    )
+    pronoun_terms = _words(proposed_pronouns or "")
+    pronouns = (
+        proposed_pronouns
+        if proposed_pronouns is not None
+        and _terms_appear_in_order(pronoun_terms, evidence)
+        and (
+            any(
+                cue in evidence
+                for cue in ("my pronouns", "i use", "i go by", "pronouns are")
+            )
+            or (name is not None and name.casefold() in evidence)
+        )
+        else None
+    )
+    if name is None and pronouns is None:
+        return None
+    return SelfProfileUpdate(
+        name=name,
+        pronouns=pronouns,
+        evidence=update.evidence,
+    )
 
 
 def _normalize(vector: np.ndarray) -> np.ndarray:
@@ -391,40 +480,12 @@ class SpeakerProfileStore:
         *,
         now: datetime | None = None,
     ) -> SpeakerIdentity:
-        evidence = " ".join(update.evidence.casefold().split())
-        spoken = " ".join(transcript.casefold().split())
-        if not evidence or evidence not in spoken or identity.template_id is None:
+        validated = validated_self_profile_update(update, transcript)
+        if validated is None or identity.template_id is None:
             return identity
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        name = _clean(update.name)
-        pronouns = _clean(update.pronouns)
-        if name is not None and (
-            name.casefold() not in evidence
-            or not any(
-                cue in evidence
-                for cue in (
-                    "my name",
-                    "call me",
-                    "this is",
-                    "i'm",
-                    "i am",
-                    "i go by",
-                    "i'm called",
-                )
-            )
-        ):
-            return identity
-        if pronouns is not None and (
-            pronouns.casefold() not in evidence
-            or not (
-                any(
-                    cue in evidence
-                    for cue in ("my pronouns", "i use", "i go by", "pronouns are")
-                )
-                or (name is not None and name.casefold() in evidence)
-            )
-        ):
-            return identity
+        name = validated.name
+        pronouns = validated.pronouns
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM speaker_templates WHERE id = ?", (identity.template_id,)

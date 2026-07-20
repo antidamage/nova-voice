@@ -43,7 +43,10 @@ from nova_voice.policy import ExecutionPolicy
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.sessions import SessionManager
-from nova_voice.speaker_profiles import SpeakerProfileStore
+from nova_voice.speaker_profiles import (
+    SpeakerProfileStore,
+    validated_self_profile_update,
+)
 from nova_voice.voice_settings import VoiceSettings
 
 logger = logging.getLogger(__name__)
@@ -58,7 +61,8 @@ _AMBIENT_SPEECH_ACTS = frozenset(
 
 _SPOKEN_WORD_RE = re.compile(r"\b\w+(?:['\N{RIGHT SINGLE QUOTATION MARK}]\w+)?\b", re.UNICODE)
 _PROFILE_FILLERS_RE = re.compile(
-    r"^(?:(?:okay|ok|actually|well|please|hi|hello)\b[\s,;:\-\N{EM DASH}]*)+",
+    r"^(?:(?:okay|ok|actually|well|please|hi|hello|by\s+the\s+way)\b"
+    r"[\s,;:\-\N{EM DASH}]*)+",
     re.IGNORECASE,
 )
 _PROFILE_NAME_WORD = r"[^\W\d_]+(?:['\N{RIGHT SINGLE QUOTATION MARK}.\-][^\W\d_]+)*"
@@ -420,14 +424,32 @@ class NovaVoiceService:
             )
         timings_ms["providerContext"] = round((time.perf_counter() - context_started) * 1000, 3)
 
-        interpretation_started = time.perf_counter()
-        interpretation = await self.interpreter.interpret(
-            utterance,
-            active_goal=goal,
-            relevant_state=relevant_state,
-            tools=self.registry.tool_catalog(),
-            conversation=conversation,
+        addressed_identity_turn = bool(
+            self.speaker_profiles is not None
+            and utterance.speaker.template_id is not None
+            and (utterance.wake_detected or utterance.conversation_active)
         )
+        # Identity extraction is deliberately separate from general intent and
+        # speech-act classification. Start the tiny context-free pass first so
+        # the local model can batch/run it alongside the normal interpretation.
+        profile_task = (
+            asyncio.create_task(self.interpreter.extract_self_profile_update(utterance))
+            if addressed_identity_turn
+            else None
+        )
+        interpretation_started = time.perf_counter()
+        try:
+            interpretation = await self.interpreter.interpret(
+                utterance,
+                active_goal=goal,
+                relevant_state=relevant_state,
+                tools=self.registry.tool_catalog(),
+                conversation=conversation,
+            )
+        except BaseException:
+            if profile_task is not None:
+                profile_task.cancel()
+            raise
         timings_ms["interpretation"] = round(
             (time.perf_counter() - interpretation_started) * 1000, 3
         )
@@ -467,20 +489,24 @@ class NovaVoiceService:
         # Identity claims are bound only to the biometric template extracted
         # from this exact addressed utterance. Never inherit a prior speaker
         # merely because the household-wide conversation remains open.
-        profile_update = interpretation.self_profile_update
+        profile_update = await profile_task if profile_task is not None else None
         if profile_update is None:
             profile_update = explicit_self_profile_update(
                 utterance.transcript, self._address_words()
             )
-            if profile_update is not None:
-                interpretation = interpretation.model_copy(
-                    update={"self_profile_update": profile_update}
-                )
+        if profile_update is not None:
+            profile_update = validated_self_profile_update(
+                profile_update,
+                utterance.transcript,
+            )
+        # The general interpretation model no longer owns this field. Replace
+        # any value it emitted with the independent current-turn result.
+        interpretation = interpretation.model_copy(
+            update={"self_profile_update": profile_update}
+        )
         if (
-            self.speaker_profiles is not None
+            addressed_identity_turn
             and profile_update is not None
-            and (utterance.wake_detected or utterance.conversation_active)
-            and interpretation.speech_act not in _AMBIENT_SPEECH_ACTS
         ):
             updated_speaker = await self.speaker_profiles.apply_disclosure(
                 utterance.speaker,
