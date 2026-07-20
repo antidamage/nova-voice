@@ -57,13 +57,6 @@ class Settings(BaseSettings):
     # ``auto`` selects BF16 where it is natively supported and stable FP32 on
     # Turing/pre-BF16 CUDA devices. Explicit FP16 requires deployment testing.
     tts_dtype: Literal["auto", "float16", "bfloat16", "float32"] = "auto"
-    # Acoustic wake models are optional.  The production path uses the
-    # transcript matcher so a stale hey_nova model cannot wake the agent after
-    # the household switches to Beemo; set this only when a matching Beemo
-    # model has been provisioned.
-    wake_model_path: Path | None = None
-    wake_feature_model_dir: Path = Path("models/openwakeword")
-
     # Input-handling pipeline: DeepFilterNet3 sidecar (stage 1), playback-echo
     # AEC (stage 2), the narrow simplified-English pass (stage 3), and the
     # wake-word conversation window (stage 4).
@@ -140,13 +133,6 @@ class Settings(BaseSettings):
     def validate_household_timezone(cls, value: str | None) -> str | None:
         if value:
             ZoneInfo(value)
-        return value
-
-    @field_validator("wake_model_path", mode="before")
-    @classmethod
-    def empty_wake_model_is_disabled(cls, value: object) -> object:
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
         return value
 
     def household_tzinfo(self) -> tzinfo:

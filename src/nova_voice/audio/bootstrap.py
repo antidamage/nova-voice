@@ -9,7 +9,6 @@ from nova_voice.audio.election import SegmentElection
 from nova_voice.audio.runtime import SatelliteAudioRuntime
 from nova_voice.audio.segmenter import SileroVad, SpeechSegmenter
 from nova_voice.audio.vocab import SimplifiedEnglishGate
-from nova_voice.audio.wake import OpenWakeWordDetector
 from nova_voice.config import Settings
 from nova_voice.inference.scheduler import GpuExecutionGate
 from nova_voice.inference.stt import NemoSpeechToText
@@ -55,29 +54,11 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             end_silence_ms=settings.vad_end_silence_ms,
         )
 
-    def wake_factory() -> OpenWakeWordDetector:
-        if settings.wake_model_path is None:
-            raise RuntimeError("no matching acoustic wake model is configured")
-        return OpenWakeWordDetector(
-            str(settings.wake_model_path),
-            feature_model_dir=str(settings.wake_feature_model_dir),
-        )
-
     return SatelliteAudioRuntime(
         service,
         stt,
         tts,
         segmenter_factory,
-        # Passive mode already requires high confidence and addressing. Use
-        # the transcript wake fallback rather than continuously running a
-        # second edge model over every audio frame.
-        wake_detector_factory=(
-            wake_factory
-            if not settings.passive_execution_enabled
-            and settings.wake_model_path is not None
-            and settings.wake_model_path.exists()
-            else None
-        ),
         denoiser=(
             NoiseSuppressor(
                 settings.denoise_base_url,

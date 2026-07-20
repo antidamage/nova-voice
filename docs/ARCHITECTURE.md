@@ -29,8 +29,8 @@ Nocturnium native service / Indium LaunchAgent / Iridium mic
 
 Iridium is the only inference host. Satellites capture/play audio and report
 room/device metadata; they do not host alternative STT, TTS, or LLM models.
-The existing Home Assistant Assist/Wyoming service is a migration fallback, not
-part of the new hot path.
+The legacy Home Assistant Assist/Wyoming service has been retired and is no
+longer a supported fallback.
 
 The opt-in development diagnostics client is a Nova Voice-owned page served by
 the same mTLS API. It uses explicit push-to-record browser capture and feeds a
@@ -353,7 +353,6 @@ testable across crash/restart.
 
 - Pipecat processors: https://docs.pipecat.ai/pipecat/fundamentals/custom-frame-processor
 - WebSocket over TLS: https://www.rfc-editor.org/info/rfc6455/
-- openWakeWord frame requirements: https://github.com/dscripka/openWakeWord
 - Silero VAD: https://github.com/snakers4/silero-vad
 - PipeWire echo cancellation: https://docs.pipewire.org/page_module_echo_cancel.html
 - WirePlumber user-service lifecycle: https://pipewire.pages.freedesktop.org/wireplumber/daemon/running.html

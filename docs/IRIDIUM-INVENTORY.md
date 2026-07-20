@@ -28,6 +28,5 @@ swapped at runtime.
 Iridium's dummy audio graph is expected while the primary microphone/speaker
 paths are the Nocturnium and Indium satellites. Their physical audio,
 certificate installation, AEC, and macOS microphone-consent checks must be
-made on the respective hosts before capture is started. Existing Home
-Assistant / Wyoming services remain outside this project and are not changed
-by the inventory step.
+made on the respective hosts before capture is started. Home Assistant remains
+outside this project and is not changed by the inventory step.
