@@ -9,6 +9,7 @@ Selection is finalized only after the simultaneous Iridium benchmark.
 | --- | --- | --- | --- |
 | LLM | Qwen3.5-4B Q4_K_M | pinned llama.cpp server | current compact post-trained Qwen, non-thinking mode, small enough for shared VRAM, schema-constrained output |
 | STT primary | NVIDIA Nemotron Speech Streaming EN 0.6B | pinned NeMo/Transformers | NVIDIA's recommended English-only cache-aware streaming model; punctuation and low-latency chunk choices |
+| Speaker identity | NVIDIA TitaNet-Large (English) | pinned NeMo, CPU | 23M-parameter embedding model already supported by the NeMo runtime; enables local multi-template household profiles without using GPU residency |
 | STT challenger | NVIDIA Nemotron 3.5 ASR Streaming 0.6B, `en-GB` | NeMo 26.06 or Transformers 5.13+ | native cache-aware 80-1120 ms streaming, explicit locale conditioning and Turing/Linux support |
 | STT accuracy challenger | NVIDIA Parakeet TDT 0.6B v3 | pinned NeMo | strong published offline/leaderboard accuracy and Turing testing; buffered streaming latency must be measured |
 | TTS quality candidate | Qwen3-TTS 12Hz 1.7B CustomVoice | qwen-tts, BF16 where supported | streaming, direct emotion/prosody instructions, stronger English content-consistency results than 0.6B |

@@ -30,6 +30,7 @@ from nova_voice.audio.speech_timing import (
 )
 from nova_voice.audio.vocab import SimplifiedEnglishGate
 from nova_voice.domain import AcousticFeatures, HandleResult, Utterance
+from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
@@ -43,6 +44,9 @@ ResponseCancelSink = Callable[[], Awaitable[None]]
 MonitorSink = Callable[[str, dict[str, Any]], object]
 
 _LETTER_TOKENS = re.compile(r"[a-z]+")
+# Case-preserving twin of ``_LETTER_TOKENS`` for span-accurate rewriting of the
+# original transcript text.
+_LETTER_SPANS = re.compile(r"[A-Za-z]+")
 # Tokens NeMo commonly emits for non-speech room noise.  A transcript made up
 # only of these carries no request and must be discarded.
 _FILLER_TOKENS = frozenset(
@@ -66,12 +70,28 @@ DAY_VOLUME_START_HOUR = 8
 NIGHT_VOLUME_START_HOUR = 21
 
 
+@dataclass(frozen=True)
+class _WakeMatch:
+    """Where the wake phrase sits in the token stream.
+
+    ``index``/``token_count`` cover the wake word itself (two tokens for a
+    split rendering such as "bee mo"). ``fused_prefix_chars`` is nonzero when
+    the wake token carries a fused greeting fragment ("hanova" = "ha"+"nova").
+    """
+
+    prefix_count: int
+    index: int
+    token_count: int
+    fused_prefix_chars: int
+
+
 class WakePhraseMatcher:
     """Transcript-level wake matching for configurable accepted words.
 
     Accepts a configured word early in the utterance, optionally after a
     greeting prefix. A joined adjacent-token check catches split renderings
-    such as "bee mo" without hiding additional fuzzy aliases from the UI.
+    such as "bee mo", and a fused-prefix check catches single-token renderings
+    such as "hanova", without hiding additional fuzzy aliases from the UI.
     """
 
     def __init__(
@@ -95,31 +115,85 @@ class WakePhraseMatcher:
     def _matches_token(self, token: str) -> bool:
         return token in self.words
 
-    def matches(self, transcript: str) -> bool:
-        tokens = _LETTER_TOKENS.findall(transcript.casefold())
+    def _fused_prefix_length(self, token: str) -> int:
+        """Length of a greeting fragment fused onto a wake word ("hanova").
+
+        Streaming ASR sometimes renders "hey nova" as a single token. Only a
+        fragment that is an accepted greeting prefix, or within one edit of
+        one, counts — so ordinary words that merely end with a real-word wake
+        name ("casanova", "supernova") stay unmatched.
+        """
+
+        longest_prefix = max((len(prefix) for prefix in self.prefixes), default=0)
+        for word in self.words:
+            if len(token) <= len(word) or not token.endswith(word):
+                continue
+            fragment = token[: -len(word)]
+            if len(fragment) > longest_prefix:
+                continue
+            if fragment in self.prefixes or any(
+                _edit_distance_at_most_one(fragment, prefix) for prefix in self.prefixes
+            ):
+                return len(fragment)
+        return 0
+
+    def find(self, tokens: list[str]) -> _WakeMatch | None:
+        """Locate the wake phrase early in a casefolded token stream."""
+
         if not tokens:
-            return False
+            return None
         start = 0
         while start < len(tokens) and start < 2 and tokens[start] in self.prefixes:
             start += 1
         # Only the beginning (or explicit greeting prefixes) is addressed.
         # This avoids television narration such as "I watched Beemo".
         if start >= len(tokens):
-            return False
-        for position in range(start, min(start + 1, len(tokens))):
-            # A real-word wake name used as an ordinary noun ("the bandit
-            # stole...") is TV/narration, not addressing — an article before
-            # the word disqualifies the match.
-            preceded_by_article = position > 0 and tokens[position - 1] in {"the", "a", "an"}
-            if self._matches_token(tokens[position]) and not preceded_by_article:
-                return True
-            if (
-                position + 1 < len(tokens)
-                and tokens[position] + tokens[position + 1] in self.words
-                and not preceded_by_article
-            ):
-                return True
-        return False
+            return None
+        position = start
+        # A real-word wake name used as an ordinary noun ("the bandit
+        # stole...") is TV/narration, not addressing — an article before
+        # the word disqualifies the match.
+        if position > 0 and tokens[position - 1] in {"the", "a", "an"}:
+            return None
+        if self._matches_token(tokens[position]):
+            return _WakeMatch(start, position, 1, 0)
+        if position + 1 < len(tokens) and tokens[position] + tokens[position + 1] in self.words:
+            return _WakeMatch(start, position, 2, 0)
+        fused = self._fused_prefix_length(tokens[position])
+        if fused:
+            return _WakeMatch(start, position, 1, fused)
+        return None
+
+    def matches(self, transcript: str) -> bool:
+        return self.find(_LETTER_TOKENS.findall(transcript.casefold())) is not None
+
+    def rewrite(self, transcript: str, agent_name: str) -> str:
+        """Replace the spoken wake phrase with the agent's display name.
+
+        "hey bandit turn on the lights" keeps its greeting and becomes
+        "hey Nova turn on the lights"; a fused rendering ("habandit") gets the
+        determined greeting added back in front ("hey Nova"). Transcripts
+        without a wake phrase are returned unchanged.
+        """
+
+        agent_name = agent_name.strip()
+        if not agent_name:
+            return transcript
+        spans = list(_LETTER_SPANS.finditer(transcript))
+        match = self.find([span.group(0).casefold() for span in spans])
+        if match is None:
+            return transcript
+        wake_start = spans[match.index].start()
+        wake_end = spans[match.index + match.token_count - 1].end()
+        replacement = agent_name
+        if match.fused_prefix_chars and match.prefix_count == 0:
+            # The fused fragment proves a greeting was spoken; restore it as
+            # the fragment itself when it is a real prefix, else canonically.
+            fragment = transcript[wake_start : wake_start + match.fused_prefix_chars]
+            if fragment.casefold() not in self.prefixes:
+                fragment = "Hey" if wake_start == 0 else "hey"
+            replacement = f"{fragment} {agent_name}"
+        return transcript[:wake_start] + replacement + transcript[wake_end:]
 
 
 def _edit_distance_at_most_one(candidate: str, target: str) -> bool:
@@ -221,6 +295,7 @@ class SatelliteAudioRuntime:
         monitor_sink: MonitorSink | None = None,
         *,
         denoiser: NoiseSuppressor | None = None,
+        speaker_recognizer: SpeakerRecognizer | None = None,
         echo_guard: PlaybackEchoGuard | None = None,
         conversations: ConversationTracker | None = None,
         narrow_gate: SimplifiedEnglishGate | None = None,
@@ -247,11 +322,18 @@ class SatelliteAudioRuntime:
         self._ambient_min_words = max(1, int(ambient_min_words))
         self._monitor_sink = monitor_sink
         self._denoiser = denoiser
+        self._speaker_recognizer = speaker_recognizer
         self._echo_guard = echo_guard
         self._conversations = conversations
         self._narrow_gate = narrow_gate
         self._wake_matcher = WakePhraseMatcher()
         self._agent_name = "Nova"
+        # System-wide voice killswitch (dashboard "Voice enabled"). When false,
+        # every incoming mic frame is dropped and open conversations are closed.
+        self._voice_enabled = True
+        # Per-satellite killswitch: satellite ids switched off individually so
+        # their mic frames are dropped (casefolded to match the roster keys).
+        self._disabled_satellites: set[str] = set()
         # Applied to response PCM as DSP — the TTS model ignores pitch
         # instructions (see nova_voice.audio.pitch).
         self._pitch_percent = 0
@@ -260,7 +342,7 @@ class SatelliteAudioRuntime:
         self._volume_day_percent = 100
         self._volume_night_percent = 100
         self._playback_timezone = playback_timezone
-        self.playback_preroll_ms = max(200, min(2000, int(playback_preroll_ms)))
+        self.playback_preroll_ms = max(20, min(2000, int(playback_preroll_ms)))
         self.playback_frame_ms = max(20, min(200, int(playback_frame_ms)))
         self._speech_announcer = speech_announcer
         self._speech_audible_offset_ms = speech_audible_offset_ms
@@ -361,6 +443,7 @@ class SatelliteAudioRuntime:
         room_id: str,
         replaces_id: str | None = None,
         visible: bool = True,
+        kind: str | None = None,
     ) -> str:
         announce_id = replaces_id or uuid4().hex
         # ``visible=False`` still hands back an id so dedup bookkeeping stays
@@ -380,6 +463,10 @@ class SatelliteAudioRuntime:
             "satelliteId": satellite_id,
             "roomId": room_id,
         }
+        if kind is not None:
+            # The dashboard's transcript header tags each turn [COMMAND] or
+            # [EXCHANGE]; absent means exchange, so only command turns send it.
+            payload["kind"] = kind
         if replaces_id is not None:
             # The dashboard upgrades the existing line in place instead of
             # appending a near-duplicate.
@@ -521,6 +608,15 @@ class SatelliteAudioRuntime:
         return task
 
     async def apply_voice_settings(self, settings: VoiceSettings) -> None:
+        # System-wide killswitch: when voice is turned off, close every open
+        # conversation immediately so re-enabling requires the wake word again.
+        # The per-frame gate in ``ingest`` drops all audio while disabled.
+        self._voice_enabled = settings.system_voice_enabled
+        if self._speaker_recognizer is not None:
+            self._speaker_recognizer.configure(enabled=settings.speaker_recognition_enabled)
+        self._disabled_satellites = {sat.casefold() for sat in settings.disabled_satellites}
+        if not self._voice_enabled and self._conversations is not None:
+            self._conversations.clear()
         await self.tts.configure(
             speaker=settings.speaker.value,
             language=settings.language.value,
@@ -532,8 +628,17 @@ class SatelliteAudioRuntime:
             settings.wake_words,
             settings.wake_prefix_list(),
         )
-        self._agent_name = settings.agent_name
-        self.playback_preroll_ms = max(200, min(2000, int(settings.tts_preroll_ms)))
+        # The runtime works with the spoken name throughout: ASR biasing, the
+        # wake-phrase rewrite, and the posted transcript label all need the plain
+        # speakable name, not the emoji display name.
+        self._agent_name = settings.spoken_name
+        # Bias STT decoding toward the wake words and agent name so the ASR
+        # actually emits them — worthwhile even for in-vocabulary names, and
+        # required for invented ones the RNNT would otherwise delete.
+        set_boost = getattr(self.stt, "set_boosted_phrases", None)
+        if callable(set_boost):
+            await set_boost([*settings.wake_words, settings.spoken_name])
+        self.playback_preroll_ms = max(20, min(2000, int(settings.tts_preroll_ms)))
         self.playback_frame_ms = max(20, min(200, int(settings.tts_frame_ms)))
 
     def record_first_audible_ms(self, latency_ms: float) -> None:
@@ -569,6 +674,10 @@ class SatelliteAudioRuntime:
         if self._denoiser is not None:
             # The sidecar is best-effort; report it without failing overall health.
             payload["noiseSuppression"] = await self._denoiser.health()
+        if self._speaker_recognizer is not None:
+            payload["speakerRecognition"] = await self._speaker_recognizer.health()
+        else:
+            payload["speakerRecognition"] = {"ok": True, "enabled": False}
         payload["aec"] = (
             self._echo_guard.health() if self._echo_guard is not None else {"enabled": False}
         )
@@ -646,6 +755,14 @@ class SatelliteAudioRuntime:
     ) -> PendingAudioTurn | None:
         """Consume one ordered mic frame and return a completed elected segment."""
 
+        # System-wide voice killswitch: drop every frame before any VAD, STT,
+        # election, or response work so voice is fully disabled for the house.
+        if not self._voice_enabled:
+            return None
+        # Per-satellite killswitch: this satellite is switched off individually
+        # (e.g. while testing other devices), so drop its frames the same way.
+        if satellite_id.casefold() in self._disabled_satellites:
+            return None
         segmenter = self._segmenters.get(satellite_id)
         if segmenter is None:
             segmenter = self.segmenter_factory()
@@ -812,6 +929,20 @@ class SatelliteAudioRuntime:
             pcm16 = await self._denoiser.enhance(pcm16)
             denoise_ms = round((time.perf_counter() - denoise_started) * 1000, 3)
 
+        # TitaNet is CPU-only and can extract this turn's biometric embedding
+        # while the resident GPU performs ASR. The embedding is not persisted
+        # unless later gates establish that this was an addressed interaction.
+        speaker_task = (
+            asyncio.create_task(
+                self._speaker_recognizer.extract(
+                    pcm16,
+                    duration_ms=selected_acoustic.duration_ms,
+                )
+            )
+            if self._speaker_recognizer is not None
+            else None
+        )
+
         stt_started = time.perf_counter()
         # This method receives an already-finalized VAD or push-to-record
         # utterance. Feeding that completed buffer through the cache-aware 160
@@ -885,6 +1016,11 @@ class SatelliteAudioRuntime:
             return None
         if not wake_detected and self._wake_matcher.matches(transcript):
             wake_detected = True
+        # The household-facing transcript and the interpretation model never
+        # see the raw wake codeword: "bandit" / "hey bandit" / a fused
+        # "habandit" all become the agent's display name (greeting preserved).
+        # Cue, dedup, and echo checks keep operating on the raw words.
+        spoken_transcript = self._wake_matcher.rewrite(transcript, self._agent_name)
         conversation_active = (
             self._conversations.active(room_id) if self._conversations is not None else False
         )
@@ -893,7 +1029,7 @@ class SatelliteAudioRuntime:
         ):
             self._announce_transcript(
                 "user",
-                transcript,
+                spoken_transcript,
                 satellite_id=satellite_id,
                 room_id=room_id,
             )
@@ -986,7 +1122,7 @@ class SatelliteAudioRuntime:
                 # upgrade that line in place, still without handling anything.
                 self._announce_transcript(
                     "user",
-                    transcript,
+                    spoken_transcript,
                     satellite_id=satellite_id,
                     room_id=room_id,
                     replaces_id=dedup_verdict.replace_announce_id,
@@ -1013,7 +1149,7 @@ class SatelliteAudioRuntime:
             return None
         announce_id = self._announce_transcript(
             "user",
-            transcript,
+            spoken_transcript,
             satellite_id=satellite_id,
             room_id=room_id,
             replaces_id=dedup_verdict.replace_announce_id,
@@ -1027,6 +1163,29 @@ class SatelliteAudioRuntime:
             announce_id=announce_id,
             addressed=addressed,
         )
+        speaker_started = time.perf_counter()
+        speaker_identity = None
+        if self._speaker_recognizer is not None and speaker_task is not None:
+            embedding = await speaker_task
+            conversation_template_id = (
+                self._conversations.speaker_template(room_id)
+                if self._conversations is not None and conversation_active
+                else None
+            )
+            speaker_identity = await self._speaker_recognizer.resolve(
+                embedding,
+                eligible=addressed,
+                preferred_template_id=conversation_template_id,
+            )
+            if (
+                self._conversations is not None
+                and conversation_active
+                and speaker_identity.template_id is not None
+            ):
+                self._conversations.bind_speaker_template(
+                    room_id, speaker_identity.template_id
+                )
+        speaker_ms = round((time.perf_counter() - speaker_started) * 1000, 3)
         now = datetime.now(UTC)
         service_started = time.perf_counter()
         try:
@@ -1037,12 +1196,13 @@ class SatelliteAudioRuntime:
                     room_id=room_id,
                     started_at=now - timedelta(milliseconds=selected_acoustic.duration_ms),
                     ended_at=now,
-                    transcript=transcript,
+                    transcript=spoken_transcript,
                     transcript_confidence=confidence,
                     wake_detected=wake_detected,
                     conversation_active=conversation_active,
                     dashboard_foreground=dashboard_foreground,
                     acoustic=selected_acoustic,
+                    **({"speaker": speaker_identity} if speaker_identity is not None else {}),
                 )
             )
         except Exception as error:
@@ -1081,14 +1241,18 @@ class SatelliteAudioRuntime:
         # passively) — that is still a genuine dashboard command and earns the
         # same transcription/display rights as a waked or in-conversation
         # turn, even though the household never saw a live line for it yet.
+        # Command turns re-announce for every path: an addressed turn already
+        # has a visible line, so this upgrades it in place with the [COMMAND]
+        # tag; an unaddressed one appears for the first time here.
         is_dashboard_command = bool(result.executed or result.shadowed)
-        if not addressed and is_dashboard_command:
+        if is_dashboard_command:
             self._announce_transcript(
                 "user",
-                transcript,
+                spoken_transcript,
                 satellite_id=satellite_id,
                 room_id=room_id,
                 replaces_id=announce_id,
+                kind="command",
             )
         # Log the outcome (output side): the decision, whether a command took
         # effect, and what (if anything) will be spoken back.  ``said=None``
@@ -1112,6 +1276,7 @@ class SatelliteAudioRuntime:
                 satellite_id=satellite_id,
                 room_id=room_id,
                 visible=addressed or is_dashboard_command,
+                kind="command" if is_dashboard_command else None,
             )
         # Provider execution is complete at this point. Publish it before TTS
         # so an operator can see an allowed/rejected command immediately even
@@ -1123,8 +1288,13 @@ class SatelliteAudioRuntime:
             "turn",
             satelliteId=satellite_id,
             roomId=room_id,
-            transcript=transcript if (addressed or is_dashboard_command) else None,
+            transcript=spoken_transcript if (addressed or is_dashboard_command) else None,
             transcriptConfidence=confidence,
+            speaker=(
+                speaker_identity.model_dump(mode="json")
+                if speaker_identity is not None
+                else None
+            ),
             wakeDetected=wake_detected,
             interpretation={
                 "decision": result.interpretation.decision.value,
@@ -1144,6 +1314,7 @@ class SatelliteAudioRuntime:
             timingsMs={
                 **result.timings_ms,
                 "denoise": denoise_ms,
+                "speaker": speaker_ms,
                 "stt": stt_ms,
                 "service": service_ms,
                 "audioTotal": round((time.perf_counter() - turn_started) * 1000, 3),
@@ -1325,9 +1496,18 @@ class SatelliteAudioRuntime:
                     self._speech_satellites.pop(scope_id, None)
             self._calibrate_speaking_rate(len(result.response_text), played_seconds)
             tts_ms = round((time.perf_counter() - tts_started) * 1000, 3)
+        # Only a genuinely engaged turn extends the follow-up window; ambient,
+        # third-party, and media speech inside a conversation must let it time
+        # out rather than keep it alive indefinitely (mirrors the service rule).
+        engaged_turn = wake_detected or result.interpretation.speech_act.value not in {
+            "third_party",
+            "quoted_or_media",
+            "self_intention",
+        }
         if (
             self._conversations is not None
             and conversation_active
+            and engaged_turn
             and not has_abandonment(transcript, self._wake_matcher.words)
         ):
             self._conversations.refresh(room_id)
@@ -1342,13 +1522,14 @@ class SatelliteAudioRuntime:
             total_ms,
         )
         turn = ProcessedAudioTurn(
-            transcript=transcript,
+            transcript=spoken_transcript,
             transcript_confidence=confidence,
             result=result,
             response_pcm16=response_pcm16,
             response_sample_rate=response_sample_rate,
             timings_ms={
                 "denoise": denoise_ms,
+                "speaker": speaker_ms,
                 "stt": stt_ms,
                 "service": service_ms,
                 "tts": tts_ms,

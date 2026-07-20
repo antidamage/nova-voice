@@ -11,6 +11,7 @@ from uuid import uuid4
 class ConversationMessage:
     role: Literal["user", "assistant"]
     content: str
+    speaker_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,11 @@ class ConversationSnapshot:
     personality: str
     persona_prompt: str
     messages: tuple[ConversationMessage, ...]
+    # Compact one-line summaries of dashboard API responses the assistant has
+    # retrieved this conversation, oldest first. Injected into the model's
+    # system context so follow-up turns can reason over data an earlier tool
+    # call returned, rather than losing it after the reply is spoken.
+    observations: tuple[str, ...] = ()
 
 
 @dataclass
@@ -33,6 +39,8 @@ class _RoomConversation:
     personality: str = ""
     persona_prompt: str = ""
     messages: list[ConversationMessage] | None = None
+    observations: list[str] | None = None
+    speaker_template_id: str | None = None
 
 
 class ConversationTracker:
@@ -111,15 +119,51 @@ class ConversationTracker:
         session = self._active_session(room_id)
         return self._snapshot(session) if session is not None else None
 
-    def append_turn(self, room_id: str, user: str, assistant: str | None) -> None:
+    # Recent-turn window kept in the prompt. A conversation that stays open a
+    # long time must not accrete unbounded "old, old" history; only the most
+    # recent turns are retained (older ones age out of context).
+    MESSAGE_HISTORY_LIMIT = 16
+
+    def append_turn(
+        self,
+        room_id: str,
+        user: str,
+        assistant: str | None,
+        *,
+        speaker_name: str | None = None,
+    ) -> None:
         session = self._rooms.get(self._key(room_id))
         if session is None:
             return
         if session.messages is None:
             session.messages = []
-        session.messages.append(ConversationMessage("user", user))
+        session.messages.append(ConversationMessage("user", user, speaker_name))
         if assistant:
             session.messages.append(ConversationMessage("assistant", assistant))
+        if len(session.messages) > self.MESSAGE_HISTORY_LIMIT:
+            del session.messages[: -self.MESSAGE_HISTORY_LIMIT]
+
+    def record_observations(
+        self, room_id: str, entries: list[str], *, limit: int = 8
+    ) -> None:
+        """Retain dashboard API responses for later turns of this conversation.
+
+        Newest entries win once ``limit`` is exceeded so the injected context
+        stays bounded; blank entries and consecutive duplicates are skipped.
+        """
+
+        session = self._rooms.get(self._key(room_id))
+        if session is None:
+            return
+        if session.observations is None:
+            session.observations = []
+        for entry in entries:
+            text = entry.strip()
+            if not text or (session.observations and session.observations[-1] == text):
+                continue
+            session.observations.append(text)
+        if len(session.observations) > limit:
+            del session.observations[:-limit]
 
     def refresh(self, room_id: str) -> None:
         # A known in-flight turn may take longer than the idle window to render
@@ -129,8 +173,26 @@ class ConversationTracker:
         if session is not None:
             session.last_turn_monotonic = self._monotonic()
 
+    def speaker_template(self, room_id: str) -> str | None:
+        """Return the voice template currently bound to this live conversation."""
+
+        session = self._active_session(room_id)
+        return session.speaker_template_id if session is not None else None
+
+    def bind_speaker_template(self, room_id: str, template_id: str) -> None:
+        """Treat later turns as this voice until a genuinely different speaker appears."""
+
+        session = self._active_session(room_id)
+        if session is not None:
+            session.speaker_template_id = template_id
+
     def end(self, room_id: str) -> None:
         self._rooms.pop(self._key(room_id), None)
+
+    def clear(self) -> None:
+        """Close every open conversation at once (e.g. the voice killswitch)."""
+
+        self._rooms.clear()
 
     def active(self, room_id: str) -> bool:
         return self._active_session(room_id) is not None
@@ -166,4 +228,5 @@ class ConversationTracker:
             personality=session.personality,
             persona_prompt=session.persona_prompt,
             messages=tuple(session.messages or ()),
+            observations=tuple(session.observations or ()),
         )

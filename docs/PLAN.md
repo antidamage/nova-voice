@@ -129,7 +129,7 @@ candidate. Do not introduce runtime swapping.
 Create an Ubuntu service composed of small replaceable adapters:
 
 ```text
-continuous transport -> audio conditioning -> central VAD/wake -> streaming STT
+edge activity gate -> audio conditioning -> central VAD/wake -> streaming STT
           -> prosody features -> interpretation/session policy
           -> Nova tool adapter -> response renderer -> TTS -> transport
 ```

@@ -10,6 +10,7 @@ from nova_voice.persona import Persona
 from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.service import NovaVoiceService
+from nova_voice.speaker_profiles import SpeakerProfileStore
 
 
 def build_service(settings: Settings) -> NovaVoiceService:
@@ -31,6 +32,14 @@ def build_service(settings: Settings) -> NovaVoiceService:
         timeout_seconds=settings.llm_timeout_seconds,
     )
     store = TranscriptStore(settings.database_path, settings.retention_hours)
+    speaker_profiles = SpeakerProfileStore(
+        settings.database_path,
+        retention_days=settings.speaker_candidate_retention_days,
+        activation_samples=settings.speaker_activation_samples,
+        match_threshold=settings.speaker_match_threshold,
+        match_margin=settings.speaker_match_margin,
+        cluster_threshold=settings.speaker_cluster_threshold,
+    )
     persona = Persona.load(settings.persona_path)
     conversations = ConversationTracker(
         idle_seconds=settings.conversation_idle_seconds,
@@ -43,5 +52,6 @@ def build_service(settings: Settings) -> NovaVoiceService:
         nova_provider,
         store,
         persona,
+        speaker_profiles=speaker_profiles,
         conversations=conversations,
     )

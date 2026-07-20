@@ -14,6 +14,42 @@ class FakeClock:
         self.value += seconds
 
 
+def test_record_observations_dedups_and_bounds() -> None:
+    conversations = ConversationTracker(idle_seconds=20)
+    conversations.start("lounge")
+
+    conversations.record_observations("lounge", ["lights: on", "lights: on", "  ", "aircon: 22C"])
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    # Consecutive duplicates and blanks are dropped.
+    assert snapshot.observations == ("lights: on", "aircon: 22C")
+
+    conversations.record_observations("lounge", [f"item {n}" for n in range(10)], limit=4)
+    newest = conversations.snapshot("lounge")
+    assert newest is not None
+    # Newest entries win once the bound is exceeded.
+    assert newest.observations == ("item 6", "item 7", "item 8", "item 9")
+
+
+def test_message_history_is_bounded_to_recent_turns() -> None:
+    conversations = ConversationTracker(idle_seconds=60)
+    conversations.start("lounge")
+    for n in range(20):
+        conversations.append_turn("lounge", f"u{n}", f"a{n}")
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    assert len(snapshot.messages) == ConversationTracker.MESSAGE_HISTORY_LIMIT
+    # Newest turns are kept; the oldest have aged out of context.
+    assert snapshot.messages[-1].content == "a19"
+    assert all(message.content != "u0" for message in snapshot.messages)
+
+
+def test_record_observations_ignores_unknown_rooms() -> None:
+    conversations = ConversationTracker(idle_seconds=20)
+    conversations.record_observations("lounge", ["ignored"])
+    assert conversations.snapshot("lounge") is None
+
+
 def test_conversation_expires_after_twenty_seconds_of_inactivity() -> None:
     clock = FakeClock()
     conversations = ConversationTracker(idle_seconds=20, monotonic=clock)
@@ -39,6 +75,21 @@ def test_refresh_restarts_the_idle_window_and_end_clears_context() -> None:
     conversations.end("lounge")
 
     assert not conversations.active("lounge")
+
+
+def test_speaker_template_affinity_lasts_only_for_the_live_conversation() -> None:
+    clock = FakeClock()
+    conversations = ConversationTracker(idle_seconds=20, monotonic=clock)
+    conversations.start("lounge")
+
+    conversations.bind_speaker_template("lounge", "voice-a")
+    assert conversations.speaker_template("lounge") == "voice-a"
+
+    clock.advance(20)
+    assert conversations.speaker_template("lounge") is None
+
+    conversations.start("lounge")
+    assert conversations.speaker_template("lounge") is None
 
 
 def test_conversation_prompt_and_history_are_isolated_by_room() -> None:

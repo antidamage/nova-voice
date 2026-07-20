@@ -121,8 +121,20 @@ async def test_router_buffer_and_frame_settings_are_live_tunable() -> None:
     # Out-of-range values are clamped rather than accepted verbatim.
     router.set_buffer_ms(50)
     router.set_frame_ms(5)
-    assert router.buffer_ms == 200
+    # Playback pre-roll is configurable down to 20 ms; 50 ms is now valid.
+    assert router.buffer_ms == 50
     assert router.frame_ms == 20
+
+
+async def test_router_pushes_local_vad_override_to_every_connected_satellite() -> None:
+    router = RoomPlaybackRouter()
+    _, indium_socket = connection(router, "indium", "office")
+    _, nocturnium_socket = connection(router, "nocturnium", "office")
+
+    await router.set_local_vad_enabled(False)
+
+    assert indium_socket.text == [{"type": "local_vad", "enabled": False}]
+    assert nocturnium_socket.text == [{"type": "local_vad", "enabled": False}]
 
 
 async def test_room_playback_cancellation_only_reaches_the_source_satellite() -> None:

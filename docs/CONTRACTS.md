@@ -53,6 +53,11 @@ conformance tests decide whether the deployed dashboard is compatible.
 
 ## Utterance envelope
 
+The envelope optionally carries `speaker`: a per-turn status (`unknown`, `provisional`,
+`pending`, or `recognized`), template/person identifiers, display name, stated pronouns, and
+cosine-match confidence. Identity belongs only to that acoustic turn and must not be inherited
+from the household conversation window.
+
 ```typescript
 type Utterance = {
   id: string;
@@ -81,6 +86,18 @@ type Utterance = {
 Raw audio never enters an LLM request.
 
 ## Interpretation result
+
+`selfProfileUpdate` is optional and contains `name`, `pronouns`, and a verbatim `evidence`
+span. It is valid only for an explicit first-person disclosure in the current addressed turn;
+quoted, third-party, media, inferred, and prior-turn identity information must produce `null`.
+
+Speaker-profile management is exposed over authenticated voice-server routes:
+
+- `GET /v1/speaker-profiles`
+- `PATCH` / `DELETE /v1/speaker-profiles/{person_id}`
+- `PATCH` / `DELETE /v1/speaker-templates/{template_id}`
+
+Responses expose profile/template metadata but never embedding vectors.
 
 The LLM must produce schema-constrained data. Invalid or additional fields fail
 closed.
@@ -144,7 +161,7 @@ candidates. It never returns secrets or the full raw HA snapshot.
 ```json
 {
   "target": "lounge air con",
-  "action": "turn_on|turn_off|toggle|set_level|set_temperature|set_mode|set_color|set_timer|wake|sleep",
+  "action": "turn_on|turn_off|set_level|set_temperature|set_color|set_timer|wake|sleep",
   "value": 19,
   "unit": "celsius",
   "durationMinutes": 60,
@@ -202,8 +219,9 @@ type ToolResult = {
 ```
 
 The response renderer says an action succeeded only when `ok=true` and the
-observed state is consistent. Retries use idempotency keys derived from the
-utterance/tool call ID.
+observed state is consistent. After a single mutation, the configurable Ralph
+loop retries only `GET /api/state` verification reads. It is bounded by an
+iteration cap and wall-clock deadline and never resends the mutation.
 
 Verified dashboard-control results are passed to the persona-aware response
 renderer after verification, with a short deterministic confirmation available
@@ -259,6 +277,7 @@ type SatelliteHello = {
     noiseSuppression: boolean;
     automaticGainControl: boolean;
     playbackEvents?: boolean;
+    localVad?: boolean;
   };
 };
 ```
@@ -267,8 +286,13 @@ Connection requires a locally provisioned per-device certificate and mutually
 authenticated TLS. An additional bearer token is not required in v1. After the
 JSON hello, audio uses a versioned binary envelope containing sequence, monotonic
 timestamp, stream direction, format, playback marker, and PCM payload. Native
-satellites continuously send audio while healthy; they do not use edge VAD to
-drop speech. Response PCM is returned on every connected speaker connection with
+satellites capture continuously but normally transmit only locally detected
+activity. It calibrates its local noise floor for one second, then keeps 400 ms
+pre-roll and an 800 ms silence tail, so it
+does not replace Iridium's authoritative VAD or clip labelled speech. The hello
+acknowledgement includes `localVadEnabled`; Iridium can later send
+`{"type":"local_vad","enabled":false}` to bypass the gate live for diagnostics.
+Response PCM is returned on every connected speaker connection with
 the elected microphone's `roomId`, and never to a different room. `playback`,
 `playback_done`, and `playback_cancel` control messages start, finish, or
 immediately close each member speaker's copy of that room output stream.

@@ -27,6 +27,7 @@ def test_development_defaults_do_not_enable_audio_or_passive_execution() -> None
     assert settings.audio_enabled is False
     assert settings.shadow_mode is True
     assert settings.passive_execution_enabled is False
+    assert settings.narrow_gate_enabled is False
     assert settings.tts_speaker == "Serena"
     assert settings.conversation_idle_seconds == 60
     assert settings.denoise_base_url == "http://127.0.0.1:8092"

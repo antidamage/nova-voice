@@ -7,12 +7,95 @@ import pytest
 from conftest import interpretation
 
 from nova_voice.audio.conversation import ConversationMessage, ConversationSnapshot
-from nova_voice.domain import CapabilityToolCall, Decision, PlannedAction, ToolResult
+from nova_voice.domain import (
+    CapabilityToolCall,
+    Decision,
+    PlannedAction,
+    SelfProfileUpdate,
+    SpeakerIdentity,
+    ToolResult,
+)
 from nova_voice.interpretation.llama_cpp import (
+    SYSTEM_PROMPT,
     LlamaCppInterpreter,
+    bounded_long_reply,
+    command_acknowledgement,
     environment_context_is_relevant,
     select_environment_context,
+    spoken_word_count,
 )
+
+
+def test_interpretation_prompt_explains_speaker_profile_corrections() -> None:
+    assert "local speaker-profile capability" in SYSTEM_PROMPT
+    assert '"call me Addie"' in SYSTEM_PROMPT
+    assert '"I use she/her pronouns"' in SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_renderer_receives_confirmation_that_profile_correction_was_applied(
+    utterance,
+) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"text": "Got it."})}}]},
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    correction = SelfProfileUpdate(
+        name="Adeline",
+        pronouns="she/her",
+        evidence="call me Adeline and I use she/her pronouns",
+    )
+    updated = utterance.model_copy(
+        update={
+            "transcript": "Call me Adeline and I use she/her pronouns",
+            "speaker": SpeakerIdentity(
+                status="recognized",
+                template_id="template-a",
+                person_id="person-a",
+                display_name="Adeline",
+                pronouns="she/her",
+                confidence=0.94,
+            ),
+        }
+    )
+
+    rendered = await interpreter.render_response(
+        updated,
+        interpretation(decision=Decision.REPLY).model_copy(
+            update={"self_profile_update": correction}
+        ),
+        [],
+        persona="Helpful and concise.",
+    )
+
+    assert rendered == "Got it."
+    payload = requests[0]
+    system = payload["messages"][0]["content"]
+    facts = json.loads(payload["messages"][-1]["content"])
+    assert "If asked\nhow to fix them" in system
+    assert facts["selfProfileUpdate"] == {
+        "name": "Adeline",
+        "pronouns": "she/her",
+        "evidence": "call me Adeline and I use she/her pronouns",
+    }
+    assert facts["speakerProfileUpdateApplied"] is True
+
+    await interpreter.close()
+
+
+@pytest.mark.parametrize("word_count", range(1, 11))
+def test_safe_command_acknowledgements_match_every_supported_word_count(word_count: int) -> None:
+    assert spoken_word_count(command_acknowledgement(word_count)) == word_count
 
 
 @pytest.mark.asyncio
@@ -130,6 +213,185 @@ async def test_llm_requests_retain_history_and_initial_prompt_snapshot(utterance
     )
     time_facts = json.loads(requests[-1]["messages"][-1]["content"])
     assert time_facts["environment"] == {"now": conversation.initial_environment["now"]}
+
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_command_renderer_honours_the_randomly_selected_exact_word_count(utterance) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"text": "Done"})}}]},
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    result = ToolResult(
+        action_id="lights",
+        ok=True,
+        code="ok",
+        target="Home lights",
+        observed={"isOn": True},
+        message="verified",
+    )
+    rendered = await interpreter.render_response(
+        utterance,
+        interpretation(decision=Decision.EXECUTE),
+        [result],
+        persona="Concise.",
+        command_max_words=4,
+    )
+
+    assert rendered == "All done, as requested."
+    assert spoken_word_count(rendered) == 4
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_long_reply_is_conversational_only_and_capped_at_three_sentences(utterance) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        story = "First story beat. Second story beat. Extra tangent. Back to your heating question."
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"text": story})}}]},
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    interpreter.long_response_probability = 1.0
+    spoken = utterance.model_copy(update={"transcript": "Tell me a story about staying warm"})
+    rendered = await interpreter.render_response(
+        spoken,
+        interpretation(decision=Decision.REPLY),
+        [],
+        persona="Dry and anecdotal.",
+    )
+
+    assert rendered == "First story beat. Second story beat. Back to your heating question."
+    assert "up to three substantial sentences" in requests[0]["messages"][0]["content"]
+    assert "final sentence back" in requests[0]["messages"][0]["content"]
+    assert bounded_long_reply(rendered) == rendered
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_renderer_receives_live_indoor_state_separately_from_weather(utterance) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"text": "It is 21 degrees."})}}]},
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    state = {
+        "room": "bedroom",
+        "indoorRooms": ["lounge", "bedroom"],
+        "indoorTemperatureC": 21,
+        "climateControls": [
+            {
+                "name": "Panel Heater",
+                "room": "bedroom",
+                "power": "off",
+                "targetTemperatureC": 22,
+                "roomTemperatureC": 21,
+            }
+        ],
+    }
+    spoken = utterance.model_copy(
+        update={"room_id": "bedroom", "transcript": "What is the temperature in here?"}
+    )
+    await interpreter.render_response(
+        spoken,
+        interpretation(decision=Decision.REPLY),
+        [],
+        persona="Concise.",
+        relevant_state=state,
+    )
+
+    facts = json.loads(requests[0]["messages"][-1]["content"])
+    assert facts["relevantState"] == state
+    assert facts["environment"] is None
+    assert "climateControls offer only on/off" in requests[0]["messages"][0]["content"]
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_pronoun_instruction_reaches_both_prompts(utterance) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        schema_name = payload["response_format"]["json_schema"]["name"]
+        content = (
+            json.dumps({"text": "Sure."})
+            if schema_name == "nova_spoken_response"
+            else interpretation(decision=Decision.REPLY).model_dump_json(by_alias=True)
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    # As service.apply_voice_settings sets it from VoiceSettings.pronoun_instruction().
+    interpreter.pronoun_instruction = (
+        "Your pronouns are xe/xem/xyrs: subjective 'xe', objective 'xem', "
+        "possessive 'xyrs'. When you or the user refer to you in the third person, "
+        "use exactly these forms."
+    )
+    spoken = utterance.model_copy(update={"transcript": "How are you?"})
+
+    await interpreter.interpret(
+        spoken, active_goal=None, relevant_state={"room": "lounge"}, tools=[]
+    )
+    await interpreter.render_response(
+        spoken, interpretation(decision=Decision.REPLY), [], persona="Cheerful."
+    )
+
+    assert len(requests) == 2
+    for payload in requests:
+        system = payload["messages"][0]["content"]
+        assert "xe/xem/xyrs" in system
+        assert "possessive 'xyrs'" in system
+
+
+@pytest.mark.asyncio
+async def test_render_prompt_makes_the_agent_speak_in_the_first_person(utterance) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps({"text": "On it."})}}]}
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    interpreter.agent_name = "Football"
+
+    await interpreter.render_response(
+        utterance, interpretation(decision=Decision.REPLY), [], persona="You are Football."
+    )
+
+    system = requests[0]["messages"][0]["content"]
+    assert "first person" in system
+    # The old third-person framing that made it talk about itself is gone.
+    assert "Football's final spoken response" not in system
+    assert "the persona may complain" not in system.lower()
 
     await interpreter.close()
 

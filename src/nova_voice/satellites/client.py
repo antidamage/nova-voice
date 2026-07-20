@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from websockets.asyncio.client import connect
 
 from nova_voice.audio.pcm import BYTES_PER_FRAME, SAMPLE_RATE, SAMPLES_PER_FRAME
+from nova_voice.satellites.activity_gate import CapturedAudioFrame, LocalActivityGate
 from nova_voice.satellites.protocol import (
     FLAG_PLAYBACK_ACTIVE,
     PROTOCOL_VERSION,
@@ -50,6 +51,16 @@ class SatelliteSettings(BaseSettings):
     echo_cancellation: bool = False
     noise_suppression: bool = False
     automatic_gain_control: bool = False
+    # Capture remains open continuously, but steady silence stays on the
+    # satellite. Pre-roll and hangover preserve complete utterances for the
+    # authoritative central VAD.
+    local_vad_enabled: bool = True
+    local_vad_threshold_db: float = Field(default=-48.0, ge=-80.0, le=-20.0)
+    local_vad_noise_margin_db: float = Field(default=6.0, ge=3.0, le=30.0)
+    local_vad_trigger_ms: int = Field(default=60, ge=20, le=500, multiple_of=20)
+    local_vad_pre_roll_ms: int = Field(default=400, ge=20, le=2_000, multiple_of=20)
+    local_vad_hangover_ms: int = Field(default=800, ge=200, le=3_000, multiple_of=20)
+    local_vad_calibration_ms: int = Field(default=1_000, ge=0, le=5_000, multiple_of=20)
     reconnect_max_seconds: float = Field(default=30, ge=1, le=300)
 
     @model_validator(mode="after")
@@ -177,7 +188,7 @@ class SatelliteAudio:
     def begin_playback(self, sample_rate: int, buffer_ms: int) -> None:
         """Begin one response and hold the same pre-roll as other room speakers."""
 
-        buffer_ms = max(200, min(2_000, buffer_ms))
+        buffer_ms = max(20, min(2_000, buffer_ms))
         self._playback_pending.clear()
         self._playback_target_bytes = max(2, sample_rate * 2 * buffer_ms // 1000)
         self._stream_active = True
@@ -242,7 +253,18 @@ class NativeSatelliteClient:
         self._sequence = 0
         self._connected = False
         self._last_frame_ns = 0
+        self._last_capture_ns = 0
+        self._transmitted_frames = 0
         self._last_error_code: str | None = None
+        self._activity_gate = LocalActivityGate(
+            enabled=settings.local_vad_enabled,
+            threshold_db=settings.local_vad_threshold_db,
+            noise_margin_db=settings.local_vad_noise_margin_db,
+            trigger_ms=settings.local_vad_trigger_ms,
+            pre_roll_ms=settings.local_vad_pre_roll_ms,
+            hangover_ms=settings.local_vad_hangover_ms,
+            calibration_ms=settings.local_vad_calibration_ms,
+        )
 
     def _ssl_context(self) -> ssl.SSLContext:
         context = ssl.create_default_context(
@@ -268,6 +290,7 @@ class NativeSatelliteClient:
                 echo_cancellation=self.settings.echo_cancellation,
                 noise_suppression=self.settings.noise_suppression,
                 automatic_gain_control=self.settings.automatic_gain_control,
+                local_vad=True,
             ),
         )
 
@@ -276,6 +299,14 @@ class NativeSatelliteClient:
             "satelliteId": self.settings.satellite_id,
             "connected": self._connected,
             "lastFrameMonotonicNs": self._last_frame_ns,
+            "lastCaptureMonotonicNs": self._last_capture_ns,
+            "transmittedFrames": self._transmitted_frames,
+            "localVad": {
+                "enabled": self._activity_gate.is_enabled,
+                "active": self._activity_gate.active,
+                "lastLevelDb": round(self._activity_gate.last_level_db, 1),
+                "noiseFloorDb": round(self._activity_gate.noise_floor_db, 1),
+            },
             "lastErrorCode": self._last_error_code,
             "pid": os.getpid(),
         }
@@ -286,20 +317,29 @@ class NativeSatelliteClient:
         temporary.replace(path)
 
     async def _connection(self) -> None:
-        frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=750)
+        frames: asyncio.Queue[CapturedAudioFrame] = asyncio.Queue(maxsize=750)
         loop = asyncio.get_running_loop()
+        self._activity_gate.reset()
 
         def capture_callback(indata, frame_count, _time_info, status) -> None:
             if status or frame_count != SAMPLES_PER_FRAME or len(indata) != BYTES_PER_FRAME:
                 self._last_error_code = "capture_status"
                 return
             payload = bytes(indata)
+            captured = CapturedAudioFrame(
+                payload=payload,
+                monotonic_ns=time.monotonic_ns(),
+                playback_active=self.audio.playback_active.is_set(),
+            )
+            self._last_capture_ns = captured.monotonic_ns
+            ready = self._activity_gate.accept(captured)
 
             def enqueue() -> None:
-                if frames.full():
-                    self._last_error_code = "capture_backpressure"
-                    return
-                frames.put_nowait(payload)
+                for item in ready:
+                    if frames.full():
+                        self._last_error_code = "capture_backpressure"
+                        return
+                    frames.put_nowait(item)
 
             loop.call_soon_threadsafe(enqueue)
 
@@ -329,6 +369,9 @@ class NativeSatelliteClient:
                 or ack.get("capturePolicy") != "always"
             ):
                 raise RuntimeError("satellite hello acknowledgement mismatch")
+            self._activity_gate.set_enabled(
+                bool(ack.get("localVadEnabled", self.settings.local_vad_enabled))
+            )
             self.audio.open_input(capture_callback)
             self._connected = True
             self._last_error_code = None
@@ -338,21 +381,21 @@ class NativeSatelliteClient:
 
             async def send_audio() -> None:
                 while True:
-                    payload = await frames.get()
+                    captured = await frames.get()
                     try:
-                        flags = FLAG_PLAYBACK_ACTIVE if self.audio.playback_active.is_set() else 0
-                        now = time.monotonic_ns()
+                        flags = FLAG_PLAYBACK_ACTIVE if captured.playback_active else 0
                         await websocket.send(
                             AudioFrame(
                                 kind=FrameKind.AUDIO_INPUT,
                                 flags=flags,
                                 sequence=self._sequence,
-                                monotonic_ns=now,
-                                payload=payload,
+                                monotonic_ns=captured.monotonic_ns,
+                                payload=captured.payload,
                             ).pack()
                         )
                         self._sequence += 1
-                        self._last_frame_ns = now
+                        self._last_frame_ns = captured.monotonic_ns
+                        self._transmitted_frames += 1
                     finally:
                         frames.task_done()
 
@@ -372,6 +415,10 @@ class NativeSatelliteClient:
                             await asyncio.to_thread(self.audio.end_playback, output_rate)
                         elif control.get("type") == "playback_cancel":
                             await asyncio.to_thread(self.audio.cancel_playback)
+                        elif control.get("type") == "local_vad" and isinstance(
+                            control.get("enabled"), bool
+                        ):
+                            self._activity_gate.set_enabled(control["enabled"])
                         continue
                     frame = AudioFrame.unpack(message)
                     if frame.kind == FrameKind.AUDIO_OUTPUT:

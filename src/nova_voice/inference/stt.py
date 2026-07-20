@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +15,42 @@ import numpy as np
 from nova_voice.audio.pcm import pcm16_to_float32
 from nova_voice.inference.scheduler import GpuExecutionGate
 
+logger = logging.getLogger(__name__)
+
+
+def boosting_phrase_variants(words: Iterable[str]) -> list[str]:
+    """Spelling variants worth boosting for each configured word or name.
+
+    The deployed model emits punctuation and capitalization, so a boosted name
+    must be present in both lowercase ("beemo") and capitalized ("Beemo")
+    renderings or the boosting tree misses whichever one the decoder prefers.
+    """
+
+    variants: list[str] = []
+    for word in words:
+        base = str(word or "").strip()
+        if not base:
+            continue
+        lowered = base.casefold()
+        candidates = (
+            lowered,
+            lowered.capitalize(),
+            " ".join(part.capitalize() for part in lowered.split()),
+        )
+        for candidate in candidates:
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+    return variants
+
 
 class SpeechToText(ABC):
     @abstractmethod
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16_000) -> tuple[str, float]: ...
+
+    async def set_boosted_phrases(self, phrases: list[str]) -> None:
+        """Bias decoding toward the given phrases when the engine supports it."""
+
+        return None
 
     async def health(self) -> dict:
         return {"ok": True}
@@ -120,6 +154,7 @@ class NemoSpeechToText(SpeechToText):
         device: str = "cuda",
         stream_chunk_ms: int = 160,
         execution_gate: GpuExecutionGate | None = None,
+        boost_alpha: float = 0.0,
     ) -> None:
         try:
             import nemo.collections.asr as nemo_asr
@@ -133,6 +168,9 @@ class NemoSpeechToText(SpeechToText):
         self.model_name = model_name
         self.device = device
         self.stream_chunk_ms = max(80, int(stream_chunk_ms))
+        self._boost_alpha = max(0.0, float(boost_alpha))
+        self._boosted_phrases: tuple[str, ...] = ()
+        self._boost_error: str | None = None
         self._streaming_ready = False
         self._streaming_reason = "cache-aware primitives not detected"
         self._stream_dtype = None
@@ -193,6 +231,67 @@ class NemoSpeechToText(SpeechToText):
             raise ValueError("NeMo adapter expects 16 kHz audio")
         async with self._lock:
             return await asyncio.to_thread(self._transcribe, pcm16)
+
+    async def set_boosted_phrases(self, phrases: list[str]) -> None:
+        """Rebuild the GPU phrase-boosting tree for the configured names.
+
+        Boosting is shallow fusion inside greedy RNNT decoding (NeMo GPU-PB):
+        each phrase is tokenized with the model's own BPE and its subword paths
+        receive a score bonus during token selection. This is the counter to
+        the RNNT internal LM silently deleting out-of-vocabulary names such as
+        invented wake words. A zero alpha disables the feature entirely.
+        """
+
+        if self._boost_alpha <= 0:
+            return
+        variants = tuple(boosting_phrase_variants(phrases))
+        if variants == self._boosted_phrases and self._boost_error is None:
+            return
+        async with self._lock:
+            await asyncio.to_thread(self._apply_boosting_tree, variants)
+            # The replaced decoding instance owns new fusion state; hypotheses
+            # from the old decoder must not seed the next chunk.
+            self._stream_states.clear()
+            self._stream_pending.clear()
+
+    def _apply_boosting_tree(self, variants: tuple[str, ...]) -> None:
+        from nemo.collections.asr.parts.context_biasing import BoostingTreeModelConfig
+        from omegaconf import OmegaConf, open_dict
+
+        def build_config(use_triton: bool):
+            decoding = copy.deepcopy(self._model.cfg.decoding)
+            with open_dict(decoding):
+                if variants:
+                    decoding.greedy.boosting_tree = OmegaConf.structured(
+                        BoostingTreeModelConfig(
+                            key_phrases_list=list(variants),
+                            use_triton=use_triton,
+                        )
+                    )
+                    decoding.greedy.boosting_tree_alpha = self._boost_alpha
+                else:
+                    decoding.greedy.pop("boosting_tree", None)
+                    decoding.greedy.pop("boosting_tree_alpha", None)
+            return decoding
+
+        try:
+            try:
+                self._model.change_decoding_strategy(build_config(use_triton=True))
+            except Exception:
+                if not variants:
+                    raise
+                # The Triton kernel is the first suspect on older GPU
+                # architectures; the plain PyTorch tree is slower but correct.
+                self._model.change_decoding_strategy(build_config(use_triton=False))
+        except Exception as error:
+            # A failed rebuild leaves the previous decoding instance in place;
+            # transcription continues un-boosted rather than going down.
+            self._boost_error = f"{type(error).__name__}: {error}"
+            logger.exception("phrase boosting rebuild failed; STT continues un-boosted")
+            return
+        self._boosted_phrases = variants
+        self._boost_error = None
+        logger.info("phrase boosting active: alpha=%s phrases=%s", self._boost_alpha, variants)
 
     def _configure_cache_aware_streaming(self) -> tuple[bool, str]:
         """Prepare NeMo's cache-aware feature path when this checkpoint supports it.
@@ -555,6 +654,11 @@ class NemoSpeechToText(SpeechToText):
             "streaming": self._streaming_ready,
             "streamingReason": self._streaming_reason,
             "streamChunkMs": self.stream_chunk_ms,
+            "contextBiasing": {
+                "alpha": self._boost_alpha,
+                "phrases": list(self._boosted_phrases),
+                "error": self._boost_error,
+            },
         }
         if self.device.startswith("cuda") and self._torch.cuda.is_available():
             payload["cudaAllocatedMiB"] = round(

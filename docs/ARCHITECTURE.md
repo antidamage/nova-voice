@@ -8,7 +8,7 @@ Nocturnium native service / Indium LaunchAgent / Iridium mic
         +----------------------+--------------------+
                                v
                     Nova Voice on Iridium
-  continuous audio -> central VAD/wake -> streaming STT -> prosody -> interpretation
+  edge activity gate -> central VAD/wake -> streaming STT -> prosody -> interpretation
                                                    |
                                       session + policy engine
                                                    |
@@ -105,14 +105,23 @@ possible action.
 
 ### Passive mode
 
-All VAD-delimited human speech is transcribed and evaluated. It may update a
-short-lived room context buffer, but it acts only when all are true:
+All multiword VAD-delimited human speech is transcribed and evaluated by the
+structured interpretation pass. The legacy narrow-vocabulary prefilter is off
+by default so device aliases, names, and imperfect transcripts cannot suppress
+a command before intent classification. Speech may update a short-lived room
+context buffer, but it acts only when all are true:
 
 - speech act is `directive` or `desired_state`
 - action is reversible and allowlisted
 - target and desired state are unambiguous
 - execution confidence meets the passive threshold
 - utterance is not assistant playback/echo, media duplication, or quoted speech
+
+An interpretation that returns an executable speech act, `decision=execute`,
+and a bounded action plan is deterministically treated as addressed even without
+a wake word. The independent address score cannot contradict and veto that
+classification; the higher passive interpretation-confidence threshold still
+applies.
 
 Observations, self-intentions, third-person plans, quoted commands, and uncertain
 pronouns do not act. Passive context expires quickly and never becomes durable memory.
@@ -287,10 +296,18 @@ An optional read-only OS probe may report dashboard foreground state as an
 interpretation feature, but it cannot pause capture, inject JavaScript, call a
 page hook, or affect process lifetime.
 
+Capture is continuous; transport is not. Each native daemon runs a low-cost
+local activity gate, calibrates the steady room floor for one second, and
+retains 400 ms before its trigger plus 800 ms after
+activity ends. Silence therefore stays on the edge while the central Silero VAD
+still receives complete candidate utterances and remains authoritative. The
+dashboard's Satellite noise gate switch applies `satelliteNoiseGateEnabled`
+live over existing sockets and can restore continuous transport for A/B tests.
+
 The LAN transport is mutually authenticated TLS WebSocket with locally
 provisioned device certificates and a versioned binary envelope. Input uses
-16 kHz mono PCM16 in 20 ms frames continuously; two satellites consume only
-about 64 KB/s before framing overhead. Iridium aggregates frames for central VAD,
+16 kHz mono PCM16 in 20 ms frames while the local gate is open; a bypassed
+satellite consumes about 32 KB/s before framing overhead. Iridium aggregates frames for central VAD,
 wake scoring, and the selected ASR chunk size. Output is framed PCM at the TTS
 sample rate and is delivered only to the elected source satellite's own
 connection (the response lock, `satellites/playback.py`); every other
@@ -322,7 +339,10 @@ implemented in or hosted by the dashboard.
 - If STT is unhealthy, no inferred action is sent.
 - If LLM output fails schema validation, ask for a retry only in an active
   conversation; passive speech is ignored.
-- If Nova action verification fails, report failure and keep the goal open.
+- After one Nova mutation, the bounded Ralph verification loop may repeat only
+  authoritative state reads; it stops on success, its refresh cap, or its
+  wall-clock deadline and never resends the action.
+- If Nova action verification still fails, report failure and keep the goal open.
 - If TTS fails after a successful action, record a redacted failure metric; do
   not repeat the action.
 - Queue limits drop old passive audio before active-conversation audio.

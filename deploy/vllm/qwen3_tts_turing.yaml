@@ -44,16 +44,23 @@ stages:
     devices: "0"
     output_connectors:
       to_stage_1: connector_of_shared_memory
+    # Stage 0 is the autoregressive "talker" whose sampling decides timbre,
+    # prosody, pronunciation and accent. In Qwen3-TTS CustomVoice the selected
+    # voice is soft conditioning, not a hard speaker embedding, so a high
+    # temperature lets the talker wander across the speaker/accent manifold and
+    # every utterance lands on a different-sounding voice ("it keeps switching
+    # models"). Lowered 0.9 -> 0.4 and top_k 50 -> 20 to lock the voice identity;
+    # the stage-1 vocoder below is already deterministic (temperature 0.0).
     default_sampling_params:
-      temperature: 0.9
-      top_k: 50
+      temperature: 0.4
+      top_k: 20
       max_tokens: 2048
       seed: 42
       repetition_penalty: 1.05
     subtalker_sampling_params:
       do_sample: true
-      temperature: 0.9
-      top_k: 50
+      temperature: 0.4
+      top_k: 20
       top_p: 1.0
 
   - stage_id: 1

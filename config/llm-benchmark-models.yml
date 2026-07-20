@@ -1,0 +1,6 @@
+file_name: "llm-benchmark-models.yml"
+version: 2.0.iridium
+models:
+  # Deliberately small setup/smoke model. Add larger models only when the
+  # production Nova Voice GPU workload can tolerate the extra memory pressure.
+  - model: "qwen2.5:0.5b"

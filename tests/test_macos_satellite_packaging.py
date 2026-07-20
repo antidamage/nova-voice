@@ -63,3 +63,16 @@ def test_macos_satellite_reports_actual_playback_edges() -> None:
     assert 'type: "playback_started"' in source
     assert 'type: "playback_finished"' in source
     assert "completionCallbackType: .dataPlayedBack" in source
+
+
+def test_macos_satellite_gates_idle_audio_and_accepts_live_bypass() -> None:
+    source = (
+        ROOT / "satellites" / "macos" / "Sources" / "NovaVoiceSatellite" / "main.swift"
+    ).read_text()
+
+    assert "private final class LocalActivityGate" in source
+    assert "preRollFrames" in source
+    assert "hangoverFrames" in source
+    assert 'case "local_vad":' in source
+    assert "audio.setLocalVadEnabled(enabled)" in source
+    assert "let localVad = true" in source

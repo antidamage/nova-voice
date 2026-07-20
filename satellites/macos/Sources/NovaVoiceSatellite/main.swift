@@ -8,6 +8,200 @@ import Security
 private let frameBytes = 640
 private let protocolVersion: UInt8 = 1
 
+private struct ActivityGateConfiguration {
+    let enabled: Bool
+    let thresholdDB: Double
+    let noiseMarginDB: Double
+    let triggerFrames: Int
+    let preRollFrames: Int
+    let hangoverFrames: Int
+    let calibrationFrames: Int
+
+    static func load(_ environment: [String: String]) -> ActivityGateConfiguration {
+        func value(_ shortKey: String) -> String? {
+            environment["NOVA_VOICE_\(shortKey)"]
+                ?? environment["NOVA_VOICE_SATELLITE_\(shortKey)"]
+        }
+        func boolean(_ key: String, fallback: Bool) -> Bool {
+            guard let raw = value(key)?.lowercased() else { return fallback }
+            if ["1", "true", "yes", "on"].contains(raw) { return true }
+            if ["0", "false", "no", "off"].contains(raw) { return false }
+            return fallback
+        }
+        func number(_ key: String, fallback: Double, range: ClosedRange<Double>) -> Double {
+            guard let raw = value(key), let parsed = Double(raw) else { return fallback }
+            return min(range.upperBound, max(range.lowerBound, parsed))
+        }
+        func frames(_ key: String, fallbackMS: Int, range: ClosedRange<Int>) -> Int {
+            let parsed = value(key).flatMap(Int.init) ?? fallbackMS
+            let bounded = min(range.upperBound, max(range.lowerBound, parsed))
+            return max(1, bounded / 20)
+        }
+        func optionalFrames(_ key: String, fallbackMS: Int, range: ClosedRange<Int>) -> Int {
+            let parsed = value(key).flatMap(Int.init) ?? fallbackMS
+            let bounded = min(range.upperBound, max(range.lowerBound, parsed))
+            return max(0, bounded / 20)
+        }
+        return ActivityGateConfiguration(
+            enabled: boolean("LOCAL_VAD_ENABLED", fallback: true),
+            thresholdDB: number("LOCAL_VAD_THRESHOLD_DB", fallback: -48, range: -80 ... -20),
+            noiseMarginDB: number("LOCAL_VAD_NOISE_MARGIN_DB", fallback: 6, range: 3 ... 30),
+            triggerFrames: frames("LOCAL_VAD_TRIGGER_MS", fallbackMS: 60, range: 20 ... 500),
+            preRollFrames: frames("LOCAL_VAD_PRE_ROLL_MS", fallbackMS: 400, range: 20 ... 2_000),
+            hangoverFrames: frames("LOCAL_VAD_HANGOVER_MS", fallbackMS: 800, range: 200 ... 3_000),
+            calibrationFrames: optionalFrames(
+                "LOCAL_VAD_CALIBRATION_MS", fallbackMS: 1_000, range: 0 ... 5_000
+            )
+        )
+    }
+}
+
+private struct CapturedAudioFrame {
+    let payload: Data
+    let monotonicNanoseconds: UInt64
+    let playbackActive: Bool
+}
+
+private final class LocalActivityGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled: Bool
+    private let thresholdDB: Double
+    private let noiseMarginDB: Double
+    private let triggerFrames: Int
+    private let preRollFrames: Int
+    private let hangoverFrames: Int
+    private let calibrationFrames: Int
+    private var preRoll: [CapturedAudioFrame] = []
+    private var active = false
+    private var speechFrames = 0
+    private var silenceFrames = 0
+    private var noiseFloorDB = -60.0
+    private var lastLevelDB = -120.0
+    private var calibrationRemaining = 0
+    private var calibrationLevels: [Double] = []
+
+    init(configuration: ActivityGateConfiguration) {
+        enabled = configuration.enabled
+        thresholdDB = configuration.thresholdDB
+        noiseMarginDB = configuration.noiseMarginDB
+        triggerFrames = configuration.triggerFrames
+        preRollFrames = configuration.preRollFrames
+        hangoverFrames = configuration.hangoverFrames
+        calibrationFrames = configuration.calibrationFrames
+        calibrationRemaining = configuration.calibrationFrames
+    }
+
+    func setEnabled(_ value: Bool) {
+        lock.lock()
+        enabled = value
+        resetLocked()
+        lock.unlock()
+    }
+
+    func accept(_ frame: CapturedAudioFrame) -> [CapturedAudioFrame] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled else { return [frame] }
+
+        let level = levelDB(frame.payload)
+        lastLevelDB = level
+
+        if !active && calibrationRemaining > 0 {
+            appendPreRollLocked(frame)
+            calibrationLevels.append(level)
+            calibrationRemaining -= 1
+            if calibrationRemaining == 0 {
+                let sorted = calibrationLevels.sorted()
+                noiseFloorDB = max(-100, min(-20, sorted[sorted.count / 2]))
+                calibrationLevels.removeAll(keepingCapacity: false)
+            }
+            return []
+        }
+
+        let activationDB = max(thresholdDB, noiseFloorDB + noiseMarginDB)
+        let activity = level >= activationDB
+
+        if active {
+            if activity {
+                silenceFrames = 0
+            } else {
+                silenceFrames += 1
+                learnNoiseFloorLocked(level)
+            }
+            if silenceFrames >= hangoverFrames {
+                closeGateLocked()
+            }
+            return [frame]
+        }
+
+        appendPreRollLocked(frame)
+        if activity {
+            speechFrames += 1
+        } else {
+            speechFrames = 0
+            learnNoiseFloorLocked(level)
+        }
+        guard speechFrames >= triggerFrames else { return [] }
+
+        active = true
+        speechFrames = 0
+        silenceFrames = 0
+        let buffered = preRoll
+        preRoll.removeAll(keepingCapacity: true)
+        return buffered
+    }
+
+    var health: [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        return [
+            "enabled": enabled,
+            "active": active,
+            "lastLevelDb": (lastLevelDB * 10).rounded() / 10,
+            "noiseFloorDb": (noiseFloorDB * 10).rounded() / 10,
+        ]
+    }
+
+    private func resetLocked() {
+        closeGateLocked()
+        noiseFloorDB = -60
+        lastLevelDB = -120
+        calibrationRemaining = calibrationFrames
+        calibrationLevels.removeAll(keepingCapacity: false)
+    }
+
+    private func closeGateLocked() {
+        preRoll.removeAll(keepingCapacity: true)
+        active = false
+        speechFrames = 0
+        silenceFrames = 0
+    }
+
+    private func learnNoiseFloorLocked(_ level: Double) {
+        let weight = level > noiseFloorDB ? 0.02 : 0.08
+        noiseFloorDB = max(-100, min(-20, (1 - weight) * noiseFloorDB + weight * level))
+    }
+
+    private func appendPreRollLocked(_ frame: CapturedAudioFrame) {
+        preRoll.append(frame)
+        if preRoll.count > preRollFrames { preRoll.removeFirst() }
+    }
+
+    private func levelDB(_ payload: Data) -> Double {
+        guard payload.count >= 2 else { return -120 }
+        var sumSquares = 0.0
+        var index = 0
+        while index + 1 < payload.count {
+            let bits = UInt16(payload[index]) | (UInt16(payload[index + 1]) << 8)
+            let sample = Double(Int16(bitPattern: bits)) / 32_768.0
+            sumSquares += sample * sample
+            index += 2
+        }
+        let rms = sqrt(sumSquares / Double(payload.count / 2))
+        return max(-120, 20 * log10(max(rms, 0.000_001)))
+    }
+}
+
 private struct Configuration {
     let serverURL: URL
     let satelliteID: String
@@ -18,6 +212,7 @@ private struct Configuration {
     let clientKeychainPasswordPath: String
     let caCertificatePath: String
     let healthPath: URL
+    let activityGate: ActivityGateConfiguration
 
     static func load() throws -> Configuration {
         let environment = ProcessInfo.processInfo.environment
@@ -50,7 +245,8 @@ private struct Configuration {
             caCertificatePath: ((environment["NOVA_VOICE_CA_CERTIFICATE_PATH"]
                 ?? "~/Library/Application Support/NovaVoiceSatellite/ca.crt") as NSString)
                 .expandingTildeInPath,
-            healthPath: URL(fileURLWithPath: (health as NSString).expandingTildeInPath)
+            healthPath: URL(fileURLWithPath: (health as NSString).expandingTildeInPath),
+            activityGate: ActivityGateConfiguration.load(environment)
         )
     }
 }
@@ -131,6 +327,7 @@ private struct Hello: Encodable {
         // Lets Iridium wait for CoreAudio's real render lifecycle instead of
         // guessing from TTS generation or network-delivery timing.
         let playbackEvents = true
+        let localVad = true
     }
 }
 
@@ -268,7 +465,8 @@ private final class AudioEngine: @unchecked Sendable {
     )!
     private let lock = NSLock()
     private var pending = Data()
-    private var sendFrame: ((Data) -> Void)?
+    private var sendFrame: ((CapturedAudioFrame) -> Void)?
+    private let activityGate: LocalActivityGate
 
     // Playback is opened on demand.  The output device is only touched while
     // Nova is actually speaking back through this satellite and is released a
@@ -335,6 +533,10 @@ private final class AudioEngine: @unchecked Sendable {
     var onPlaybackStarted: ((String) -> Void)?
     var onPlaybackFinished: ((String?, PlaybackStats) -> Void)?
 
+    init(activityGateConfiguration: ActivityGateConfiguration) {
+        activityGate = LocalActivityGate(configuration: activityGateConfiguration)
+    }
+
     struct PlaybackStats {
         let underruns: Int
         let scheduledSeconds: Double
@@ -380,7 +582,7 @@ private final class AudioEngine: @unchecked Sendable {
         return deviceID
     }
 
-    func start(sendFrame: @escaping (Data) -> Void) throws {
+    func start(sendFrame: @escaping (CapturedAudioFrame) -> Void) throws {
         self.sendFrame = sendFrame
 
         var description = AudioComponentDescription(
@@ -504,10 +706,23 @@ private final class AudioEngine: @unchecked Sendable {
         while pending.count >= frameBytes {
             let frame = pending.prefix(frameBytes)
             pending.removeFirst(frameBytes)
-            sendFrame?(Data(frame))
+            let captured = CapturedAudioFrame(
+                payload: Data(frame),
+                monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                playbackActive: playbackActive
+            )
+            for ready in activityGate.accept(captured) {
+                sendFrame?(ready)
+            }
         }
         lock.unlock()
     }
+
+    func setLocalVadEnabled(_ enabled: Bool) {
+        activityGate.setEnabled(enabled)
+    }
+
+    var localVadHealth: [String: Any] { activityGate.health }
 
     func setPlaybackRate(_ rate: Double) {
         playbackLock.lock()
@@ -948,16 +1163,17 @@ private final class AudioEngine: @unchecked Sendable {
 
 private actor Satellite {
     private let configuration: Configuration
-    private let audio = AudioEngine()
+    private let audio: AudioEngine
     private var sequence: UInt64 = 0
     private var socket: URLSessionWebSocketTask?
     private var session: URLSession?
     private var delegate: TLSDelegate?
-    private var pendingAudio: [Data] = []
+    private var pendingAudio: [CapturedAudioFrame] = []
     private var drainingAudio = false
 
     init(configuration: Configuration) {
         self.configuration = configuration
+        audio = AudioEngine(activityGateConfiguration: configuration.activityGate)
     }
 
     func run() async {
@@ -1012,6 +1228,9 @@ private actor Satellite {
             throw NSError(domain: "NovaVoiceSatellite", code: 8,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid hello acknowledgement"])
         }
+        audio.setLocalVadEnabled(
+            ack["localVadEnabled"] as? Bool ?? configuration.activityGate.enabled
+        )
         try audio.start { [weak self] data in
             Task { await self?.enqueueAudio(data) }
         }
@@ -1056,6 +1275,10 @@ private actor Satellite {
                         writeHealth(connected: true, errorCode: nil, playback: stats)
                     case "playback_cancel":
                         audio.cancelPlaybackStream()
+                    case "local_vad":
+                        if let enabled = control["enabled"] as? Bool {
+                            audio.setLocalVadEnabled(enabled)
+                        }
                     default:
                         break
                     }
@@ -1082,8 +1305,8 @@ private actor Satellite {
         }
     }
 
-    private func enqueueAudio(_ payload: Data) {
-        pendingAudio.append(payload)
+    private func enqueueAudio(_ frame: CapturedAudioFrame) {
+        pendingAudio.append(frame)
         guard !drainingAudio else { return }
         drainingAudio = true
         Task { [weak self] in
@@ -1098,24 +1321,23 @@ private actor Satellite {
                 pendingAudio.removeAll(keepingCapacity: true)
                 return
             }
-            let payload = pendingAudio.removeFirst()
-            guard await sendAudio(payload) else {
+            let frame = pendingAudio.removeFirst()
+            guard await sendAudio(frame) else {
                 pendingAudio.removeAll(keepingCapacity: true)
                 return
             }
         }
     }
 
-    private func sendAudio(_ payload: Data) async -> Bool {
-        guard let socket, payload.count == frameBytes else { return false }
-        let flags: UInt16 = audio.playbackActive ? 1 : 0
-        let now = DispatchTime.now().uptimeNanoseconds
+    private func sendAudio(_ captured: CapturedAudioFrame) async -> Bool {
+        guard let socket, captured.payload.count == frameBytes else { return false }
+        let flags: UInt16 = captured.playbackActive ? 1 : 0
         let frame = WireFrame(
             kind: 1,
             flags: flags,
             sequence: sequence,
-            monotonicNanoseconds: now,
-            payload: payload
+            monotonicNanoseconds: captured.monotonicNanoseconds,
+            payload: captured.payload
         )
         sequence &+= 1
         do {
@@ -1148,6 +1370,7 @@ private actor Satellite {
             "connected": connected,
             "lastErrorCode": errorCode,
             "lastEngineError": audio.lastEngineError,
+            "localVad": audio.localVadHealth,
             "pid": ProcessInfo.processInfo.processIdentifier,
             "lastPlayback": playbackValue,
         ]
