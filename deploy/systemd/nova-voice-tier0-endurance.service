@@ -1,0 +1,23 @@
+[Unit]
+Description=Nova Voice 24-hour Tier 0 endurance evidence
+After=nova-voice.service nova-voice-llm.service nova-voice-tts.service
+Requires=nova-voice.service nova-voice-llm.service nova-voice-tts.service
+
+[Service]
+Type=oneshot
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current/ops
+ExecStart=/opt/nova-voice/venv/bin/python /opt/nova-voice/current/ops/tier0_endurance_monitor.py
+TimeoutStartSec=90000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova-voice/evaluation
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+

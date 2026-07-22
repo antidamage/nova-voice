@@ -12,7 +12,11 @@ WorkingDirectory=/opt/nova-voice
 # stay resident afterwards, so a restart re-loads from cache rather than disk.
 # Best-effort: the leading '-' keeps startup working if vmtouch is absent.
 ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf
-ExecStart=/opt/nova-voice/runtime/llama.cpp/build/bin/llama-server --model /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf --alias Qwen3.5-4B --host 127.0.0.1 --port 8765 --ctx-size 4096 --parallel 1 --n-gpu-layers 99 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --no-webui
+# The upstream 8 GiB prompt-cache default can push this 5 GiB-capped service
+# into sustained reclaim/swap and leave its only slot unresponsive. One GiB is
+# enough for three typical Nova prompt entries while keeping the hot model and
+# KV cache resident.
+ExecStart=/opt/nova-voice/runtime/llama.cpp/build/bin/llama-server --model /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf --alias Qwen3.5-4B --host 127.0.0.1 --port 8765 --ctx-size 4096 --parallel 1 --n-gpu-layers 99 --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024 --jinja --no-webui
 # Soft per-service memory ceiling. Under the 24 GiB host the resident set fits
 # with headroom, so this throttles-and-reclaims a runaway (the old failure was a
 # load-spike ballooning past the whole system into swap-thrash) instead of

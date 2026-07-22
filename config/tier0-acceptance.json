@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "cases": [
+    {"case_id": "far-field-office-command", "category": "far_field", "requirement": "Office microphone command preserves target, action, number, and negation slots."},
+    {"case_id": "far-field-lounge-social", "category": "far_field", "requirement": "Lounge social question produces one addressed reply without a tool mutation."},
+    {"case_id": "echo-self-response", "category": "echo_barge_in", "requirement": "Nova response PCM and transcript echo produce no second interpretation or mutation."},
+    {"case_id": "barge-in-stop", "category": "echo_barge_in", "requirement": "Explicit stop cancels source playback while provider task cancellation follows policy."},
+    {"case_id": "barge-in-backchannel", "category": "echo_barge_in", "requirement": "A short backchannel preserves and resumes the active response."},
+    {"case_id": "false-tv-directive", "category": "false_activation", "requirement": "Unaddressed television directive produces no action and no spoken reply."},
+    {"case_id": "false-cross-talk", "category": "false_activation", "requirement": "Unaddressed cross-talk during playback does not cancel or execute."},
+    {"case_id": "number-year-2026", "category": "spoken_number", "requirement": "Year 2026 is spoken as twenty twenty six."},
+    {"case_id": "number-ordinal-106", "category": "spoken_number", "requirement": "Ordinal 106th is spoken as one hundred and sixth."},
+    {"case_id": "number-address-105", "category": "spoken_number", "requirement": "Address digits are spoken independently according to address context."},
+    {"case_id": "number-phone", "category": "spoken_number", "requirement": "Phone digits are spoken independently without cardinal grouping."}
+  ]
+}

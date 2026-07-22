@@ -119,6 +119,10 @@ processors remain outside the core.
 15. `EvaluationRegistry`: stores version-pinned scenarios and structural grader
     outcomes in SQLite. Deployment eligibility requires a latest passing run for
     every registered exact-pin scenario plus successful pinned failure replays.
+16. `Tier0Acceptance`: samples stable service/model instance IDs, GPU headroom,
+    queue bounds, ASR/TTS concurrency, mutation IDs, and latency percentiles;
+    combines them with the versioned household corpus and production TTS chunk
+    pacing. Its 24-hour systemd monitor writes content-free JSONL on Iridium.
 
 These processors are coordinated by `ForegroundTurnStateMachine`. Its immutable
 snapshots contain hashed input/context revisions rather than transcript text,
