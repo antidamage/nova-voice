@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import re
@@ -13,6 +14,7 @@ from uuid import uuid4
 
 from nova_voice.audio.announce import SpeechAnnouncer
 from nova_voice.audio.arbitration import TurnArbiter, TurnClaim
+from nova_voice.audio.consistency import acoustic_consistency_metrics, consistency_drift
 from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.audio.dedup import TranscriptDeduplicator, normalize_transcript
 from nova_voice.audio.denoise import NoiseSuppressor
@@ -32,7 +34,6 @@ from nova_voice.audio.speech_timing import (
     consonant_onsets_ms,
     estimate_speech_duration_ms,
 )
-from nova_voice.audio.speech_units import sentence_speech_units
 from nova_voice.audio.vocab import SimplifiedEnglishGate
 from nova_voice.domain import (
     AcousticFeatures,
@@ -362,6 +363,8 @@ class SatelliteAudioRuntime:
         # Applied to response PCM as DSP — the TTS model ignores pitch
         # instructions (see nova_voice.audio.pitch).
         self._pitch_percent = 0
+        self._configured_speech_rate = 100
+        self._configured_emotion_mirroring = 0
         # Playback volume (percent) by time of day, applied as DSP gain on
         # response PCM before the echo guard and the satellite sink.
         self._volume_day_percent = 100
@@ -387,6 +390,9 @@ class SatelliteAudioRuntime:
         self._first_audible_turns = 0
         self._first_audible_sum_ms = 0.0
         self._first_audible_last_ms: float | None = None
+        self._tts_consistency_baselines: dict[str, dict[str, float | None]] = {}
+        self._tts_consistency_turns = 0
+        self._tts_consistency_alerts = 0
         self._processing_phases: dict[str, str] = {}
         self._processing_owners: dict[str, asyncio.Task[Any]] = {}
 
@@ -773,6 +779,8 @@ class SatelliteAudioRuntime:
             language=settings.language.value,
         )
         self._pitch_percent = settings.pitch
+        self._configured_speech_rate = settings.speech_rate
+        self._configured_emotion_mirroring = settings.emotion_mirroring
         self._volume_day_percent = settings.volume_day
         self._volume_night_percent = settings.volume_night
         self._wake_matcher = WakePhraseMatcher(
@@ -877,6 +885,11 @@ class SatelliteAudioRuntime:
                 if self._first_audible_turns
                 else None
             ),
+        }
+        payload["ttsConsistency"] = {
+            "turns": self._tts_consistency_turns,
+            "alerts": self._tts_consistency_alerts,
+            "trackedFixtures": len(self._tts_consistency_baselines),
         }
         return payload
 
@@ -1734,6 +1747,7 @@ class SatelliteAudioRuntime:
             instruction = (
                 result.response_tone_instruction or "Natural conversational delivery."
             )
+            instruction_revision = hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:16]
             if self._echo_guard is not None:
                 self._echo_guard.note_response_text(scope_id, spoken_response_text)
             # The transport sink fans one room response out to every connected
@@ -1773,6 +1787,8 @@ class SatelliteAudioRuntime:
             # Sampled once per turn so a response spanning the 8am/9pm
             # boundary keeps a single consistent loudness.
             volume_percent = self.playback_volume_percent()
+            diagnostic_pcm = bytearray()
+            diagnostic_sample_rate: int | None = None
             try:
                 if response_audio_sink is None:
                     response_pcm16, response_sample_rate = await self.tts.synthesize(
@@ -1792,6 +1808,8 @@ class SatelliteAudioRuntime:
                         )
                     tts_first_chunk_ms = round((time.perf_counter() - tts_started) * 1000, 3)
                     played_seconds = len(response_pcm16) / 2 / response_sample_rate
+                    diagnostic_pcm.extend(response_pcm16)
+                    diagnostic_sample_rate = response_sample_rate
                     self.note_playback(room_id, response_pcm16, response_sample_rate)
                     if arbiter_claim is not None:
                         self._arbiter.extend_for_playback(arbiter_claim, played_seconds)
@@ -1799,10 +1817,12 @@ class SatelliteAudioRuntime:
                 else:
                     first_chunk_at: float | None = None
                     delivered_seconds = 0.0
-                    speech_units = sentence_speech_units(spoken_response_text)
+                    # One response-level acoustic anchor avoids independently
+                    # resetting pitch, pace, and mood at every sentence.
+                    speech_units = (spoken_response_text,)
                     for speech_unit in speech_units:
-                        # Unit boundaries are explicit safe cancellation points:
-                        # no later sentence starts after barge-in.
+                        # Chunk boundaries remain explicit cancellation points;
+                        # the response itself keeps one acoustic instruction anchor.
                         if cancel_event.is_set():
                             break
                         async for chunk, sample_rate in self.tts.synthesize_stream(
@@ -1834,6 +1854,8 @@ class SatelliteAudioRuntime:
                                 if deficit > worst_pacing_deficit_s:
                                     worst_pacing_deficit_s = deficit
                             delivered_seconds += len(chunk) / 2 / sample_rate
+                            diagnostic_pcm.extend(chunk)
+                            diagnostic_sample_rate = sample_rate
                             played_seconds = delivered_seconds
                             response_sample_rate = sample_rate
                             self.note_playback(room_id, chunk, sample_rate)
@@ -1896,6 +1918,52 @@ class SatelliteAudioRuntime:
                     self._speech_cancel_sinks.pop(scope_id, None)
                     self._speech_satellites.pop(scope_id, None)
                 speech_cancelled = cancel_event.is_set()
+            if diagnostic_pcm and diagnostic_sample_rate is not None:
+                metrics = await asyncio.to_thread(
+                    acoustic_consistency_metrics,
+                    bytes(diagnostic_pcm),
+                    diagnostic_sample_rate,
+                    text_characters=len(spoken_response_text),
+                )
+                consistency = {
+                    **metrics,
+                    "sampleRate": diagnostic_sample_rate,
+                    "instructionRevision": instruction_revision,
+                    "model": getattr(self.tts, "model_name", type(self.tts).__name__),
+                    "speaker": getattr(self.tts, "speaker", None),
+                    "language": getattr(self.tts, "language", None),
+                    "configuredSpeechRate": self._configured_speech_rate,
+                    "configuredPitch": self._pitch_percent,
+                    "configuredEmotionMirroring": self._configured_emotion_mirroring,
+                    "speechUnitCount": 1,
+                }
+                fixture_revision = hashlib.sha256(
+                    f"{spoken_response_text}\0{instruction_revision}".encode()
+                ).hexdigest()[:16]
+                previous_metrics = self._tts_consistency_baselines.get(fixture_revision)
+                drift = (
+                    consistency_drift(previous_metrics, metrics)
+                    if previous_metrics is not None
+                    else {
+                        "pitchDriftPercent": None,
+                        "rateDriftPercent": None,
+                        "consistencyAlert": False,
+                    }
+                )
+                self._tts_consistency_baselines[fixture_revision] = metrics
+                while len(self._tts_consistency_baselines) > 32:
+                    self._tts_consistency_baselines.pop(next(iter(self._tts_consistency_baselines)))
+                self._tts_consistency_turns += 1
+                if drift["consistencyAlert"]:
+                    self._tts_consistency_alerts += 1
+                consistency.update(drift)
+                logger.info("tts consistency %s", consistency)
+                await self._record_monitor(
+                    "tts_consistency",
+                    satelliteId=satellite_id,
+                    roomId=room_id,
+                    **consistency,
+                )
             self._calibrate_speaking_rate(len(spoken_response_text), played_seconds)
             tts_ms = round((time.perf_counter() - tts_started) * 1000, 3)
         if result.response_text is None:
