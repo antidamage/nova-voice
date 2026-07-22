@@ -40,6 +40,7 @@ from nova_voice.satellites.protocol import (
     SatelliteHello,
 )
 from nova_voice.service import NovaVoiceService
+from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
 
 logger = logging.getLogger(__name__)
@@ -239,10 +240,18 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict:
+        # The service probe (dashboard provider + LLM) and the audio probe are
+        # independent, so run them concurrently rather than back to back — the
+        # status strip polls this endpoint and the two used to add up.
+        audio_probe = (
+            asyncio.ensure_future(selected_audio.health())
+            if selected_audio is not None
+            else None
+        )
         payload = await selected_service.health()
         payload["audio"] = (
-            await selected_audio.health()
-            if selected_audio is not None
+            await audio_probe
+            if audio_probe is not None
             else {"ok": not selected_settings.audio_enabled, "enabled": False}
         )
         if selected_audio is not None:
@@ -414,7 +423,9 @@ def create_app(
             else "Natural conversational delivery."
         )
         try:
-            pcm16, sample_rate = await runtime.tts.synthesize(text, instruction)
+            pcm16, sample_rate = await runtime.tts.synthesize(
+                normalize_spoken_numbers(text), instruction
+            )
         except Exception as error:  # noqa: BLE001 - any synth failure is a 503 to the caller
             logger.warning("voice preview synthesis failed: %s", error)
             raise HTTPException(

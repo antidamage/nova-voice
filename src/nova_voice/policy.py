@@ -36,7 +36,15 @@ class ExecutionPolicy:
             return PolicyOutcome(False, False, "interpretation did not request execution")
         if interpretation.speech_act in NON_EXECUTABLE_SPEECH_ACTS:
             return PolicyOutcome(False, False, f"speech act is {interpretation.speech_act}")
-        if interpretation.speech_act not in EXECUTABLE_SPEECH_ACTS:
+        # A plan made only of read-only web lookups mutates no household state, so
+        # a directly-addressed question ("who won?") may drive it even though a
+        # question is not a household directive. Household mutations keep the
+        # strict directive/desired-state gate.
+        web_only = all(action.call.provider == "web" for action in interpretation.actions)
+        executable_speech_acts = (
+            EXECUTABLE_SPEECH_ACTS | {SpeechAct.QUESTION} if web_only else EXECUTABLE_SPEECH_ACTS
+        )
+        if interpretation.speech_act not in executable_speech_acts:
             return PolicyOutcome(False, False, "speech act is not executable")
 
         active = utterance.wake_detected or utterance.conversation_active or session_active
@@ -59,6 +67,11 @@ class ExecutionPolicy:
 
         if self.settings.shadow_mode:
             return PolicyOutcome(False, True, "shadow mode")
-        if not active and not self.settings.passive_execution_enabled:
+        # A web lookup sends the query off the local network, so it only ever
+        # runs on a directly-addressed turn — never from passive ambient speech,
+        # regardless of the passive-execution setting used for household control.
+        if web_only and not active:
+            return PolicyOutcome(False, False, "web lookup requires an addressed turn")
+        if not web_only and not active and not self.settings.passive_execution_enabled:
             return PolicyOutcome(False, False, "passive execution is disabled")
         return PolicyOutcome(True, False, "allowed")

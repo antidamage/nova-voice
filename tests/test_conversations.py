@@ -44,6 +44,35 @@ def test_message_history_is_bounded_to_recent_turns() -> None:
     assert all(message.content != "u0" for message in snapshot.messages)
 
 
+def test_message_history_is_compacted_by_estimated_token_budget() -> None:
+    conversations = ConversationTracker(idle_seconds=60)
+    conversations.start("lounge")
+    # Each message is long enough that a handful blow the token budget well
+    # before the 16-message count cap would ever trigger.
+    verbose = "x" * 800
+    for n in range(6):
+        conversations.append_turn("lounge", f"{verbose} u{n}", f"{verbose} a{n}")
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    # Would be 12 messages (6 turns) if only the count cap applied.
+    assert len(snapshot.messages) < 12
+    # The most recent exchange always survives.
+    assert snapshot.messages[-1].content.endswith("a5")
+    assert snapshot.messages[-2].content.endswith("u5")
+
+
+def test_message_history_compaction_always_keeps_the_latest_exchange() -> None:
+    conversations = ConversationTracker(idle_seconds=60)
+    conversations.start("lounge")
+    huge = "x" * 20000  # far larger than the whole token budget on its own
+    conversations.append_turn("lounge", "short user turn", huge)
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    # Never trimmed below the single most recent exchange, however large.
+    assert len(snapshot.messages) == 2
+    assert snapshot.messages[-1].content == huge
+
+
 def test_record_observations_ignores_unknown_rooms() -> None:
     conversations = ConversationTracker(idle_seconds=20)
     conversations.record_observations("lounge", ["ignored"])

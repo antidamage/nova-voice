@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -122,8 +123,64 @@ def voice_catalog() -> dict:
             "volumeNight": {"min": 0, "max": 100, "step": 5, "default": 100},
             "conversationIdleSeconds": {"min": 10, "max": 300, "step": 5, "default": 60},
             "longResponseProbability": {"min": 0.0, "max": 1.0, "step": 0.05, "default": 0.0},
+            "webAnswerMaxSentences": {
+                "min": 1,
+                "max": 5,
+                "step": 1,
+                "default": 2,
+                "note": (
+                    "How many sentences a spoken web answer may run. Device "
+                    "control replies stay terse; this only lengthens answers the "
+                    "agent looks up online."
+                ),
+            },
             "ttsPrerollMs": {"min": 20, "max": 2000, "step": 10, "default": 700},
             "ttsFrameMs": {"min": 20, "max": 200, "step": 10, "default": 100},
+            "speakerMatchThreshold": {
+                "min": 0.30,
+                "max": 0.95,
+                "step": 0.01,
+                "default": 0.65,
+                "note": (
+                    "How close a voice must be (cosine similarity) to count as a "
+                    "known person. Lower recognizes you more readily across "
+                    "different mics and distances; too low starts confusing "
+                    "similar voices."
+                ),
+            },
+            "speakerMatchMargin": {
+                "min": 0.0,
+                "max": 0.30,
+                "step": 0.01,
+                "default": 0.03,
+                "note": (
+                    "How far the best-matching person must lead the runner-up "
+                    "before a match is trusted. Lower still decides when two "
+                    "voices score alike; raise it if people get mixed up."
+                ),
+            },
+            "speakerClusterThreshold": {
+                "min": 0.30,
+                "max": 0.95,
+                "step": 0.01,
+                "default": 0.60,
+                "note": (
+                    "How close a new capture must be to merge into an existing "
+                    "unnamed profile instead of making a new one. Lower this "
+                    "first if the system keeps creating fresh profiles for you."
+                ),
+            },
+            "speakerConversationMatchThreshold": {
+                "min": 0.10,
+                "max": 0.90,
+                "step": 0.01,
+                "default": 0.35,
+                "note": (
+                    "How much a voice can drift and still be treated as the same "
+                    "speaker within one open conversation. Deliberately loose; "
+                    "lower tolerates more movement mid-exchange."
+                ),
+            },
         },
         "wake": {
             "wordPattern": "^[A-Za-z]{2,24}$",
@@ -231,6 +288,29 @@ class VoiceSettings(BaseModel):
     # Learn local biometric voice templates and use confidently recognized
     # household profiles for conversational personalization.
     speaker_recognition_enabled: bool = True
+    # Speaker-matching tuning (TitaNet cosine similarity of L2-normalized voice
+    # embeddings, range 0-1). These make recognition "fuzzier" or "stricter" so
+    # one household voice is matched across different microphones, rooms,
+    # distances, and facings instead of spawning a fresh provisional profile on
+    # every marginal capture. Defaults mirror the historical env values so a live
+    # apply changes nothing until deliberately tuned.
+    #
+    # Minimum cosine to accept a turn as an already-known person. Lower =
+    # recognizes more readily (fewer new profiles), at the cost of occasionally
+    # confusing similar voices.
+    speaker_match_threshold: float = Field(default=0.65, ge=0.30, le=0.95)
+    # Required lead of the best-matching person over the runner-up before a match
+    # is trusted, so two close voices are not swapped. Lower = decides even when
+    # candidates score alike.
+    speaker_match_margin: float = Field(default=0.03, ge=0.0, le=0.30)
+    # Minimum cosine to fold a new capture into an existing *unnamed* template
+    # rather than creating another one. Lower = far fewer duplicate provisional
+    # profiles per person (the "new profile almost every time" case).
+    speaker_cluster_threshold: float = Field(default=0.60, ge=0.30, le=0.95)
+    # Minimum cosine to keep reusing the *same open conversation's* speaker across
+    # its short follow-up turns. Deliberately loose; lower tolerates more mic and
+    # distance drift within one exchange before falling back to global matching.
+    speaker_conversation_match_threshold: float = Field(default=0.35, ge=0.10, le=0.90)
     # Per-satellite killswitch: satellite ids whose microphone frames the runtime
     # drops. A soft, instant off-switch for a single satellite while testing other
     # devices — the process keeps running (no SSH stop, no fighting its watchdog).
@@ -254,11 +334,26 @@ class VoiceSettings(BaseModel):
     # four sentences) instead of the standard single sentence. Rolled per
     # response; zero keeps every reply short.
     long_response_probability: float = Field(default=0.0, ge=0.0, le=1.0)
-    # Maximum spoken-word length of a verified command acknowledgement. The
-    # actual length is rolled fresh per reply as a random value in [0, this], so
-    # zero yields a silent acknowledgement and higher values allow a short,
-    # varied phrase instead of a fixed one-word confirmation.
+    # Spoken-word length of a verified command acknowledgement is rolled fresh
+    # per reply as a random value in [min, max]. Raising the minimum above zero
+    # guarantees an audible acknowledgement every time — useful during
+    # development, when a silent success is easy to mistake for no response at
+    # all. min=0 restores the historical behaviour (occasional silent acks).
+    command_reply_min_words: int = Field(default=0, ge=0, le=10)
     command_reply_max_words: int = Field(default=3, ge=0, le=10)
+    # Web access: let the agent look things up online when a request needs
+    # current or external information. Default OFF — this is the opt-in switch
+    # for the only feature that sends any text off the local network (the
+    # rewritten query only; never audio, persona, or household state).
+    web_access_enabled: bool = False
+    # Which backend answers a web lookup. "brave" scrapes Brave Search in a
+    # headless browser (Google-tier answers, keyless, non-Google) and is the
+    # default; "local" is keyless DuckDuckGo + on-device summarize. "gemini"
+    # remains in code for anyone with billing but is not offered in the dashboard.
+    web_backend: Literal["brave", "local", "gemini"] = "brave"
+    # How many sentences a spoken web answer may run. Control replies stay terse;
+    # a web answer needs room to be useful, so it gets its own budget.
+    web_answer_max_sentences: int = Field(default=2, ge=1, le=5)
     # Accepted transcript spellings for the spoken wake phrase. Keeping ASR
     # near-misses explicit makes the matching surface visible and tunable.
     wake_words: list[str] = Field(

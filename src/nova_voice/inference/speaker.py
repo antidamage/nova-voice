@@ -244,8 +244,32 @@ class SpeakerRecognizer:
             self._last_error = None
         return loaded
 
-    def configure(self, *, enabled: bool) -> None:
+    def configure(
+        self,
+        *,
+        enabled: bool,
+        match_threshold: float | None = None,
+        match_margin: float | None = None,
+        cluster_threshold: float | None = None,
+        conversation_match_threshold: float | None = None,
+    ) -> None:
+        """Apply live speaker-matching settings.
+
+        ``enabled`` gates recognition entirely; the four cosine thresholds tune
+        how fuzzy matching is. They live on the shared profile store (and, for
+        the conversation threshold, on this recognizer), so pushing them here
+        takes effect on the next turn without a service restart.
+        """
+
         self.enabled = enabled
+        if conversation_match_threshold is not None:
+            self.conversation_match_threshold = conversation_match_threshold
+        if match_threshold is not None:
+            self.store.match_threshold = match_threshold
+        if match_margin is not None:
+            self.store.match_margin = match_margin
+        if cluster_threshold is not None:
+            self.store.cluster_threshold = cluster_threshold
 
     async def health(self) -> dict:
         store = await self.store.health()

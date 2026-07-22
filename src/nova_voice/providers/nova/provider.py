@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from nova_voice.capabilities.base import CapabilityManifest, CapabilityProvider, ToolPolicy
 from nova_voice.domain import CapabilityToolCall, PlannedAction, ToolResult
+from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardClient, NovaDashboardError
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,26 @@ def logical_entity_room(entity: dict[str, Any]) -> str | None:
 
 def climate_is_on(entity: dict[str, Any]) -> bool:
     return str(entity.get("state") or "").casefold() not in _CLIMATE_OFF_STATES
+
+
+def _describe_objective(target_name: str, action: str, args: dict[str, Any]) -> str:
+    """Short, human-readable "done" statement for the LLM confirmation pass."""
+
+    if action == "turn_on":
+        return f"{target_name} is turned on"
+    if action == "turn_off":
+        return f"{target_name} is turned off"
+    if action == "toggle":
+        return f"{target_name} has changed power state"
+    if action == "set_level":
+        return f"{target_name} brightness is set to {args.get('value')}%"
+    if action == "set_temperature":
+        return f"{target_name} target temperature is set to {args.get('value')}°C"
+    if action == "set_mode":
+        return f"{target_name} mode is set to {args.get('value')}"
+    if action == "set_color":
+        return f"{target_name} color is updated"
+    return f"{target_name} reflects the requested {action} change"
 
 
 @dataclass(frozen=True)
@@ -271,6 +292,10 @@ class NovaProvider(CapabilityProvider):
         climate_verify_interval_seconds: float = 0.5,
         verification_loop_enabled: bool = True,
         verification_max_iterations: int = 20,
+        verification_thinking_threshold_seconds: float = 2.5,
+        verification_llm_verify_enabled: bool = True,
+        verification_llm_verify_min_interval_seconds: float = 1.5,
+        verification_llm_confirm_timeout_seconds: float = 3.0,
     ) -> None:
         self.client = client
         self.agent_name = "Nova"
@@ -283,6 +308,16 @@ class NovaProvider(CapabilityProvider):
         self.verification_failure_seconds = max(0.0, float(climate_verify_timeout_seconds))
         self.verification_sleep_seconds = max(0.0, float(climate_verify_interval_seconds))
         self.verification_max_iterations = max(1, int(verification_max_iterations))
+        self.verification_thinking_threshold_seconds = max(
+            0.0, float(verification_thinking_threshold_seconds)
+        )
+        self.verification_llm_verify_enabled = bool(verification_llm_verify_enabled)
+        self.verification_llm_verify_min_interval_seconds = max(
+            0.0, float(verification_llm_verify_min_interval_seconds)
+        )
+        self.verification_llm_confirm_timeout_seconds = max(
+            0.1, float(verification_llm_confirm_timeout_seconds)
+        )
         self.aliases = AliasIndex()
         self._state: dict = {}
         self._last_refresh = 0.0
@@ -295,6 +330,10 @@ class NovaProvider(CapabilityProvider):
         max_iterations: int,
         sleep_seconds: float,
         failure_seconds: float,
+        thinking_threshold_seconds: float | None = None,
+        llm_verify_enabled: bool | None = None,
+        llm_verify_min_interval_seconds: float | None = None,
+        llm_confirm_timeout_seconds: float | None = None,
     ) -> None:
         """Apply live bounded-loop controls collected from the dashboard."""
 
@@ -302,6 +341,61 @@ class NovaProvider(CapabilityProvider):
         self.verification_max_iterations = max(1, int(max_iterations))
         self.verification_sleep_seconds = max(0.0, float(sleep_seconds))
         self.verification_failure_seconds = max(0.0, float(failure_seconds))
+        if thinking_threshold_seconds is not None:
+            self.verification_thinking_threshold_seconds = max(
+                0.0, float(thinking_threshold_seconds)
+            )
+        if llm_verify_enabled is not None:
+            self.verification_llm_verify_enabled = bool(llm_verify_enabled)
+        if llm_verify_min_interval_seconds is not None:
+            self.verification_llm_verify_min_interval_seconds = max(
+                0.0, float(llm_verify_min_interval_seconds)
+            )
+        if llm_confirm_timeout_seconds is not None:
+            self.verification_llm_confirm_timeout_seconds = max(
+                0.1, float(llm_confirm_timeout_seconds)
+            )
+
+    def _verification_config(self) -> verify_loop.VerificationLoopConfig:
+        return verify_loop.VerificationLoopConfig(
+            enabled=self.verification_loop_enabled,
+            max_iterations=self.verification_max_iterations,
+            sleep_seconds=self.verification_sleep_seconds,
+            failure_seconds=self.verification_failure_seconds,
+            thinking_threshold_seconds=self.verification_thinking_threshold_seconds,
+            llm_verify_enabled=self.verification_llm_verify_enabled,
+            llm_verify_min_interval_seconds=self.verification_llm_verify_min_interval_seconds,
+            llm_confirm_timeout_seconds=self.verification_llm_confirm_timeout_seconds,
+        )
+
+    async def _poll(self) -> dict[str, Any]:
+        return await self.refresh(force=True)
+
+    async def _run_verification(
+        self,
+        action: PlannedAction,
+        state: dict[str, Any],
+        *,
+        label: str,
+        objective: str,
+        verify: Callable[[dict[str, Any]], tuple[bool, dict[str, Any] | None]],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+        """Run the bounded wiggum loop for a single verification target."""
+
+        task = verify_loop.VerificationTask(
+            action_id=action.id, label=label, objective=objective, verify=verify
+        )
+        result = await verify_loop.run(
+            [task],
+            state,
+            poll=self._poll,
+            config=self._verification_config(),
+            context=verify_loop.current_turn_context(),
+        )
+        item = result.item(action.id)
+        observed = item.observed if item is not None else None
+        verified = item.confirmed if item is not None else False
+        return result.final_state, observed, verified
 
     def manifest(self) -> CapabilityManifest:
         return CapabilityManifest(
@@ -763,13 +857,17 @@ class NovaProvider(CapabilityProvider):
                 observed={"response": returned_action},
             )
         state = await self.refresh(force=True)
-        state, observed, verified = await self._wait_for_state_verification(
+        names = {"indoors": "Home lights", "all": "All lights", "outside": "Outside lights"}
+        label = names[scope]
+        state, observed, verified = await self._run_verification(
+            action,
             state,
-            lambda candidate: self._verify_lighting_shortcut(
+            label=label,
+            objective=f"{label} are turned {requested_action}",
+            verify=lambda candidate: self._verify_lighting_shortcut(
                 candidate, scope, requested_action
             ),
         )
-        names = {"indoors": "Home lights", "all": "All lights", "outside": "Outside lights"}
         return self._result(
             action,
             verified,
@@ -777,7 +875,7 @@ class NovaProvider(CapabilityProvider):
             "Lighting shortcut verified"
             if verified
             else f"{self.agent_name} returned but the requested lighting state was not observed",
-            target=names[scope],
+            target=label,
             requested={"scope": scope, "action": requested_action},
             observed=observed,
         )
@@ -944,6 +1042,7 @@ class NovaProvider(CapabilityProvider):
         else:
             self._store_state(returned_state)
         returned_state, raw_observed, verified = await self._wait_for_verified_state(
+            action,
             returned_state,
             target,
             requested_action,
@@ -991,62 +1090,28 @@ class NovaProvider(CapabilityProvider):
 
     async def _wait_for_verified_state(
         self,
+        action: PlannedAction,
         state: dict[str, Any],
         target: AliasTarget,
-        action: str,
+        action_kind: str,
         args: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
         """Wait for any stateful target to publish the requested state."""
 
         def verify(candidate: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
             observed = self._observed_target(candidate, target)
-            return self._target_verified(candidate, target, action, args, observed), observed
+            return (
+                self._target_verified(candidate, target, action_kind, args, observed),
+                observed,
+            )
 
-        return await self._wait_for_state_verification(state, verify)
-
-    async def _wait_for_state_verification(
-        self,
-        state: dict[str, Any],
-        verify: Callable[[dict[str, Any]], tuple[bool, dict[str, Any] | None]],
-    ) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
-        """Bounded Ralph loop: repeat reads, never the mutation that preceded them.
-
-        The immediate dashboard response is checked first. If it is stale, the
-        authoritative state endpoint is polled until verification succeeds, the
-        configured refresh count is exhausted, or the wall-clock deadline wins.
-        Transient refresh errors are tolerated inside those bounds.
-        """
-
-        verified, observed = verify(state)
-        if verified or not self.verification_loop_enabled:
-            return state, observed, verified
-
-        deadline = time.monotonic() + self.verification_failure_seconds
-        for _iteration in range(self.verification_max_iterations):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            if self.verification_sleep_seconds:
-                # Preserve time for the actual refresh even when someone sets a
-                # pause longer than the whole deadline.
-                await asyncio.sleep(min(self.verification_sleep_seconds, remaining / 2))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                state = await asyncio.wait_for(
-                    self.refresh(force=True),
-                    timeout=remaining,
-                )
-            except TimeoutError:
-                break
-            except NovaDashboardError:
-                logger.warning("state verification refresh failed; retrying", exc_info=True)
-                continue
-            verified, observed = verify(state)
-            if verified:
-                break
-        return state, observed, verified
+        return await self._run_verification(
+            action,
+            state,
+            label=target.name,
+            objective=_describe_objective(target.name, action_kind, args),
+            verify=verify,
+        )
 
     @classmethod
     def _target_verified(
@@ -1216,7 +1281,13 @@ class NovaProvider(CapabilityProvider):
 
     async def health(self) -> dict:
         try:
-            version, state = await asyncio.gather(self.client.version(), self.refresh(force=True))
+            # Do not force a full dashboard-state rebuild here: /health is polled
+            # every few seconds by the status strip, and forcing `/api/state`
+            # (the whole HA snapshot) each time is what made the round trip
+            # 70-140 ms. `version()` still proves the dashboard is reachable, and
+            # a non-forced refresh reports the last snapshot's generatedAt from
+            # cache (fetching only when it has aged past alias_refresh_seconds).
+            version, state = await asyncio.gather(self.client.version(), self.refresh())
             return {
                 "ok": True,
                 "contractVersion": self.contract_version,

@@ -7,7 +7,20 @@ Type=simple
 User=nova-voice
 Group=nova-voice
 WorkingDirectory=/opt/nova-voice
+# Sequentially prefetch the mmap'd GGUF into page cache before llama.cpp
+# demand-pages it at random during load. With 24 GiB of host RAM the weights
+# stay resident afterwards, so a restart re-loads from cache rather than disk.
+# Best-effort: the leading '-' keeps startup working if vmtouch is absent.
+ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf
 ExecStart=/opt/nova-voice/runtime/llama.cpp/build/bin/llama-server --model /opt/nova-voice/models/qwen3.5-4b-q4_k_m.gguf --alias Qwen3.5-4B --host 127.0.0.1 --port 8765 --ctx-size 4096 --parallel 1 --n-gpu-layers 99 --cache-type-k q8_0 --cache-type-v q8_0 --jinja --no-webui
+# Soft per-service memory ceiling. Under the 24 GiB host the resident set fits
+# with headroom, so this throttles-and-reclaims a runaway (the old failure was a
+# load-spike ballooning past the whole system into swap-thrash) instead of
+# letting it reach the system-wide earlyoom backstop that SIGTERMs this service.
+# It is above steady RSS + the GGUF cache + KV growth, so the hot path is never
+# throttled. Applied live to the running unit on `systemctl daemon-reload`.
+MemoryAccounting=yes
+MemoryHigh=5G
 # earlyoom deliberately sends SIGTERM under a transient model-load spike.
 # llama.cpp exits cleanly in response, so on-failure would leave the required
 # interpretation service down even after memory pressure has passed.

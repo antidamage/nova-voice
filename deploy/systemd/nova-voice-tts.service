@@ -16,8 +16,16 @@ Environment=TRANSFORMERS_OFFLINE=1
 Environment=VLLM_USE_FLASHINFER_SAMPLER=0
 Environment=CUDA_VISIBLE_DEVICES=0
 Environment=PYTHONUNBUFFERED=1
+# Warm the Qwen3-TTS weights into page cache ahead of the vLLM load so the
+# runtime reads them from RAM. Best-effort; the '-' tolerates a missing binary.
+ExecStartPre=-/usr/bin/vmtouch -qt /home/antidamage/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice
 ExecStart=/home/antidamage/nova-tts-stream/venv/bin/vllm-omni serve Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --omni --deploy-config /home/antidamage/nova-tts-stream/qwen3_tts_turing.yaml --host 127.0.0.1 --port 8091 --trust-remote-code
 ExecStartPost=/usr/bin/bash /opt/nova-voice/current/ops/warm-streaming-tts.sh
+# Soft memory ceiling (see nova-voice-llm.service). vLLM's host-side RSS plus
+# pinned staging fits well under this on the 24 GiB host; it only catches a
+# runaway before the system-wide earlyoom backstop can fire.
+MemoryAccounting=yes
+MemoryHigh=8G
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=180

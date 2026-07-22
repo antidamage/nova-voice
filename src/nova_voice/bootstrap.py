@@ -9,6 +9,8 @@ from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
+from nova_voice.providers.web.client import BraveScrapeClient, GeminiClient, WebSearchClient
+from nova_voice.providers.web.provider import WebProvider
 from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerProfileStore
 
@@ -23,8 +25,34 @@ def build_service(settings: Settings) -> NovaVoiceService:
         contract_version=settings.nova_contract_version,
         alias_refresh_seconds=settings.alias_refresh_seconds,
     )
-    registry = CapabilityRegistry(allowlist={"nova"})
+    gemini_client = (
+        GeminiClient(
+            settings.web_gemini_api_key,
+            settings.web_gemini_model,
+            settings.web_gemini_base_url,
+            timeout_seconds=settings.web_request_timeout_seconds,
+        )
+        if settings.web_gemini_api_key
+        else None
+    )
+    web_provider = WebProvider(
+        gemini=gemini_client,
+        search=WebSearchClient(
+            results=settings.web_search_results,
+            fetch_max_bytes=settings.web_fetch_max_bytes,
+            max_result_chars=settings.web_max_result_chars,
+            timeout_seconds=settings.web_request_timeout_seconds,
+        ),
+        brave=BraveScrapeClient(
+            settings.web_search_service_url,
+            timeout_seconds=settings.web_search_service_timeout_seconds,
+        ),
+        default_backend=settings.web_backend_default,
+        search_results=settings.web_search_results,
+    )
+    registry = CapabilityRegistry(allowlist={"nova", "web"})
     registry.register(nova_provider)
+    registry.register(web_provider)
     interpreter = LlamaCppInterpreter(
         settings.llm_base_url,
         settings.llm_model,
@@ -54,4 +82,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         persona,
         speaker_profiles=speaker_profiles,
         conversations=conversations,
+        web_provider=web_provider,
     )

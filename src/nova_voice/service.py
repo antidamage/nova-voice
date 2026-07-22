@@ -6,16 +6,18 @@ import logging
 import random
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, tzinfo
+from typing import Any
 
 from nova_voice.affectations import apply_affectations
 from nova_voice.agent_settings import AgentSettings
-from nova_voice.audio.conversation import ConversationTracker
+from nova_voice.audio.conversation import ConversationSnapshot, ConversationTracker
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.domain import (
     ActiveGoal,
+    CapabilityToolCall,
     Decision,
     Emotion,
     GoalStatus,
@@ -26,6 +28,7 @@ from nova_voice.domain import (
     SpeechAct,
     ToolResult,
     Utterance,
+    VerificationVerdict,
 )
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
@@ -39,9 +42,11 @@ from nova_voice.interpretation.speech_cues import (
 )
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
-from nova_voice.policy import ExecutionPolicy
+from nova_voice.policy import ExecutionPolicy, PolicyOutcome
+from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.providers.nova.provider import NovaProvider
+from nova_voice.providers.web.provider import WebProvider
 from nova_voice.sessions import SessionManager
 from nova_voice.speaker_profiles import (
     SpeakerProfileStore,
@@ -80,6 +85,46 @@ _PROFILE_PRONOUN_PATTERN = (
 )
 _PROFILE_PRONOUN_AT_START_RE = re.compile(rf"^{_PROFILE_PRONOUN_PATTERN}", re.IGNORECASE)
 _PROFILE_PRONOUN_RE = re.compile(rf"\b{_PROFILE_PRONOUN_PATTERN}", re.IGNORECASE)
+_KNOWLEDGE_FAILURE_RE = re.compile(
+    r"\b(?:"
+    r"i\s+(?:do\s+not|don'?t)\s+know|"
+    r"i(?:\s+am|['’]m)\s+not\s+(?:sure|certain)|"
+    r"i\s+(?:do\s+not|don'?t)\s+have\s+(?:access\s+to\s+)?"
+    r"(?:enough|any|that|the)\s+(?:information|context|answer)|"
+    r"i\s+(?:have\s+no|lack|have\s+insufficient)\s+(?:the\s+)?"
+    r"(?:information|context|answer)|"
+    r"i\s+(?:can\s*not|can'?t|am\s+unable\s+to)\s+"
+    r"(?:answer|provide|help\s+with|find|look\s+up|access|tell|do\s+that)"
+    r")\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_REQUEST_RE = re.compile(
+    r"(?:\b(?:who|what|when|where|why|how|which)\b|"
+    r"\b(?:tell\s+me|give\s+me\s+(?:information|details)|"
+    r"explain|describe|define|name|do\s+you\s+know|find\s+out)\b)",
+    re.IGNORECASE,
+)
+_OPERATIONAL_REQUEST_RE = re.compile(
+    r"\b(?:turn|switch|set|dim|brighten|open|close|lock|unlock|start|stop|play|pause|"
+    r"send|message|email|buy|book|order|call)\b",
+    re.IGNORECASE,
+)
+_CAPABILITY_REQUEST_RE = re.compile(
+    r"\b(?:can|could|will|would)\s+you\b", re.IGNORECASE
+)
+_LOCAL_KNOWLEDGE_RE = re.compile(
+    r"\b(?:in\s+here|this\s+room|at\s+home|my\s+(?:light|lights|switch|device|thermostat)|"
+    r"what(?:'s|\s+is)\s+the\s+(?:temperature|status|state)|"
+    r"how\s+(?:warm|cold)\s+is\s+it|remember|memory|what(?:'s|\s+is)\s+my\s+name)\b",
+    re.IGNORECASE,
+)
+_CREATIVE_REQUEST_RE = re.compile(
+    r"\b(?:joke|story|poem|song|roleplay|improvise|pretend)\b", re.IGNORECASE
+)
+_FOLLOW_UP_REFERENCE_RE = re.compile(
+    r"\b(?:he|him|his|she|her|hers|they|them|their|theirs|it|its|that|those|there)\b",
+    re.IGNORECASE,
+)
 
 
 def command_word_count(transcript: str, wake_words: Iterable[str]) -> int:
@@ -100,6 +145,62 @@ def command_word_count(transcript: str, wake_words: Iterable[str]) -> int:
             words = words[len(wake) :]
             break
     return len(words)
+
+
+def response_has_knowledge_failure(response_text: str | None) -> bool:
+    """Detect a drafted reply that admits an epistemic knowledge gap."""
+
+    return bool(response_text and _KNOWLEDGE_FAILURE_RE.search(response_text))
+
+
+def knowledge_web_fallback_relevant(
+    utterance: Utterance,
+    interpretation: Interpretation,
+    response_text: str | None,
+) -> bool:
+    """Conservatively distinguish knowledge gaps from operational failures."""
+
+    if not (utterance.wake_detected or utterance.conversation_active):
+        return False
+    if interpretation.decision != Decision.REPLY or interpretation.actions:
+        return False
+    if not response_has_knowledge_failure(response_text):
+        return False
+
+    transcript = utterance.transcript
+    if _LOCAL_KNOWLEDGE_RE.search(transcript) or _CREATIVE_REQUEST_RE.search(transcript):
+        return False
+    if _OPERATIONAL_REQUEST_RE.search(transcript):
+        return False
+    if _CAPABILITY_REQUEST_RE.search(transcript) and not _KNOWLEDGE_REQUEST_RE.search(transcript):
+        return False
+    return bool(
+        interpretation.speech_act == SpeechAct.QUESTION
+        or _KNOWLEDGE_REQUEST_RE.search(transcript)
+    )
+
+
+def knowledge_fallback_query(
+    transcript: str,
+    conversation: ConversationSnapshot | None,
+    *,
+    max_length: int = 400,
+) -> str:
+    """Build one bounded search query, adding prior user context for pronouns."""
+
+    current = " ".join(transcript.split())
+    if conversation is None or not _FOLLOW_UP_REFERENCE_RE.search(current):
+        return current[:max_length]
+
+    prior_user_turns = [
+        " ".join(message.content.split()).rstrip(" .?!")
+        for message in conversation.messages
+        if message.role == "user" and message.content.strip()
+    ][-2:]
+    if not prior_user_turns:
+        return current[:max_length]
+    contextual = f"{'. '.join(prior_user_turns)}. Follow-up: {current}"
+    return contextual[:max_length]
 
 
 def explicit_self_profile_update(
@@ -210,11 +311,13 @@ class NovaVoiceService:
         speaker_profiles: SpeakerProfileStore | None = None,
         sessions: SessionManager | None = None,
         conversations: ConversationTracker | None = None,
+        web_provider: WebProvider | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
         self.registry = registry
         self.nova_provider = nova_provider
+        self.web_provider = web_provider
         self.store = store
         self.speaker_profiles = speaker_profiles
         self.persona = persona
@@ -269,6 +372,19 @@ class NovaVoiceService:
             self.interpreter.personality = settings.personality
         if hasattr(self.interpreter, "pronoun_instruction"):
             self.interpreter.pronoun_instruction = settings.pronoun_instruction()
+        # Web access: the interpreter needs the enabled flag (to offer/omit the
+        # tool and know when a lookup is permitted) and the sentence budget (to
+        # bound the spoken web answer); the provider needs the backend choice and
+        # the same budget (to shape the cloud model's answer length).
+        if hasattr(self.interpreter, "web_access_enabled"):
+            self.interpreter.web_access_enabled = settings.web_access_enabled
+        if hasattr(self.interpreter, "web_answer_max_sentences"):
+            self.interpreter.web_answer_max_sentences = settings.web_answer_max_sentences
+        if self.web_provider is not None:
+            self.web_provider.configure(
+                backend=settings.web_backend,
+                answer_max_sentences=settings.web_answer_max_sentences,
+            )
 
     def apply_agent_settings(self, settings: AgentSettings) -> None:
         """Apply global execution-loop settings without touching voice/personality."""
@@ -279,6 +395,11 @@ class NovaVoiceService:
             max_iterations=settings.ralph_loop_max_iterations,
             sleep_seconds=settings.ralph_loop_sleep_ms / 1000,
             failure_seconds=settings.ralph_loop_failure_seconds,
+            thinking_threshold_seconds=settings.ralph_loop_thinking_threshold_ms / 1000,
+            llm_verify_enabled=settings.ralph_loop_llm_verify_enabled,
+            llm_verify_min_interval_seconds=settings.ralph_loop_llm_verify_min_interval_ms
+            / 1000,
+            llm_confirm_timeout_seconds=settings.ralph_loop_llm_confirm_timeout_seconds,
         )
 
     def _apply_affectations(self, text: str | None) -> str | None:
@@ -287,6 +408,115 @@ class NovaVoiceService:
         if not text or self.voice_settings is None:
             return text
         return apply_affectations(text, self.voice_settings.affectations)
+
+    def _available_tools(self) -> list[dict]:
+        """The semantic tools offered to the planner this turn.
+
+        Web access is opt-in: when the dashboard switch is off the ``web.*``
+        tools are hidden entirely, so the model cannot plan a lookup at all
+        (rather than planning one that is later refused).
+        """
+
+        catalog = self.registry.tool_catalog()
+        web_enabled = self.voice_settings is not None and self.voice_settings.web_access_enabled
+        if web_enabled:
+            return catalog
+        return [
+            tool
+            for tool in catalog
+            if not str(tool.get("function", {}).get("name", "")).startswith("web.")
+        ]
+
+    async def _recover_knowledge_failure(
+        self,
+        utterance: Utterance,
+        interpretation: Interpretation,
+        results: list[ToolResult],
+        response_text: str | None,
+        *,
+        conversation: ConversationSnapshot | None,
+        relevant_state: dict[str, Any],
+        temperature: float,
+        session_active: bool,
+    ) -> tuple[Interpretation, list[ToolResult], PolicyOutcome, str | None] | None:
+        """Run one policy-checked web lookup after an epistemic reply failure."""
+
+        web_enabled = bool(
+            self.web_provider is not None
+            and self.voice_settings is not None
+            and self.voice_settings.web_access_enabled
+        )
+        if (
+            not web_enabled
+            or results
+            or not knowledge_web_fallback_relevant(utterance, interpretation, response_text)
+        ):
+            return None
+
+        query = knowledge_fallback_query(utterance.transcript, conversation)
+        if not query:
+            return None
+        action = PlannedAction(
+            id=f"{utterance.id}-web-fallback",
+            order=0,
+            call=CapabilityToolCall(
+                provider="web",
+                tool="web.ask",
+                arguments={"query": query},
+            ),
+        )
+        fallback_interpretation = interpretation.model_copy(
+            deep=True,
+            update={
+                "speech_act": SpeechAct.QUESTION,
+                "addressed_probability": 1.0,
+                "decision": Decision.EXECUTE,
+                "confidence": 1.0,
+                "actions": [action],
+                "response_plan": interpretation.response_plan.model_copy(
+                    update={"requires_post_tool_rendering": True}
+                ),
+            },
+        )
+        fallback_outcome = self.policy.evaluate(
+            utterance,
+            fallback_interpretation,
+            session_active=session_active,
+        )
+        if not fallback_outcome.execute:
+            logger.info(
+                "knowledge web fallback blocked utterance=%s reason=%s",
+                utterance.id,
+                fallback_outcome.reason,
+            )
+            return None
+
+        fallback_results = await self._execute_plan([action])
+        deterministic = self.persona.render(
+            utterance,
+            fallback_interpretation.decision,
+            fallback_results,
+            shadowed=False,
+        )
+        rendered = await self.interpreter.render_response(
+            utterance,
+            fallback_interpretation,
+            fallback_results,
+            persona=self.persona.response_prompt,
+            environment=None,
+            relevant_state=relevant_state,
+            conversation=conversation,
+            temperature=temperature,
+            command_max_words=None,
+        )
+        final_text = rendered or deterministic or response_text
+        logger.info(
+            "knowledge web fallback completed utterance=%s query=%r ok=%s",
+            utterance.id,
+            query,
+            bool(fallback_results and all(result.ok for result in fallback_results)),
+        )
+        return fallback_interpretation, fallback_results, fallback_outcome, final_text
 
     def _address_words(self) -> list[str]:
         """Wake words plus the agent display name, for cue stripping.
@@ -369,12 +599,22 @@ class NovaVoiceService:
         except NovaDashboardError:
             logger.warning("Nova provider unavailable during startup", exc_info=True)
 
-    async def handle(self, utterance: Utterance) -> HandleResult:
+    async def handle(
+        self,
+        utterance: Utterance,
+        *,
+        on_thinking: Callable[[], Awaitable[None]] | None = None,
+    ) -> HandleResult:
         lock = self._turn_locks.setdefault(self._scope_key(utterance.room_id), asyncio.Lock())
         async with lock:
-            return await self._handle(utterance)
+            return await self._handle(utterance, on_thinking=on_thinking)
 
-    async def _handle(self, utterance: Utterance) -> HandleResult:
+    async def _handle(
+        self,
+        utterance: Utterance,
+        *,
+        on_thinking: Callable[[], Awaitable[None]] | None = None,
+    ) -> HandleResult:
         started = time.perf_counter()
         timings_ms: dict[str, float] = {}
         if utterance.wake_detected:
@@ -443,7 +683,7 @@ class NovaVoiceService:
                 utterance,
                 active_goal=goal,
                 relevant_state=relevant_state,
-                tools=self.registry.tool_catalog(),
+                tools=self._available_tools(),
                 conversation=conversation,
             )
         except BaseException:
@@ -609,7 +849,30 @@ class NovaVoiceService:
         if outcome.shadowed:
             results = self._shadow_plan(interpretation.actions)
         elif outcome.execute:
-            results = await self._execute_plan(interpretation.actions)
+
+            async def confirm_pending(
+                tasks: list[verify_loop.VerificationTask],
+                _state: dict[str, Any],
+                items: list[verify_loop.VerificationItemResult],
+            ) -> VerificationVerdict | None:
+                # The verification loop's LLM pass is JSON-only and never
+                # front-facing: it judges each still-pending target from its
+                # own observed state, not the whole household snapshot, so a
+                # slow multi-device command stays a cheap, narrow call.
+                by_id = {item.action_id: item for item in items}
+                pending = [
+                    {
+                        "target": task.label,
+                        "objective": task.objective,
+                        "observed": by_id[task.action_id].observed,
+                        "attempts": by_id[task.action_id].attempts,
+                    }
+                    for task in tasks
+                ]
+                return await self.interpreter.confirm_objective(utterance, pending)
+
+            with verify_loop.turn_scope(thinking=on_thinking, llm_confirm=confirm_pending):
+                results = await self._execute_plan(interpretation.actions)
         timings_ms["execution"] = round((time.perf_counter() - execution_started) * 1000, 3)
 
         # A failed dashboard command opens a conversation (if one is not already
@@ -681,11 +944,19 @@ class NovaVoiceService:
             )
         )
         # A verified command's spoken acknowledgement length is rolled fresh per
-        # reply in [0, commandReplyMaxWords]; zero means a silent acknowledgement
-        # (the command still ran, nothing is spoken).
+        # reply in [commandReplyMinWords, commandReplyMaxWords]; zero at both
+        # ends means a silent acknowledgement (the command still ran, nothing
+        # is spoken). A dashboard update can momentarily leave min > max (the
+        # two sliders commit independently); clamp rather than raise.
         command_max_words: int | None = None
         if verified_dashboard_command and self.voice_settings is not None:
-            command_max_words = random.randint(0, self.voice_settings.command_reply_max_words)
+            reply_min = min(
+                self.voice_settings.command_reply_min_words,
+                self.voice_settings.command_reply_max_words,
+            )
+            command_max_words = random.randint(
+                reply_min, self.voice_settings.command_reply_max_words
+            )
 
         if verified_dashboard_command and command_max_words == 0:
             response_text = None
@@ -706,6 +977,37 @@ class NovaVoiceService:
                 command_max_words=command_max_words,
             )
             response_text = rendered or response_text
+
+        fallback_started = time.perf_counter()
+        fallback = await self._recover_knowledge_failure(
+            utterance,
+            interpretation,
+            results,
+            response_text,
+            conversation=conversation,
+            relevant_state=relevant_state,
+            temperature=effective_render_temperature,
+            session_active=goal is not None,
+        )
+        if fallback is not None:
+            interpretation, results, outcome, response_text = fallback
+            # The normal session update ran before response drafting. Record the
+            # late, read-only recovery action too so the final HandleResult and
+            # goal lifecycle describe what actually happened this turn.
+            self.sessions.update(
+                utterance,
+                interpretation,
+                results,
+                executed=outcome.execute,
+            )
+            # TranscriptStore uses INSERT OR REPLACE by utterance id, so this
+            # updates the retained interpretation to include the late tool call
+            # instead of leaving the pre-fallback reply classification behind.
+            await self.store.add(utterance, interpretation)
+            timings_ms["knowledgeFallback"] = round(
+                (time.perf_counter() - fallback_started) * 1000,
+                3,
+            )
         # Affectations run on the finished reply — template or model alike — so
         # the quirk is consistent everywhere the text goes: TTS, transcript,
         # and the conversation history the model sees on later turns.
@@ -1029,10 +1331,17 @@ class NovaVoiceService:
 
     @staticmethod
     def _needs_model_render(interpretation, results: list[ToolResult]) -> bool:
+        # A successful web lookup must be spoken by the model (it relays the
+        # retrieved answer); unlike a device command, its result is content, not
+        # a confirmation, so the fixed template renderer cannot voice it.
+        web_action_ids = {
+            action.id for action in interpretation.actions if action.call.provider == "web"
+        }
         return bool(
             interpretation.decision.value in {"reply", "clarify"}
             or interpretation.response_plan.requires_post_tool_rendering
             or any(not result.ok for result in results)
+            or any(result.action_id in web_action_ids for result in results)
         )
 
     def _shadow_plan(self, actions: Iterable[PlannedAction]) -> list[ToolResult]:

@@ -43,6 +43,36 @@ class Settings(BaseSettings):
     llm_model: str = "Qwen3.5-4B"
     llm_timeout_seconds: float = Field(default=20, gt=0, le=120)
 
+    # Web access (optional). The voice LLM can rewrite a spoken request into a
+    # clean query and either delegate it to a grounded cloud model (Google
+    # Gemini free tier + Search grounding) or fall back to a keyless DuckDuckGo
+    # search + local summarize. The live on/off switch, backend choice, and
+    # spoken-answer length are dashboard-driven (see VoiceSettings); the fields
+    # below are the iridium-side secret, model id, and limits. The Gemini key is
+    # a free (no-billing) Google AI Studio key and stays on iridium — it is never
+    # sent to, or stored by, the dashboard.
+    web_gemini_api_key: str | None = None
+    # Free-tier grounded model id. Kept in config (not hardcoded in logic) so it
+    # can track Google's model line without a code change; verify current docs.
+    web_gemini_model: str = "gemini-2.5-flash"
+    web_gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # Boot default backend before the first dashboard settings pull supplies one.
+    # "brave" = the browser-scrape sidecar (Google-tier answers, keyless,
+    # non-Google) is the best option and the default; "local" = keyless
+    # DuckDuckGo (ddgs) fallback; "gemini" stays in code for anyone with billing
+    # but is not the default and is not offered in the dashboard (no Google).
+    web_backend_default: Literal["brave", "local", "gemini"] = "brave"
+    web_request_timeout_seconds: float = Field(default=8, gt=0, le=30)
+    # Brave Search browser-scrape sidecar (ops/websearch_server.py).
+    web_search_service_url: str = "http://127.0.0.1:8093"
+    web_search_service_timeout_seconds: float = Field(default=15, gt=0, le=60)
+    # Keyless local (DuckDuckGo) result count and per-page fetch caps.
+    web_search_results: int = Field(default=4, ge=1, le=10)
+    web_fetch_max_bytes: int = Field(default=200_000, ge=4096, le=2_000_000)
+    # Readable-text excerpt fed to the local summarize pass. Kept small so it
+    # fits the LLM's 4096-token context alongside the prompt and history.
+    web_max_result_chars: int = Field(default=2000, ge=500, le=40_000)
+
     stt_model: str = "nvidia/nemotron-speech-streaming-en-0.6b"
     stt_model_path: Path | None = None
     stt_stream_chunk_ms: int = Field(default=160, ge=80, le=2000)

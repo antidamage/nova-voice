@@ -35,6 +35,7 @@ from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService
+from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.voice_settings import VoiceSettings
 
 logger = logging.getLogger(__name__)
@@ -429,9 +430,21 @@ class SatelliteAudioRuntime:
         first addressed turn. NeMo's model restore is not concurrency-safe with
         the live audio path (it mutates process-global cwd), so loading it
         lazily during a conversation fails intermittently and then stays broken
-        for the process; doing it here keeps that load in a quiescent window."""
+        for the process; doing it here keeps that load in a quiescent window.
+
+        The STT weights are already resident from construction, but its RNNT
+        CUDA graph and decode kernels only build on the first forward pass; a
+        throwaway transcription here pays that JIT at startup rather than on the
+        first spoken turn. Both warmups are best-effort and non-fatal.
+
+        The speaker model is loaded first, before the STT forward pass runs, so
+        its fragile NeMo restore keeps the exact ordering it had before STT
+        warmup existed — never perturbed by a preceding CUDA burst."""
         if self._speaker_recognizer is not None:
             await self._speaker_recognizer.warmup()
+        stt_warmup = getattr(self.stt, "warmup", None)
+        if callable(stt_warmup):
+            await stt_warmup()
 
     async def _resolve_current_speaker(
         self,
@@ -654,7 +667,13 @@ class SatelliteAudioRuntime:
         # The per-frame gate in ``ingest`` drops all audio while disabled.
         self._voice_enabled = settings.system_voice_enabled
         if self._speaker_recognizer is not None:
-            self._speaker_recognizer.configure(enabled=settings.speaker_recognition_enabled)
+            self._speaker_recognizer.configure(
+                enabled=settings.speaker_recognition_enabled,
+                match_threshold=settings.speaker_match_threshold,
+                match_margin=settings.speaker_match_margin,
+                cluster_threshold=settings.speaker_cluster_threshold,
+                conversation_match_threshold=settings.speaker_conversation_match_threshold,
+            )
         self._disabled_satellites = {sat.casefold() for sat in settings.disabled_satellites}
         if not self._voice_enabled and self._conversations is not None:
             self._conversations.clear()
@@ -1257,6 +1276,18 @@ class SatelliteAudioRuntime:
         )
         now = datetime.now(UTC)
         service_started = time.perf_counter()
+
+        async def announce_thinking() -> None:
+            # A non-verbal marker for anyone watching the dashboard transcript
+            # while a device-verification loop is still polling; never spoken.
+            self._announce_transcript(
+                "assistant",
+                "*Thinking*",
+                satellite_id=satellite_id,
+                room_id=room_id,
+                kind="thinking",
+            )
+
         try:
             result = await self.service.handle(
                 Utterance(
@@ -1272,7 +1303,8 @@ class SatelliteAudioRuntime:
                     dashboard_foreground=dashboard_foreground,
                     acoustic=selected_acoustic,
                     **({"speaker": speaker_identity} if speaker_identity is not None else {}),
-                )
+                ),
+                on_thinking=announce_thinking,
             )
         except Exception as error:
             await self._record_monitor(
@@ -1413,6 +1445,9 @@ class SatelliteAudioRuntime:
         tts_ms = 0.0
         tts_first_chunk_ms = 0.0
         text_ready_at: float | None = None
+        spoken_response_text = (
+            normalize_spoken_numbers(result.response_text) if result.response_text else None
+        )
         if not result.response_text:
             logger.info(
                 "audio turn timing satellite=%s room=%s stt_ms=%s service_ms=%s total_ms=%s",
@@ -1429,7 +1464,7 @@ class SatelliteAudioRuntime:
                 result.response_tone_instruction or "Natural conversational delivery."
             )
             if self._echo_guard is not None:
-                self._echo_guard.note_response_text(scope_id, result.response_text)
+                self._echo_guard.note_response_text(scope_id, spoken_response_text)
             # The transport sink fans one room response out to every connected
             # speaker assigned that room. This runtime still records the
             # elected microphone as the turn source and dashboard timing anchor.
@@ -1450,7 +1485,7 @@ class SatelliteAudioRuntime:
                 speech_turn_id,
                 satellite_id=satellite_id,
                 room_id=room_id,
-                text=result.response_text,
+                text=spoken_response_text,
                 audio_ready=audio_ready,
                 synthesis_finished=synthesis_finished,
                 playback_events=response_playback_events,
@@ -1470,7 +1505,7 @@ class SatelliteAudioRuntime:
             try:
                 if response_audio_sink is None:
                     response_pcm16, response_sample_rate = await self.tts.synthesize(
-                        result.response_text,
+                        spoken_response_text,
                         instruction,
                     )
                     if self._pitch_percent:
@@ -1494,7 +1529,7 @@ class SatelliteAudioRuntime:
                     first_chunk_at: float | None = None
                     delivered_seconds = 0.0
                     async for chunk, sample_rate in self.tts.synthesize_stream(
-                        result.response_text,
+                        spoken_response_text,
                         instruction,
                     ):
                         if cancel_event.is_set():
@@ -1582,7 +1617,7 @@ class SatelliteAudioRuntime:
                     self._speech_cancel_events.pop(scope_id, None)
                     self._speech_cancel_sinks.pop(scope_id, None)
                     self._speech_satellites.pop(scope_id, None)
-            self._calibrate_speaking_rate(len(result.response_text), played_seconds)
+            self._calibrate_speaking_rate(len(spoken_response_text), played_seconds)
             tts_ms = round((time.perf_counter() - tts_started) * 1000, 3)
         # Only a genuinely engaged turn extends the follow-up window; ambient,
         # third-party, and media speech inside a conversation must let it time

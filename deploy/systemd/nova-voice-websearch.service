@@ -1,0 +1,45 @@
+[Unit]
+Description=Nova Voice Brave Search browser-scrape sidecar
+After=network-online.target
+Wants=network-online.target
+# Follows the orchestrator's restart so a deploy picks up new sidecar code, but
+# is optional: the orchestrator only Wants (not Requires) it and falls back to
+# the keyless ddgs backend when it is down.
+PartOf=nova-voice.service
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+Environment=WEBSEARCH_PORT=8093
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/nova-voice/browsers
+Environment=XDG_CACHE_HOME=/opt/nova-voice/cache
+# Chromium needs a writable HOME/user-data dir; keep it inside the service's
+# ReadWritePaths so ProtectHome/ProtectSystem stay strict.
+Environment=HOME=/var/lib/nova-voice/websearch
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/install -d -m 0700 -o nova-voice -g nova-voice /var/lib/nova-voice/websearch
+ExecStart=/opt/nova-voice/venv/bin/python /opt/nova-voice/current/ops/websearch_server.py
+Restart=always
+RestartSec=5
+# One headless Chromium plus the Python service; cap it so a browser leak can
+# never eat the voice box's memory.
+MemoryAccounting=yes
+MemoryMax=2G
+CPUWeight=40
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# This sidecar needs the public internet to reach Brave Search. Like the
+# orchestrator, it is granted general egress; the model units stay locked to
+# localhost.
+IPAddressAllow=any
+
+[Install]
+WantedBy=multi-user.target

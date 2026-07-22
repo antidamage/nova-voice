@@ -187,6 +187,27 @@ class Interpretation(StrictModel):
         return self
 
 
+class VerificationItemVerdict(StrictModel):
+    """One device's confirmation verdict from the JSON-only verification pass."""
+
+    target: str = Field(min_length=1, max_length=120)
+    confirmed: bool
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class VerificationVerdict(StrictModel):
+    """Structured, non-spoken output of the objective-confirmation sub-agent."""
+
+    items: list[VerificationItemVerdict] = Field(default_factory=list, max_length=8)
+    all_confirmed: bool
+
+    @model_validator(mode="after")
+    def require_all_confirmed_consistency(self) -> VerificationVerdict:
+        if self.all_confirmed and not all(item.confirmed for item in self.items):
+            raise ValueError("allConfirmed cannot be true while an item is unconfirmed")
+        return self
+
+
 ToolResultCode = Literal[
     "ok",
     "ambiguous",
