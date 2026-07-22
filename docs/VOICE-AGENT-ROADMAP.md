@@ -162,7 +162,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 30 of 58 tasks complete, with 4 implementation tasks awaiting the shared Voice/Dashboard deployment. Next blocked gate: **T0-15/T0-16**, then **T1-16**.
+  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 34 of 58 tasks complete. Next blocked gate: **T0-15/T0-16**, then **T1-16**.
 
   ### Milestone decision map
 
@@ -171,8 +171,7 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 10 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**, **M1-04 Selective durable
-  conversational memory**, and **M1-05 Proactive home autonomy**; the latter two await the shared Voice/Dashboard deployment.
+  Milestone progress: 12 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -185,8 +184,8 @@
   | **Complete** | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | **Complete** | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
   | **Complete** | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
-  | In progress | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
-  | In progress | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
+  | **Complete** | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
+  | **Complete** | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
   | Blocked | **M1-06 — Home-autonomy harness accepted** | Tier 1 passes restart, exactly-once, permission, simulation, audit, memory recovery, and high-impact safety gates. | `T1-16` | `M0-06`, `M1-01`–`M1-05` |
   | Blocked | **M2-01 — Personal information providers** | Calendar, reminders, notes, lists, contacts, weather, media, recipes, documents, and household knowledge are safely available. | `T2-01`–`T2-03` | `M1-06` |
   | Blocked | **M2-02 — Safe communications and transactions** | Messages, invitations, travel, shopping, bookings, finance, and purchases use preview, validation, grants, budgets, verification, and undo. | `T2-04`–`T2-05` | `M1-03`, `M2-01` |
@@ -263,14 +262,14 @@
   - [x] **T1-11 — Define and integrate the memory contract.** Implement typed profile, preference, episodic, commitment, relationship,
     procedural, and household-fact memories with provenance, audience, sensitivity, confidence, expiry, supersession, and deletion
     (`T1-01`, `T1-10`).
-  - [~] **T1-12 — Implement selective memory formation and retrieval.** Save salient non-routine conversation facts and needs, reject
+  - [x] **T1-12 — Implement selective memory formation and retrieval.** Save salient non-routine conversation facts and needs, reject
     routine commands/transient device state, confirm sensitive memories, and compile prompts using the fixed context hierarchy
     (`T1-11`).
-  - [~] **T1-13 — Implement memory consolidation and user controls.** Add conflict/duplicate consolidation plus spoken and Dashboard
+  - [x] **T1-13 — Implement memory consolidation and user controls.** Add conflict/duplicate consolidation plus spoken and Dashboard
     review, correction, pin, expiry, export, and forget operations (`T1-12`; Voice + Dashboard).
-  - [~] **T1-14 — Extend home providers.** Add scenes, automations, timers, schedules, energy, occupancy, device health, maintenance,
+  - [x] **T1-14 — Extend home providers.** Add scenes, automations, timers, schedules, energy, occupancy, device health, maintenance,
     media, and safe diagnostics with contracts and verification (`T1-04`).
-  - [~] **T1-15 — Implement automation authoring and proactive intervention.** Deliver draft → simulate → explain → approve → activate
+  - [x] **T1-15 — Implement automation authoring and proactive intervention.** Deliver draft → simulate → explain → approve → activate
     → monitor → rollback plus deduplicated voice/notification decisions, quiet-hour policy, and feedback tracking (`T1-06`, `T1-08`,
     `T1-14`).
   - [ ] **T1-16 — Pass the Tier 1 gate.** Prove restart-safe exactly-once behavior, permission correctness, pre-activation simulation,
