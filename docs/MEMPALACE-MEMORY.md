@@ -32,6 +32,12 @@ filesystem backup that immediately opens the copied MemPalace index to verify it
 is restorable. The Voice API also exposes JSON export at
 `GET /v1/agent/memories/export`.
 
+Recognized speakers can say “what do you remember?”, “pin …”, “forget …”,
+“correct memory … to …”, or “expire memory … in N days”. A mutation only runs
+when the lookup is unambiguous; otherwise it remains available for review on
+the dashboard. Sensitive records remain unavailable to retrieval until the
+owner confirms them there.
+
 The current consolidation pass merges exact duplicate active memories, preserves
 the newest/pinned record, and marks the duplicate superseded. It deliberately
 does not invent conflicts, summaries, or procedures; richer reviewable

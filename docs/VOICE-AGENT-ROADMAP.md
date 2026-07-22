@@ -162,7 +162,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 26 of 58 tasks complete. Next task: **T1-10**.
+  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 30 of 58 tasks complete. Next task: **T1-14**.
 
   ### Milestone decision map
 
@@ -171,8 +171,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 9 of 26 complete. In progress: **M0-06 Dependable real-time core accepted** and **M1-04 Selective durable
-  conversational memory**. Also ready: **M1-05 Proactive home autonomy**.
+  Milestone progress: 10 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-05 Proactive
+  home autonomy**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -258,15 +258,15 @@
     schedules, expiry, notification, and immediate revocation (`T1-07`).
   - [x] **T1-09 — Add goal/execution/grant/audit administration.** Provide authenticated Voice APIs and Dashboard screens for inspect,
     cancel, revoke, and trace replay (`T1-02`, `T1-08`; Voice + Dashboard).
-  - [ ] **T1-10 — Install and operate MemPalace on Iridium.** Provision a private authenticated service with health checks, backups,
+  - [x] **T1-10 — Install and operate MemPalace on Iridium.** Provision a private authenticated service with health checks, backups,
     restore verification, and graceful Nova Voice degradation when memory is unavailable.
-  - [ ] **T1-11 — Define and integrate the memory contract.** Implement typed profile, preference, episodic, commitment, relationship,
+  - [x] **T1-11 — Define and integrate the memory contract.** Implement typed profile, preference, episodic, commitment, relationship,
     procedural, and household-fact memories with provenance, audience, sensitivity, confidence, expiry, supersession, and deletion
     (`T1-01`, `T1-10`).
-  - [ ] **T1-12 — Implement selective memory formation and retrieval.** Save salient non-routine conversation facts and needs, reject
+  - [x] **T1-12 — Implement selective memory formation and retrieval.** Save salient non-routine conversation facts and needs, reject
     routine commands/transient device state, confirm sensitive memories, and compile prompts using the fixed context hierarchy
     (`T1-11`).
-  - [ ] **T1-13 — Implement memory consolidation and user controls.** Add conflict/duplicate consolidation plus spoken and Dashboard
+  - [x] **T1-13 — Implement memory consolidation and user controls.** Add conflict/duplicate consolidation plus spoken and Dashboard
     review, correction, pin, expiry, export, and forget operations (`T1-12`; Voice + Dashboard).
   - [ ] **T1-14 — Extend home providers.** Add scenes, automations, timers, schedules, energy, occupancy, device health, maintenance,
     media, and safe diagnostics with contracts and verification (`T1-04`).
