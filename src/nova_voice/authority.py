@@ -29,7 +29,7 @@ def action_capability(action: PlannedAction) -> str:
     call = action.call
     if call.provider == "web":
         return "knowledge.read"
-    if call.provider in {"icloud", "personal", "library", "communications"}:
+    if call.provider in {"icloud", "personal", "library", "communications", "transactions"}:
         return (
             call.tool
             if call.tool.startswith(f"{call.provider}.")

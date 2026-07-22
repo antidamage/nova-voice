@@ -26,10 +26,16 @@ from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.personal.provider import PersonalDataProvider
 from nova_voice.providers.personal.store import PersonalDataStore
+from nova_voice.providers.transactions.provider import TransactionsProvider
 from nova_voice.providers.web.client import BraveScrapeClient, GeminiClient, WebSearchClient
 from nova_voice.providers.web.provider import WebProvider
 from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerProfileStore
+from nova_voice.transactions import (
+    DisabledTransactionTransport,
+    TransactionManager,
+    WebhookTransactionTransport,
+)
 
 
 def build_service(settings: Settings) -> NovaVoiceService:
@@ -68,7 +74,15 @@ def build_service(settings: Settings) -> NovaVoiceService:
         search_results=settings.web_search_results,
     )
     registry = CapabilityRegistry(
-        allowlist={"nova", "web", "icloud", "personal", "library", "communications"}
+        allowlist={
+            "nova",
+            "web",
+            "icloud",
+            "personal",
+            "library",
+            "communications",
+            "transactions",
+        }
     )
     registry.register(nova_provider)
     registry.register(web_provider)
@@ -90,6 +104,17 @@ def build_service(settings: Settings) -> NovaVoiceService:
         delivery_transport,
     )
     registry.register(CommunicationsProvider(communications))
+    transaction_transport = (
+        WebhookTransactionTransport(
+            settings.transactions_bridge_url,
+            settings.transactions_bridge_token,
+            timeout_seconds=settings.transactions_timeout_seconds,
+        )
+        if settings.transactions_bridge_url and settings.transactions_bridge_token
+        else DisabledTransactionTransport()
+    )
+    transactions = TransactionManager(settings.transactions_database_path, transaction_transport)
+    registry.register(TransactionsProvider(transactions))
     if settings.icloud_configured:
         registry.register(
             ICloudProvider(
@@ -156,4 +181,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         proactive=proactive,
         memory=memory,
         communications=communications,
+        transactions=transactions,
     )

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     communications_bridge_url: str | None = None
     communications_bridge_token: str | None = None
     communications_timeout_seconds: float = Field(default=10, gt=0, le=30)
+    transactions_database_path: Path = Path("/var/lib/nova-voice/transactions.sqlite3")
+    transactions_bridge_url: str | None = None
+    transactions_bridge_token: str | None = None
+    transactions_timeout_seconds: float = Field(default=15, gt=0, le=60)
 
     @property
     def icloud_configured(self) -> bool:

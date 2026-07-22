@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -141,6 +142,20 @@ class CommunicationApprovalRequest(BaseModel):
 
 class CommunicationActorRequest(BaseModel):
     actor: str = "dashboard-admin"
+
+
+class TransactionApprovalRequest(BaseModel):
+    approval_token: str | None = None
+    budget_id: str | None = None
+    actor: str = "dashboard-admin"
+
+
+class TransactionBudgetRequest(BaseModel):
+    id: str
+    category: Literal["travel", "shopping", "booking", "finance", "purchase"]
+    currency: str
+    limit_amount: float
+    counterparty: str | None = None
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -386,6 +401,78 @@ def create_app(
         if await manager.get(draft_id) is None:
             raise HTTPException(status_code=404, detail="Unknown communication draft")
         return {"events": await manager.audit(draft_id)}
+
+    @app.post("/v1/transactions/{proposal_id}/preview")
+    async def preview_transaction(proposal_id: str, request: CommunicationActorRequest) -> dict:
+        manager = selected_service.transactions
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Transactions are unavailable")
+        try:
+            proposal, token = await manager.preview(proposal_id, actor=request.actor)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown transaction proposal") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"proposal": proposal.model_dump(mode="json"), "approvalToken": token}
+
+    @app.post("/v1/transactions/{proposal_id}/commit")
+    async def commit_transaction(proposal_id: str, request: TransactionApprovalRequest) -> dict:
+        manager = selected_service.transactions
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Transactions are unavailable")
+        try:
+            proposal = await manager.commit(
+                proposal_id,
+                actor=request.actor,
+                approval_token=request.approval_token,
+                budget_id=request.budget_id,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown transaction proposal") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"proposal": proposal.model_dump(mode="json")}
+
+    @app.post("/v1/transactions/{proposal_id}/cancel")
+    async def cancel_transaction(proposal_id: str, request: CommunicationActorRequest) -> dict:
+        manager = selected_service.transactions
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Transactions are unavailable")
+        try:
+            proposal = await manager.cancel(proposal_id, actor=request.actor)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown transaction proposal") from error
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"proposal": proposal.model_dump(mode="json")}
+
+    @app.get("/v1/transactions/{proposal_id}/audit")
+    async def transaction_audit(proposal_id: str) -> dict:
+        manager = selected_service.transactions
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Transactions are unavailable")
+        if await manager.get(proposal_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown transaction proposal")
+        return {"events": await manager.audit(proposal_id)}
+
+    @app.post("/v1/transactions/budgets", status_code=201)
+    async def create_transaction_budget(request: TransactionBudgetRequest) -> dict:
+        manager = selected_service.transactions
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Transactions are unavailable")
+        try:
+            budget = await manager.create_budget(
+                budget_id=request.id,
+                category=request.category,
+                currency=request.currency,
+                limit_amount=request.limit_amount,
+                counterparty=request.counterparty,
+            )
+        except (ValueError, sqlite3.IntegrityError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"budget": budget}
 
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
