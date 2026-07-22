@@ -9,6 +9,11 @@ from nova_voice.evaluation.tier1_acceptance import (
     Tier1GateResult,
     evaluate_tier1_gate,
 )
+from nova_voice.evaluation.tier3_acceptance import (
+    Tier3AcceptanceEvidence,
+    Tier3GateResult,
+    evaluate_tier3_gate,
+)
 
 __all__ = [
     "AudioReplayRunner",
@@ -18,6 +23,9 @@ __all__ = [
     "SimulatedHouseholdProvider",
     "Tier1AcceptanceEvidence",
     "Tier1GateResult",
+    "Tier3AcceptanceEvidence",
+    "Tier3GateResult",
     "VersionPins",
     "evaluate_tier1_gate",
+    "evaluate_tier3_gate",
 ]

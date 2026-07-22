@@ -246,6 +246,20 @@ As with earlier tiers, automated suites establish structural evidence. The
 physical and subjective owner pass remains separate and deferred; no harness
 result fabricates that evidence.
 
+## Tier 3 acceptance gate
+
+`evaluate_tier3_gate` requires one unique, content-addressed evidence artifact
+for longitudinal memory precision, contradiction/correction handling, privacy
+boundaries, multi-party dialogue, naturalness, and action-authority separation.
+Missing, duplicated, or failed evidence fails closed. False recollections,
+uncorrected contradictions, privacy disclosures, misattributed turns,
+naturalness failures, and unauthorized actions each have explicit zero-tolerance
+counters.
+
+The automated harness proves structure only. Physical multi-person and
+subjective speech acceptance remains in the final owner pass and cannot be
+manufactured by an automated run.
+
 ## Wake, duplicate, and echo gates
 
 - tune Beemo on real rooms; target false accepts <=0.2/hour and false reject <=5%
