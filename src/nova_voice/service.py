@@ -63,6 +63,7 @@ from nova_voice.memory import (
     classify_memory_intent,
     salient_memory_candidate,
 )
+from nova_voice.offline_optimizers import OfflineOptimizerPool
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.policy import ExecutionPolicy, PolicyOutcome
@@ -351,6 +352,7 @@ class NovaVoiceService:
         briefings: BriefingManager | None = None,
         continuity: ConversationContinuityManager | None = None,
         dialogue: MultiPartyDialogueManager | None = None,
+        optimizers: OfflineOptimizerPool | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -371,6 +373,7 @@ class NovaVoiceService:
         self.briefings = briefings
         self.continuity = continuity
         self.dialogue = dialogue
+        self.optimizers = optimizers
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -658,6 +661,8 @@ class NovaVoiceService:
             self.event_consumer.start()
         if self.speaker_profiles is not None:
             await self.speaker_profiles.initialize()
+        if self.optimizers is not None:
+            self.optimizers.start()
         # Nova is an optional capability from the core service's point of view.
         # Keep the interpreter, retention janitor, and satellite health endpoint
         # available when the dashboard is restarting; a later health/refresh
@@ -1922,6 +1927,11 @@ class NovaVoiceService:
                 if self.memory is not None
                 else {"ok": True, "enabled": False}
             ),
+            "offlineOptimizers": (
+                self.optimizers.health()
+                if self.optimizers is not None
+                else {"ok": True, "enabled": False}
+            ),
             "agentSettings": self.agent_settings.model_dump(mode="json", by_alias=True),
             "voiceSettings": (
                 self.voice_settings.model_dump(mode="json", by_alias=True)
@@ -1942,5 +1952,7 @@ class NovaVoiceService:
             await self.research.close()
         if self.briefings is not None:
             await self.briefings.close()
+        if self.optimizers is not None:
+            await self.optimizers.close()
         await self.registry.close()
         await self.interpreter.close()

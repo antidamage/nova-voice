@@ -260,6 +260,19 @@ The automated harness proves structure only. Physical multi-person and
 subjective speech acceptance remains in the final owner pass and cannot be
 manufactured by an automated run.
 
+## Tier 4 acceptance gate
+
+`evaluate_tier4_gate` requires unique, content-addressed evidence for
+multimodal privacy, digital-twin safety, visual continuity, optimizer isolation,
+cascade retention, and frontier comparison. Privacy violations, twin side
+effects, optimizer-applied changes, foreground optimizer calls, duplex-model
+production turns, and unprovenanced visual contexts are all zero-tolerance.
+
+Research, automation, memory, and plan optimizers run as bounded background
+recommendation workers. They have no provider registry, durable-store writer,
+or foreground callback. Duplex/frontier models remain evaluation targets; the
+production path remains the STT → structured local LLM → tools → TTS cascade.
+
 ## Wake, duplicate, and echo gates
 
 - tune Beemo on real rooms; target false accepts <=0.2/hour and false reject <=5%

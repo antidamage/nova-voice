@@ -326,7 +326,8 @@
     optimization, and “what would happen if…” queries (`T1-14`, `T1-15`).
   - [x] **T4-04 — Add visual assistance and object/location continuity.** Provide maintenance walkthroughs, proactive visual help, and
     cross-device context without silently creating sensitive memories (`T1-12`, `T4-02`, `T4-03`).
-  - [ ] **T4-05 — Add offline optimizer workers and pass the Tier 4 gate.** Run bounded research/automation/memory/plan evaluators off
+  - [~] **T4-05 — Add offline optimizer workers and pass the Tier 4 gate.** Bounded recommendation-only workers and the fail-closed
+    structural gate are implemented; final owner acceptance remains deferred. Run bounded research/automation/memory/plan evaluators off
     the speech path; compare duplex models only as evaluation targets and retain the cascade runtime (`OPS-03`, `T4-01` through
     `T4-04`).
 
