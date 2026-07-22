@@ -1155,6 +1155,7 @@ def create_app(
             async def process_audio() -> None:
                 nonlocal processed_frames
                 turn_tasks: set[asyncio.Task] = set()
+                latest_turn: dict[str, object | None] = {"task": None, "pending": None}
 
                 async def emit_listening_ack(chunk: bytes, sample_rate: int) -> None:
                     playback = room_playback.open_stream(room_id, hello.satellite_id)
@@ -1244,6 +1245,53 @@ def create_app(
                         # turn task died/was cancelled (satellite disconnect).
                         selected_audio.release_turn(pending_turn.arbiter_claim)
 
+                def track_turn(task: asyncio.Task, pending_turn) -> None:
+                    latest_turn["task"] = task
+                    latest_turn["pending"] = pending_turn
+                    turn_tasks.add(task)
+                    task.add_done_callback(turn_tasks.discard)
+
+                async def schedule_turn(pending_turn) -> None:
+                    previous_task = latest_turn["task"]
+                    previous_pending = latest_turn["pending"]
+                    if isinstance(previous_task, asyncio.Task) and not previous_task.done():
+                        decision = selected_audio.request_turn_continuation(room_id)
+                        monitor.record(
+                            "turn_continuation",
+                            satelliteId=hello.satellite_id,
+                            roomId=room_id,
+                            accepted=decision.accepted,
+                            phase=decision.phase,
+                            reason=decision.reason,
+                        )
+                        if decision.accepted and previous_pending is not None:
+                            previous_task.cancel()
+                            await asyncio.gather(previous_task, return_exceptions=True)
+                            pending_turn = selected_audio.merge_pending_turns(
+                                previous_pending,
+                                pending_turn,
+                            )
+                            task = asyncio.create_task(run_turn(pending_turn))
+                            track_turn(task, pending_turn)
+                            return
+
+                        # Once effects may have committed, never replay the
+                        # original request. Stop any remaining speech and run
+                        # the addition as a contextual follow-up after the
+                        # first turn has fully settled.
+                        await selected_audio.interrupt_speech(room_id)
+
+                        async def run_follow_up() -> None:
+                            await asyncio.gather(previous_task, return_exceptions=True)
+                            await run_turn(pending_turn)
+
+                        task = asyncio.create_task(run_follow_up())
+                        track_turn(task, pending_turn)
+                        return
+
+                    task = asyncio.create_task(run_turn(pending_turn))
+                    track_turn(task, pending_turn)
+
                 try:
                     while True:
                         frame = await queue.get()
@@ -1264,9 +1312,7 @@ def create_app(
                                 # One armed tap forces exactly one wake-initiated
                                 # segment; follow-ups ride the conversation window.
                                 turn_signal["wake_armed"] = False
-                                task = asyncio.create_task(run_turn(pending))
-                                turn_tasks.add(task)
-                                task.add_done_callback(turn_tasks.discard)
+                                await schedule_turn(pending)
                         except Exception:
                             logger.exception(
                                 "native satellite audio frame processing failed id=%s",

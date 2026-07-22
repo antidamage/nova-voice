@@ -306,6 +306,15 @@ class TurnCancellationController:
         self.safety = safety
         self.provider_tasks[task] = safety
 
+    def begin_non_cancellable_side_effect(self, action_id: str) -> None:
+        self.phase = "provider_call"
+        self.action_id = action_id
+        self.safety = "never"
+
+    def non_cancellable_side_effect_finished(self) -> None:
+        self.phase = "after_side_effects"
+        self.action_id = None
+
     def provider_finished(self, task: asyncio.Task[ToolResult]) -> None:
         self.provider_tasks.pop(task, None)
         if not self.provider_tasks:

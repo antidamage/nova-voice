@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
 import numpy as np
 
 from nova_voice.audio.pcm import pcm16_to_float32
+
+_TRAILING_WORD = re.compile(r"[a-z']+", re.IGNORECASE)
+_UNFINISHED_WORDS = frozenset(
+    {
+        "a", "an", "and", "as", "at", "because", "but", "by", "for", "from",
+        "if", "in", "into", "my", "of", "on", "or", "so", "than", "that", "the",
+        "then", "to", "unless", "until", "when", "where", "while", "with", "your",
+    }
+)
 
 
 class EndpointDecision(StrEnum):
@@ -30,7 +40,7 @@ class SemanticEndpointDetector:
         wait_threshold: float = 0.65,
         continue_threshold: float = 0.35,
         intermediate_wait_ms: int = 300,
-        max_pause_ms: int = 1_200,
+        max_pause_ms: int = 3_500,
         sample_rate: int = 16_000,
     ) -> None:
         if not 0 <= continue_threshold <= wait_threshold <= 1:
@@ -41,7 +51,13 @@ class SemanticEndpointDetector:
         self.max_pause_ms = max(self.intermediate_wait_ms, max_pause_ms)
         self.sample_rate = sample_rate
 
-    def decide(self, pcm16: bytes, *, trailing_silence_ms: int) -> EndpointResult:
+    def decide(
+        self,
+        pcm16: bytes,
+        *,
+        trailing_silence_ms: int,
+        interim_transcript: str | None = None,
+    ) -> EndpointResult:
         samples = pcm16_to_float32(pcm16)
         silence_samples = min(
             len(samples),
@@ -62,6 +78,18 @@ class SemanticEndpointDetector:
             duration_ms = len(voiced) * 1000 / self.sample_rate
             duration_bonus = min(0.12, max(0.0, (duration_ms - 500) / 10_000))
             probability = min(1.0, max(0.0, 0.5 - (0.45 * slope) + duration_bonus))
+
+        transcript = (interim_transcript or "").strip()
+        if transcript:
+            words = _TRAILING_WORD.findall(transcript.casefold())
+            unfinished = bool(
+                transcript.endswith((",", "-", "—"))
+                or (words and words[-1] in _UNFINISHED_WORDS)
+            )
+            if unfinished:
+                probability = min(probability, self.continue_threshold - 0.01)
+            elif transcript.endswith((".", "?", "!")):
+                probability = max(probability, self.wait_threshold)
 
         if probability >= self.wait_threshold:
             return EndpointResult(EndpointDecision.COMPLETE, probability, 0)

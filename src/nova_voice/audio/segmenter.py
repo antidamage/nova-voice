@@ -86,6 +86,7 @@ class SpeechSegmenter:
         self._endpoint_result: EndpointResult | None = None
         self._endpoint_target_frames = self.end_silence_frames
         self._endpoint_wait_announced = False
+        self._interim_transcript = ""
 
     @property
     def speaking(self) -> bool:
@@ -103,6 +104,9 @@ class SpeechSegmenter:
             return False
         self._endpoint_wait_announced = True
         return True
+
+    def set_interim_transcript(self, transcript: str) -> None:
+        self._interim_transcript = " ".join(transcript.split()).strip()
 
     def accept(self, frame: bytes) -> SpeechSegment | None:
         probability = self.score(frame)
@@ -137,6 +141,7 @@ class SpeechSegmenter:
                 self._endpoint_result = self.endpoint_detector.decide(
                     b"".join(self._utterance),
                     trailing_silence_ms=self._silence_frames * FRAME_MS,
+                    interim_transcript=self._interim_transcript,
                 )
                 self._endpoint_target_frames = self.end_silence_frames + (
                     self._endpoint_result.additional_wait_ms // FRAME_MS
@@ -171,6 +176,7 @@ class SpeechSegmenter:
         self._endpoint_result = None
         self._endpoint_target_frames = self.end_silence_frames
         self._endpoint_wait_announced = False
+        self._interim_transcript = ""
         # Stateful VAD implementations (for example Silero's recurrent
         # model) must start each utterance from a clean state.  Keep the
         # segmenter interface callable-only while honoring an optional reset.

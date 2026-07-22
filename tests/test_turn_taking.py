@@ -10,10 +10,11 @@ from nova_voice.audio.endpointing import (
 from nova_voice.audio.interruption import InterruptionKind, classify_interruption
 from nova_voice.audio.listening_ack import ListeningAckController
 from nova_voice.audio.prefetch import ForegroundPrefetch, StableInterimTracker, likely_tools
-from nova_voice.audio.runtime import SatelliteAudioRuntime
+from nova_voice.audio.runtime import PendingAudioTurn, SatelliteAudioRuntime
 from nova_voice.audio.segmenter import SpeechSegment, SpeechSegmenter
 from nova_voice.audio.speech_units import sentence_speech_units
 from nova_voice.domain import AcousticFeatures
+from nova_voice.turns import TaskCancellationDecision
 
 
 def _recorded_cadence(amplitudes: tuple[float, float, float]) -> bytes:
@@ -40,12 +41,39 @@ def test_semantic_endpointing_distinguishes_falling_and_continuing_cadence() -> 
     assert falling.decision == EndpointDecision.COMPLETE
     assert falling.additional_wait_ms == 0
     assert rising.decision == EndpointDecision.CONTINUE
-    assert rising.additional_wait_ms == 1_200
+    assert rising.additional_wait_ms == 3_500
+
+
+def test_interim_transcript_keeps_an_unfinished_clause_open_for_patient_pause() -> None:
+    detector = SemanticEndpointDetector(max_pause_ms=3_500)
+    audio = _recorded_cadence((0.8, 0.4, 0.1))
+
+    unfinished = detector.decide(
+        audio,
+        trailing_silence_ms=600,
+        interim_transcript="Nova, remind me to call Sam and",
+    )
+    punctuated = detector.decide(
+        audio,
+        trailing_silence_ms=600,
+        interim_transcript="Nova, remind me to call Sam.",
+    )
+
+    assert unfinished.decision == EndpointDecision.CONTINUE
+    assert unfinished.additional_wait_ms == 3_500
+    assert punctuated.decision == EndpointDecision.COMPLETE
 
 
 class _ContinueDetector:
-    def decide(self, _pcm16: bytes, *, trailing_silence_ms: int) -> EndpointResult:
+    def decide(
+        self,
+        _pcm16: bytes,
+        *,
+        trailing_silence_ms: int,
+        interim_transcript: str | None = None,
+    ) -> EndpointResult:
         assert trailing_silence_ms >= 40
+        assert interim_transcript is None or isinstance(interim_transcript, str)
         return EndpointResult(EndpointDecision.CONTINUE, 0.2, 80)
 
 
@@ -219,3 +247,59 @@ async def test_live_interim_prefetch_and_ack_commit_nothing_before_final_gate() 
     assert service.prefetch_calls == 1
     assert service.handle_calls == 0
     assert len(acknowledgements) == 1
+
+
+def test_resumed_pending_audio_is_appended_and_uses_newest_turn_claim() -> None:
+    first = PendingAudioTurn(
+        satellite_id="browser-office",
+        room_id="office",
+        segment=SpeechSegment(b"\x01\x00" * 320, AcousticFeatures(duration_ms=20, rms_db=-20)),
+        wake_detected=True,
+        dashboard_foreground=True,
+        response_audio_sink=None,
+        response_cancel_sink=None,
+        response_playback_events=None,
+        arbiter_claim=object(),
+    )
+    newest_claim = object()
+    continuation = PendingAudioTurn(
+        satellite_id="browser-office",
+        room_id="office",
+        segment=SpeechSegment(b"\x02\x00" * 320, AcousticFeatures(duration_ms=20, rms_db=-20)),
+        wake_detected=False,
+        dashboard_foreground=True,
+        response_audio_sink=None,
+        response_cancel_sink=None,
+        response_playback_events=None,
+        arbiter_claim=newest_claim,
+        endpoint_decision=EndpointDecision.CONTINUE,
+        endpoint_wait_ms=800,
+        endpoint_probability=0.2,
+    )
+
+    merged = SatelliteAudioRuntime.merge_pending_turns(first, continuation)
+
+    assert merged.segment.pcm16 == first.segment.pcm16 + continuation.segment.pcm16
+    assert merged.wake_detected
+    assert merged.arbiter_claim is newest_claim
+    assert merged.endpoint_wait_ms == 800
+
+
+def test_continuation_replays_only_before_side_effects() -> None:
+    class Service:
+        def request_task_cancellation(self, _room_id: str) -> TaskCancellationDecision:
+            return TaskCancellationDecision(
+                active=True,
+                accepted=True,
+                phase="before_side_effects",
+                reason="safe",
+            )
+
+    runtime = SatelliteAudioRuntime(Service(), object(), object(), lambda: None)
+    runtime._processing_phases["household"] = "before_side_effects"
+    assert runtime.request_turn_continuation("office").accepted
+
+    runtime._processing_phases["household"] = "after_side_effects"
+    decision = runtime.request_turn_continuation("office")
+    assert not decision.accepted
+    assert "follow-up" in decision.reason
