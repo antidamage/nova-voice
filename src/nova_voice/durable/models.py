@@ -101,6 +101,14 @@ class HouseholdRole(StrEnum):
     GUEST = "guest"
 
 
+class ProactiveInterventionState(StrEnum):
+    PROPOSED = "proposed"
+    APPROVED = "approved"
+    DELIVERED = "delivered"
+    DISMISSED = "dismissed"
+    CANCELLED = "cancelled"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -253,10 +261,16 @@ class DelegationGrantRecord(DurableModel):
 
 class ProactiveInterventionRecord(DurableModel):
     goal_id: str | None = None
+    event_id: str | None = None
     reason_code: str
+    reason_detail: str = ""
     channel: Literal["voice", "dashboard", "notification"]
-    status: Literal["proposed", "approved", "delivered", "dismissed", "cancelled"]
+    status: ProactiveInterventionState
     deduplication_key: str
+    room_id: str | None = None
+    feedback: Literal["accepted", "dismissed", "redundant", "annoying"] | None = None
+    delivered_at: datetime | None = None
+    feedback_at: datetime | None = None
 
 
 class MemoryReferenceRecord(DurableModel):
