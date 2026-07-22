@@ -170,6 +170,23 @@ class ConversationTopicRecord(DurableModel):
         return self
 
 
+class RelationshipContinuityRecord(DurableModel):
+    person_id: str = Field(min_length=1, max_length=160)
+    narrative_summary: str = Field(default="", max_length=3000)
+    explicit_preferences: dict[str, str] = Field(default_factory=dict)
+    speaking_style: Literal["default", "brief", "detailed", "slow", "direct"] = "default"
+    callback_topic_ids: tuple[str, ...] = ()
+    provenance_conversation_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_relationship_continuity(self) -> RelationshipContinuityRecord:
+        if len(set(self.callback_topic_ids)) != len(self.callback_topic_ids):
+            raise ValueError("callback topic ids must be unique")
+        if len(set(self.provenance_conversation_ids)) != len(self.provenance_conversation_ids):
+            raise ValueError("relationship provenance ids must be unique")
+        return self
+
+
 class EventRecord(DurableModel):
     conversation_id: str | None = None
     source: str = Field(min_length=1, max_length=120)

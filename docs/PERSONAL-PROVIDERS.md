@@ -161,3 +161,11 @@ full rolling transcript into durable storage.
 These records survive the microphone window and service restarts. Authenticated
 APIs can list them and explicitly resolve an open question; every change uses
 the durable store’s revision and audit semantics.
+
+Relationship continuity is stored per recognized person with provenance back to
+the source conversation records. Narrative continuity is assembled only from
+structured topic summaries. Preference and speaking-style learning accepts
+explicit phrases such as “I prefer…” or “keep it brief”; it does not infer a
+preference from one-off behavior. Before an addressed turn, topic-word overlap
+selects relevant callbacks and open questions with source IDs for the model’s
+context. Unknown speakers receive none of this context.

@@ -906,6 +906,16 @@ class NovaVoiceService:
                 MemoryIntentKind.QUERY_TOPIC,
             }:
                 memory_control_reply = "I don't have a saved memory about that."
+        if self.continuity is not None and utterance.speaker.status == "recognized":
+            try:
+                continuity_context = await self.continuity.context_for(
+                    utterance.speaker.person_id or "", utterance.transcript
+                )
+            except Exception:
+                continuity_context = {}
+                logger.warning("relationship continuity retrieval failed", exc_info=True)
+            if continuity_context:
+                relevant_state["conversationContinuity"] = continuity_context
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.

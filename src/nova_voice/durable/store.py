@@ -34,6 +34,7 @@ from nova_voice.durable.models import (
     PlanStepRecord,
     PlanStepState,
     ProactiveInterventionRecord,
+    RelationshipContinuityRecord,
     ResearchRecord,
     utc_now,
 )
@@ -57,6 +58,7 @@ Record = (
     | PlanStepRecord
     | ProactiveInterventionRecord
     | ResearchRecord
+    | RelationshipContinuityRecord
 )
 RecordT = TypeVar("RecordT", bound=DurableModel)
 
@@ -81,6 +83,7 @@ _RECORD_TYPES: dict[str, type[Record]] = {
         PlanStepRecord,
         ProactiveInterventionRecord,
         ResearchRecord,
+        RelationshipContinuityRecord,
     )
 }
 _SCHEMA_VERSION = 1

@@ -46,6 +46,7 @@ from nova_voice.durable.models import (
     PlanRecord,
     PlanState,
     ProactiveInterventionRecord,
+    RelationshipContinuityRecord,
     ResearchRecord,
     utc_now,
 )
@@ -625,6 +626,17 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown conversation") from error
         return {"conversation": record.model_dump(mode="json")}
 
+    @app.get("/v1/relationship-continuity")
+    async def list_relationship_continuity() -> dict:
+        manager = selected_service.continuity
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Relationship continuity is unavailable")
+        return {
+            "relationships": [
+                item.model_dump(mode="json") for item in await manager.relationships()
+            ]
+        }
+
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
         """Authenticated read-only operational trace for the live voice stack."""
@@ -692,6 +704,7 @@ def create_app(
             briefings,
             subscriptions,
             conversation_topics,
+            relationships,
             audit,
         ) = await asyncio.gather(
             durable.list(GoalRecord),
@@ -705,6 +718,7 @@ def create_app(
             durable.list(BriefingRecord),
             durable.list(EventSubscriptionRecord),
             durable.list(ConversationTopicRecord),
+            durable.list(RelationshipContinuityRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -722,6 +736,7 @@ def create_app(
             "conversationTopics": [
                 row.record.model_dump(mode="json") for row in conversation_topics
             ],
+            "relationships": [row.record.model_dump(mode="json") for row in relationships],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }
