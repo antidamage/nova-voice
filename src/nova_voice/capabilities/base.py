@@ -17,6 +17,10 @@ class ToolPolicy(BaseModel):
     reversible: bool = True
     idempotent: bool = False
     parallel_safe: bool = False
+    # Provider-owned lock names for durable plan concurrency. Templates may
+    # reference scalar action arguments, for example ``entity:{entity_id}``.
+    # No declaration conservatively locks the complete provider.
+    resource_templates: tuple[str, ...] = ()
     requires_confirmation: bool = False
     # "before_side_effects" is the safe default for mutations: a queued call
     # may be skipped, but an in-flight provider call must finish and verify.

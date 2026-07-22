@@ -35,6 +35,7 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
+from nova_voice.durable.store import DurableAgentStore
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
     command_acknowledgement,
@@ -322,6 +323,7 @@ class NovaVoiceService:
         sessions: SessionManager | None = None,
         conversations: ConversationTracker | None = None,
         web_provider: WebProvider | None = None,
+        durable_store: DurableAgentStore | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -329,6 +331,7 @@ class NovaVoiceService:
         self.nova_provider = nova_provider
         self.web_provider = web_provider
         self.store = store
+        self.durable_store = durable_store
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -603,6 +606,9 @@ class NovaVoiceService:
     async def initialize(self) -> None:
         await self.store.initialize()
         await self.store.delete_expired()
+        if self.durable_store is not None:
+            await self.durable_store.initialize()
+            await self.durable_store.prune_expired()
         if self.speaker_profiles is not None:
             await self.speaker_profiles.initialize()
         # Nova is an optional capability from the core service's point of view.
@@ -1602,6 +1608,11 @@ class NovaVoiceService:
             "provider": provider_health,
             "llm": llm_health,
             "retainedTranscripts": await self.store.count(),
+            "durableAgent": (
+                await self.durable_store.health()
+                if self.durable_store is not None
+                else {"ok": True, "enabled": False}
+            ),
             "speakerProfiles": (
                 await self.speaker_profiles.health()
                 if self.speaker_profiles is not None

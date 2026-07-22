@@ -3,6 +3,7 @@ from __future__ import annotations
 from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
+from nova_voice.durable.store import DurableAgentStore
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 from nova_voice.interpretation.skills import load_skills
 from nova_voice.persistence import TranscriptStore
@@ -60,6 +61,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
         timeout_seconds=settings.llm_timeout_seconds,
     )
     store = TranscriptStore(settings.database_path, settings.retention_hours)
+    durable_store = DurableAgentStore(settings.effective_durable_database_path)
     speaker_profiles = SpeakerProfileStore(
         settings.database_path,
         retention_days=settings.speaker_candidate_retention_days,
@@ -83,4 +85,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         speaker_profiles=speaker_profiles,
         conversations=conversations,
         web_provider=web_provider,
+        durable_store=durable_store,
     )

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8766, ge=1, le=65535)
     database_path: Path = Path("data/transcripts.sqlite3")
+    durable_database_path: Path | None = None
     structural_telemetry_path: Path | None = None
     retention_hours: float = Field(default=24.0, gt=0, le=24)
     shadow_mode: bool = True
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     audio_enabled: bool = False
     diagnostics_enabled: bool = False
     diagnostics_max_audio_seconds: int = Field(default=30, ge=1, le=120)
+
+    @property
+    def effective_durable_database_path(self) -> Path:
+        return self.durable_database_path or self.database_path.with_name(
+            "durable-agent.sqlite3"
+        )
 
     # IANA timezone of the household. Day/night playback volume and the spoken
     # clock context use this rather than the host clock. An explicit empty

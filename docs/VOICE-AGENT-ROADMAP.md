@@ -5,13 +5,16 @@
   Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, and 442 passing tests.
+  routing, short-lived context, diagnostics, a restart-safe durable goal/plan
+  engine, and 455 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
-  - ConversationTracker and SessionManager are ephemeral turn helpers, not a durable agent harness.
-  - Plans are limited to four actions and one synchronous turn; work cannot pause, resume after restart, wait for events, or run
-    asynchronously.
+  - ConversationTracker and SessionManager remain ephemeral turn helpers, while
+    the separate durable goal/plan engine now supplies versioned records,
+    transactional recovery, leases, waits, approvals, events, retries, and
+    compensation. Foreground turns do not yet create durable plans
+    automatically.
 
   - Only Nova home control/tasks and web search are available.
   - There is no durable personal memory, commitment tracking, delegation system, proactive decision engine, or agent-owned event
@@ -156,7 +159,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 17 of 58 tasks complete. Next task: **T0-15**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 22 of 58 tasks complete. Next task: **T0-15**.
 
   ### Milestone decision map
 
@@ -165,8 +168,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 6 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-01 Durable goal and
-  plan engine**.
+  Milestone progress: 7 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-02 Resumable
+  household event backbone**, **M1-03 Household authority and administration**, and **M1-04 Selective durable conversational memory**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -176,10 +179,10 @@
   | **Complete** | **M0-04 — Knowledge and speech reliability** | Knowledge gaps recover through one safe web lookup and numbers are spoken contextually. | `T0-10`–`T0-11` | None |
   | **Complete** | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
   | In progress | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
-  | Ready | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
-  | Blocked | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
-  | Blocked | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
-  | Blocked | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
+  | **Complete** | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
+  | Ready | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
+  | Ready | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
+  | Ready | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
   | Blocked | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
   | Blocked | **M1-06 — Home-autonomy harness accepted** | Tier 1 passes restart, exactly-once, permission, simulation, audit, memory recovery, and high-impact safety gates. | `T1-16` | `M0-06`, `M1-01`–`M1-05` |
   | Blocked | **M2-01 — Personal information providers** | Calendar, reminders, notes, lists, contacts, weather, media, recipes, documents, and household knowledge are safely available. | `T2-01`–`T2-03` | `M1-06` |
@@ -234,15 +237,15 @@
 
   ### Tier 1 task queue — durable home-autonomy harness
 
-  - [ ] **T1-01 — Define durable agent records.** Specify versioned Conversation, Event, Goal, Plan, PlanStep, Execution,
+  - [x] **T1-01 — Define durable agent records.** Specify versioned Conversation, Event, Goal, Plan, PlanStep, Execution,
     DelegationGrant, ProactiveIntervention, Memory reference, and audit schemas (`T0-02`, `T0-03`).
-  - [ ] **T1-02 — Implement the durable stores and migrations.** Persist every lifecycle transition transactionally with restart tests,
+  - [x] **T1-02 — Implement the durable stores and migrations.** Persist every lifecycle transition transactionally with restart tests,
     retention rules, backup/restore, and schema migration coverage (`T1-01`).
-  - [ ] **T1-03 — Implement execution leases and idempotency.** Persist before/after side effects and prove crash/retry cannot duplicate
+  - [x] **T1-03 — Implement execution leases and idempotency.** Persist before/after side effects and prove crash/retry cannot duplicate
     mutations (`T1-02`).
-  - [ ] **T1-04 — Implement the durable plan runner.** Support tool, question, approval, wait, timer, event, verification, retry, and
+  - [x] **T1-04 — Implement the durable plan runner.** Support tool, question, approval, wait, timer, event, verification, retry, and
     compensation steps through satisfied/paused/blocked/cancelled/expired/failed states (`T1-03`).
-  - [ ] **T1-05 — Add safe plan concurrency and partial-failure recovery.** Use provider resource declarations, preserve successful
+  - [x] **T1-05 — Add safe plan concurrency and partial-failure recovery.** Use provider resource declarations, preserve successful
     work, and retry or compensate only failed steps (`T1-04`).
   - [ ] **T1-06 — Add the authenticated resumable dashboard event stream.** Normalize HA, occupancy, device-health, weather, energy,
     reminder, calendar, and agent-task events with cursors and deduplication (`T1-01`; Voice + Dashboard).

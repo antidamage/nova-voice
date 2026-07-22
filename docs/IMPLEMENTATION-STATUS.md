@@ -5,7 +5,7 @@ runtime described by `docs/PLAN.md`. The core is dashboard-independent and
 uses only the provider's documented REST/MCP client.
 
 The current source also implements wake-opened, room-local multi-turn context
-with a 20-second idle timeout, no-wake follow-ups, direct spoken cancellation,
+with a 60-second default idle timeout, no-wake follow-ups, direct spoken cancellation,
 persona-aware verified-command confirmations, adaptive broad-light shortcuts,
 source-satellite-only response audio, global dashboard speaking animation, and
 the two-sided configurable-font voice monitor transcript. These paths have only
@@ -13,6 +13,11 @@ mocked/unit/static coverage here; no audible validation was performed.
 
 Implemented in this increment:
 
+- a production-initialized durable agent database with frozen versioned
+  conversation/event/goal/plan/step/execution/grant/intervention/memory/audit
+  records, transactional migrations and revisions, verified backup/restore,
+  stable execution idempotency keys and leases, every wait/approval/event/tool
+  step type, provider resource locks, and restart/partial-failure recovery;
 - a self-contained, responsive development diagnostics page at `/diagnostics`
   for explicit browser microphone capture, real STT/LLM/emotion/policy/TTS
   inspection, timing display, and returned-audio playback;

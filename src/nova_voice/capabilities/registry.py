@@ -66,6 +66,28 @@ class CapabilityRegistry:
     def policy_for(self, provider_id: str, tool_name: str) -> ToolPolicy | None:
         return self._tool_policies.get((provider_id, tool_name))
 
+    def resources_for(self, action: PlannedAction) -> tuple[str, ...]:
+        """Resolve provider-declared resource locks for one durable step."""
+
+        validated = self.validate_action(action)
+        policy = self.policy_for(validated.call.provider, validated.call.tool)
+        if policy is None:
+            raise ValueError("action references a tool without deterministic policy")
+        if not policy.resource_templates:
+            return (f"provider:{validated.call.provider}",)
+        resources: list[str] = []
+        for template in policy.resource_templates:
+            try:
+                resource = template.format_map(validated.call.arguments)
+            except KeyError as error:
+                raise ValueError(
+                    f"resource template references a missing action argument: {error.args[0]}"
+                ) from error
+            if not resource or "{" in resource or "}" in resource:
+                raise ValueError("resource template did not resolve to a concrete lock name")
+            resources.append(resource)
+        return tuple(dict.fromkeys(resources))
+
     def validate_action(self, action: PlannedAction) -> PlannedAction:
         key = (action.call.provider, action.call.tool)
         validator = self._tool_validators.get(key)

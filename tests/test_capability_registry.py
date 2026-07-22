@@ -23,7 +23,11 @@ class _FixtureProvider(CapabilityProvider):
                     "function": {
                         "name": "fixture.query",
                         "description": "Read fixture state.",
-                        "parameters": {"type": "object", "additionalProperties": False},
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"entity_id": {"type": "string"}},
+                            "additionalProperties": False,
+                        },
                     },
                 }
             ],
@@ -65,3 +69,30 @@ def test_registry_accepts_one_policy_per_advertised_tool() -> None:
     registry.register(_FixtureProvider({"fixture.query": ToolPolicy(idempotent=True)}))
 
     assert registry.policy_for("fixture", "fixture.query").idempotent
+
+
+def test_registry_resolves_provider_owned_resource_templates() -> None:
+    registry = CapabilityRegistry(allowlist={"fixture"})
+    registry.register(
+        _FixtureProvider(
+            {
+                "fixture.query": ToolPolicy(
+                    parallel_safe=True,
+                    resource_templates=("entity:{entity_id}",),
+                )
+            }
+        )
+    )
+    action = PlannedAction.model_validate(
+        {
+            "id": "query",
+            "order": 0,
+            "call": {
+                "provider": "fixture",
+                "tool": "fixture.query",
+                "arguments": {"entity_id": "light.office"},
+            },
+        }
+    )
+
+    assert registry.resources_for(action) == ("entity:light.office",)
