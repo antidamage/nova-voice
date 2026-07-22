@@ -128,6 +128,14 @@ class CommitmentState(StrEnum):
     MISSED = "missed"
 
 
+class ResearchState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -333,6 +341,29 @@ class CommitmentRecord(DurableModel):
             raise ValueError("commitment deadline cannot precede due time")
         if len(set(self.channels)) != len(self.channels):
             raise ValueError("commitment channels must be unique")
+        return self
+
+
+class ResearchRecord(DurableModel):
+    owner_id: str
+    query: str = Field(min_length=1, max_length=1000)
+    status: ResearchState = ResearchState.QUEUED
+    spoken_summary: str | None = Field(default=None, max_length=2000)
+    detail: dict[str, Any] = Field(default_factory=dict)
+    citations: tuple[str, ...] = ()
+    uncertainty: Literal["low", "medium", "high"] = "high"
+    backend: str | None = Field(default=None, max_length=80)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_research(self) -> ResearchRecord:
+        for value in (self.started_at, self.completed_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("research timestamps must be timezone-aware")
+        if len(set(self.citations)) != len(self.citations):
+            raise ValueError("research citations must be unique")
         return self
 
 

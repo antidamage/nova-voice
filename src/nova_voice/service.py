@@ -66,6 +66,7 @@ from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.web.provider import WebProvider
+from nova_voice.research import ResearchManager
 from nova_voice.sessions import SessionManager
 from nova_voice.speaker_profiles import (
     SpeakerProfileStore,
@@ -341,6 +342,7 @@ class NovaVoiceService:
         communications: CommunicationManager | None = None,
         transactions: TransactionManager | None = None,
         commitments: CommitmentManager | None = None,
+        research: ResearchManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -357,6 +359,7 @@ class NovaVoiceService:
         self.communications = communications
         self.transactions = transactions
         self.commitments = commitments
+        self.research = research
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -634,6 +637,8 @@ class NovaVoiceService:
         if self.commitments is not None:
             await self.commitments.poll()
             self.commitments.start()
+        if self.research is not None:
+            await self.research.start()
         if self.event_consumer is not None:
             await self.event_consumer.initialize()
             self.event_consumer.start()
@@ -1796,6 +1801,7 @@ class NovaVoiceService:
             await self.memory.close()
         if self.commitments is not None:
             await self.commitments.close()
+        if self.research is not None:
+            await self.research.close()
         await self.registry.close()
         await self.interpreter.close()
-        await self.registry.close()
