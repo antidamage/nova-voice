@@ -6,6 +6,7 @@ from nova_voice.audio.dedup import TranscriptDeduplicator
 from nova_voice.audio.denoise import NoiseSuppressor
 from nova_voice.audio.echo import PlaybackEchoGuard
 from nova_voice.audio.election import SegmentElection
+from nova_voice.audio.endpointing import SemanticEndpointDetector
 from nova_voice.audio.runtime import SatelliteAudioRuntime
 from nova_voice.audio.segmenter import SileroVad, SpeechSegmenter
 from nova_voice.audio.vocab import SimplifiedEnglishGate
@@ -56,6 +57,16 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             threshold=settings.vad_threshold,
             pre_roll_ms=settings.vad_pre_roll_ms,
             end_silence_ms=settings.vad_end_silence_ms,
+            endpoint_detector=(
+                SemanticEndpointDetector(
+                    wait_threshold=settings.endpoint_wait_threshold,
+                    continue_threshold=settings.endpoint_continue_threshold,
+                    intermediate_wait_ms=settings.endpoint_intermediate_wait_ms,
+                    max_pause_ms=settings.endpoint_max_pause_ms,
+                )
+                if settings.endpointing_enabled
+                else None
+            ),
         )
 
     speaker_recognizer = (

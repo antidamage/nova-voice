@@ -266,9 +266,9 @@ type SatelliteHello = {
   satelliteId: string;
   displayName: string;
   roomId: string;
-  client: "linux-native" | "macos-native";
-  supervisor: "systemd" | "launchd";
-  capturePolicy: "always";
+  client: "linux-native" | "macos-native" | "browser";
+  supervisor: "systemd" | "launchd" | "none";
+  capturePolicy: "always" | "push-to-talk";
   dashboardForeground?: boolean;
   capabilities: {
     microphone: boolean;
@@ -282,8 +282,10 @@ type SatelliteHello = {
 };
 ```
 
-Connection requires a locally provisioned per-device certificate and mutually
-authenticated TLS. An additional bearer token is not required in v1. After the
+Native connection requires a locally provisioned per-device certificate and
+mutually authenticated TLS. A browser uses same-origin WSS to the dashboard
+bridge; the bridge holds the mTLS client identity for its upstream connection to
+Iridium. After the
 JSON hello, audio uses a versioned binary envelope containing sequence, monotonic
 timestamp, stream direction, format, playback marker, and PCM payload. Native
 satellites capture continuously but normally transmit only locally detected
@@ -292,23 +294,34 @@ pre-roll and an 800 ms silence tail, so it
 does not replace Iridium's authoritative VAD or clip labelled speech. The hello
 acknowledgement includes `localVadEnabled`; Iridium can later send
 `{"type":"local_vad","enabled":false}` to bypass the gate live for diagnostics.
-Response PCM is returned on every connected speaker connection with
-the elected microphone's `roomId`, and never to a different room. `playback`,
-`playback_done`, and `playback_cancel` control messages start, finish, or
-immediately close each member speaker's copy of that room output stream.
+Response PCM is returned only to the elected source satellite's own connection.
+`playback`, `playback_done`, and `playback_cancel` control messages start,
+finish, or immediately close that source's output stream; room membership is
+not a playback fan-out list.
 Clients advertising `playbackEvents` return `playback_started` with the matching
 `playbackId` when their audio renderer starts the first scheduled buffer, then
 `playback_finished` after the last buffer is audibly complete. Missing capability
 means Iridium retains the protocol-v1 first-PCM timing fallback.
-Small control frames carry capture state, RMS/SNR, optional wake
-telemetry, heartbeat, foreground context, and server backpressure. No browser,
-page-visibility event, or dashboard hook is part of the protocol.
+Small control frames carry capture state, RMS/SNR, optional wake telemetry,
+heartbeat, foreground context, and server backpressure. A push-to-talk browser
+sends `begin_turn` to arm the next segment as wake-initiated. Browser page
+visibility and dashboard UI state are client concerns, not Iridium protocol
+authority.
+
+After base VAD silence, Iridium may hold the turn for a bounded semantic
+endpoint wait. During an addressed extended pause it may send one short
+nonverbal playback stream through the same protocol. That listening earcon is
+not a response, action acknowledgement, or completion event and is recorded as
+an echo reference. Stable interim text can initiate only read-only context/tool
+prefetch; final text must extend the stable prefix before prefetched state is
+reused.
 
 All satellites in one acoustic room must advertise the same stable `roomId`.
-Iridium stores one post-DSP playback reference and recent response-text window
-under that room id; every room microphone consults the shared reference before
-interpretation. This is distinct from source election, which still selects only
-one microphone segment for each household utterance.
+Iridium stores post-DSP playback references and recent response-text windows by
+the configured arbitration scope: household by default, or `roomId` in
+room-scoped installations. Every microphone in that scope consults the shared
+reference before interpretation. This is distinct from source election, which
+still selects only one microphone segment for each utterance.
 
 Speaking animation is not satellite audio routing. Nova Voice turns confirmed
 playback edges (or the legacy first-PCM fallback) into one best-effort
@@ -317,11 +330,13 @@ it out to every connected dashboard client.
 
 ## Conversation and monitor contract
 
-Conversation context is in-memory and keyed by room. A wake-word turn opens it;
-each accepted turn refreshes a 20-second idle timeout. User and assistant text is
-appended in role order, and the complete context is cleared on timeout, explicit
-abandonment, or a direct speech interruption. System/persona and initial
-time/weather context are snapshotted once per conversation.
+Conversation context is in-memory and keyed by the configured arbitration scope
+(`household` by default, or room when configured). A wake-word turn opens it;
+each accepted turn refreshes a dashboard-tunable idle timeout whose default is
+60 seconds. User and assistant text is appended in role order, and the complete
+context is cleared on timeout, explicit abandonment, or a direct speech
+interruption. System/persona and initial time/weather context are snapshotted
+once per conversation.
 
 The read-only voice monitor records both sides of the exchange as `User:` and
 `<Agent name>:` transcript lines. Its transcript-font selector is local UI state
@@ -333,6 +348,30 @@ Nova's `POST /api/voice/transcript` endpoint. The payload contains `role`
 Nova keeps a bounded process-local snapshot and fans new entries out as
 `voice-transcript` events on the shared dashboard SSE stream; Iridium remains
 the only durable transcript store and retains that data for at most 24 hours.
+
+## Foreground turn trace and cancellation contract
+
+Every handled foreground turn returns an immutable `TurnTrace` containing:
+
+- `traceId`, `utteranceId`, and non-reversible `inputRevision`/
+  `contextRevision` hashes
+- exactly ordered `capture`, `endpoint`, `contextualize`, `interpret`,
+  `authorize`, `execute_query`, `verify`, `render`, `speak`, and `commit` stage
+  records with status and elapsed milliseconds
+- the policy decision, tool journal, verification evidence revisions, response
+  revisions, cancellation decisions, total timing, and terminal status
+
+The trace contains revisions rather than raw transcript, prompt, or response
+text and is included in the redacted completion monitor event. Tool manifests
+declare `cancellation` as `before_side_effects` (the default), `anytime`, or
+`never`. A response playback cancel never implies task cancellation. Queued
+actions may be stopped before invocation; only an `anytime` provider may be
+cancelled during its call. Once a mutation may have started, its call and
+verification finish and the cancellation applies only to later queued actions.
+Speech heard during response playback is deterministically classified as true
+barge-in, backchannel, cross-talk, or false interruption. Only true barge-in
+sets the playback cancellation event; the other classes preserve the active
+stream.
 
 ## Persona contract
 

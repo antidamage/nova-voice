@@ -218,6 +218,7 @@ ToolResultCode = Literal[
     "unverified",
     "backend_error",
     "shadowed",
+    "cancelled",
 ]
 
 
@@ -230,6 +231,98 @@ class ToolResult(StrictModel):
     observed: dict[str, Any] | None = None
     candidates: list[str] = []
     message: str
+
+
+class TurnStage(StrEnum):
+    CAPTURE = "capture"
+    ENDPOINT = "endpoint"
+    CONTEXTUALIZE = "contextualize"
+    INTERPRET = "interpret"
+    AUTHORIZE = "authorize"
+    EXECUTE = "execute_query"
+    VERIFY = "verify"
+    RENDER = "render"
+    SPEAK = "speak"
+    COMMIT = "commit"
+
+
+class TurnTerminalStatus(StrEnum):
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    IGNORED = "ignored"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+class TurnStageStatus(StrEnum):
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+class ImmutableTraceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, frozen=True)
+
+
+class TurnStageRecord(ImmutableTraceModel):
+    stage: TurnStage
+    status: TurnStageStatus
+    elapsed_ms: float = Field(default=0, ge=0)
+    detail: str | None = None
+
+
+class TurnPolicyDecision(ImmutableTraceModel):
+    execute: bool
+    shadowed: bool
+    reason: str
+
+
+class TurnToolJournalEntry(ImmutableTraceModel):
+    action_id: str
+    provider: str
+    tool: str
+    order: int = Field(ge=0)
+    status: Literal["planned", "completed", "failed", "cancelled", "blocked"]
+    result_code: ToolResultCode | None = None
+
+
+class TurnVerificationEvidence(ImmutableTraceModel):
+    action_id: str
+    ok: bool
+    code: ToolResultCode
+    target: str | None = None
+    observed_revision: str | None = None
+
+
+class TurnResponseRevision(ImmutableTraceModel):
+    revision: int = Field(ge=1)
+    source: Literal["deterministic", "model", "knowledge_fallback", "affectations", "final"]
+    text_revision: str
+    word_count: int = Field(ge=0)
+
+
+class TurnCancellationRecord(ImmutableTraceModel):
+    kind: Literal["speech", "task"]
+    accepted: bool
+    phase: str
+    reason: str
+
+
+class TurnTrace(ImmutableTraceModel):
+    trace_id: str
+    utterance_id: str
+    input_revision: str
+    context_revision: str | None = None
+    stages: tuple[TurnStageRecord, ...] = ()
+    policy: TurnPolicyDecision | None = None
+    tool_journal: tuple[TurnToolJournalEntry, ...] = ()
+    verification: tuple[TurnVerificationEvidence, ...] = ()
+    response_revisions: tuple[TurnResponseRevision, ...] = ()
+    cancellations: tuple[TurnCancellationRecord, ...] = ()
+    total_ms: float = Field(default=0, ge=0)
+    terminal_status: TurnTerminalStatus = TurnTerminalStatus.IN_PROGRESS
+    terminal_reason: str | None = None
 
 
 class HandleResult(StrictModel):
@@ -245,3 +338,4 @@ class HandleResult(StrictModel):
     response_text: str | None = None
     response_tone_instruction: str | None = None
     timings_ms: dict[str, float] = Field(default_factory=dict)
+    turn_trace: TurnTrace | None = None

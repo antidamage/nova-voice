@@ -18,6 +18,12 @@ class ToolPolicy(BaseModel):
     idempotent: bool = False
     parallel_safe: bool = False
     requires_confirmation: bool = False
+    # "before_side_effects" is the safe default for mutations: a queued call
+    # may be skipped, but an in-flight provider call must finish and verify.
+    # Read-only providers may opt into "anytime" cancellation.
+    cancellation: Literal["never", "before_side_effects", "anytime"] = (
+        "before_side_effects"
+    )
 
 
 class CapabilityManifest(BaseModel):

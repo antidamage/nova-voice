@@ -6,6 +6,7 @@ import pytest
 
 from nova_voice.domain import CapabilityToolCall, PlannedAction, ToolResult
 from nova_voice.service import NovaVoiceService
+from nova_voice.turns import TurnCancellationController
 
 
 class _FakeProvider:
@@ -39,6 +40,7 @@ class _FakeRegistry:
         risk: str = "low",
         requires_confirmation: bool = False,
         include_policy: bool = True,
+        cancellation: str = "before_side_effects",
     ) -> None:
         self.provider_instance = provider
         self.parallel_safe = parallel_safe
@@ -47,6 +49,7 @@ class _FakeRegistry:
         self.risk = risk
         self.requires_confirmation = requires_confirmation
         self.include_policy = include_policy
+        self.cancellation = cancellation
 
     def validate_action(self, action: PlannedAction) -> PlannedAction:
         if action.id in self.invalid:
@@ -64,6 +67,7 @@ class _FakeRegistry:
                 "parallel_safe": self.parallel_safe,
                 "requires_confirmation": self.requires_confirmation,
                 "idempotent": self.idempotent,
+                "cancellation": self.cancellation,
             },
         )()
 
@@ -152,3 +156,87 @@ async def test_unapproved_or_unclassified_capability_never_executes(kwargs: dict
 
     assert results[0].code == "blocked"
     assert provider.calls == []
+
+
+class _BlockingProvider(_FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.was_cancelled = False
+
+    async def execute(self, action: PlannedAction) -> ToolResult:
+        self.calls.append(action.id)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.was_cancelled = True
+            raise
+        return ToolResult(action_id=action.id, ok=True, code="ok", message="done")
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_before_side_effects_skips_provider() -> None:
+    provider = _FakeProvider()
+    service = object.__new__(NovaVoiceService)
+    service.registry = _FakeRegistry(provider, parallel_safe=False)
+    cancellation = TurnCancellationController()
+
+    decision = cancellation.request()
+    results = await service._execute_plan([_action("a1", 0)], cancellation=cancellation)
+
+    assert decision.accepted
+    assert results[0].code == "cancelled"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_only_provider_can_cancel_during_call() -> None:
+    provider = _BlockingProvider()
+    service = object.__new__(NovaVoiceService)
+    service.registry = _FakeRegistry(
+        provider,
+        parallel_safe=False,
+        cancellation="anytime",
+    )
+    cancellation = TurnCancellationController()
+    pending = asyncio.create_task(
+        service._execute_plan([_action("a1", 0)], cancellation=cancellation)
+    )
+    await provider.started.wait()
+
+    decision = cancellation.request()
+    results = await pending
+
+    assert decision.accepted
+    assert provider.was_cancelled
+    assert results[0].code == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_mutation_finishes_and_verifies_after_in_flight_cancel_request() -> None:
+    provider = _BlockingProvider()
+    service = object.__new__(NovaVoiceService)
+    service.registry = _FakeRegistry(
+        provider,
+        parallel_safe=False,
+        cancellation="before_side_effects",
+    )
+    cancellation = TurnCancellationController()
+    pending = asyncio.create_task(
+        service._execute_plan([_action("a1", 0)], cancellation=cancellation)
+    )
+    await provider.started.wait()
+
+    during = cancellation.request()
+    provider.release.set()
+    results = await pending
+    after = cancellation.request()
+
+    assert not during.accepted
+    assert "verification required" in during.reason
+    assert not provider.was_cancelled
+    assert results[0].ok
+    assert not after.accepted
+    assert after.phase == "after_side_effects"

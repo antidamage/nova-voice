@@ -277,6 +277,16 @@ class FakeStreamingTts(FakeTts):
         yield b"\x02\x00" * 50, 24_000
 
 
+class RecordingSentenceTts(FakeTts):
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def synthesize_stream(self, text: str, instruction: str):
+        assert instruction.startswith("Calm")
+        self.texts.append(text)
+        yield b"\x01\x00" * 50, 24_000
+
+
 class FakeService:
     def __init__(self) -> None:
         self.utterance = None
@@ -371,6 +381,32 @@ async def test_explicit_pcm_turn_forwards_tts_chunks_without_buffering() -> None
         (b"\x01\x00" * 50, 24_000),
         (b"\x02\x00" * 50, 24_000),
     ]
+
+
+async def test_streaming_tts_stops_between_finalized_sentence_units() -> None:
+    class SentenceService(FakeService):
+        async def handle(self, utterance, **_kwargs):
+            self.utterance = utterance
+            return handle_result(response_text="First sentence. Second sentence.")
+
+    tts = RecordingSentenceTts()
+    runtime = SatelliteAudioRuntime(SentenceService(), FakeStt(), tts, lambda: None)
+    played: list[bytes] = []
+
+    async def play(chunk: bytes, _sample_rate: int) -> None:
+        played.append(chunk)
+        await runtime.interrupt_speech("office")
+
+    await runtime.process_pcm(
+        satellite_id="diagnostics",
+        room_id="office",
+        pcm16=b"\x00\x00" * 16_000,
+        wake_detected=True,
+        response_audio_sink=play,
+    )
+
+    assert tts.texts == ["First sentence."]
+    assert played == [b"\x01\x00" * 50]
 
 
 class QueueStt:
@@ -701,3 +737,52 @@ async def test_shut_up_cancels_current_satellite_playback_and_ends_conversation(
     await response_task
 
     assert played == [b"\x01\x00" * 50]
+
+
+async def test_backchannel_does_not_cancel_and_response_resumes() -> None:
+    conversations = ConversationTracker()
+    conversations.start("lounge")
+    service = ConversationService(conversations)
+    tts = BlockingStreamingTts()
+    runtime = SatelliteAudioRuntime(
+        service,
+        QueueStt("Tell me something", "yeah"),
+        tts,
+        lambda: None,
+        conversations=conversations,
+    )
+    played: list[bytes] = []
+    cancellations: list[bool] = []
+
+    async def play(chunk: bytes, _sample_rate: int) -> None:
+        played.append(chunk)
+
+    async def cancel() -> None:
+        cancellations.append(True)
+
+    response_task = asyncio.create_task(
+        runtime.process_pcm(
+            satellite_id="lounge-microphone",
+            room_id="lounge",
+            pcm16=b"\x00\x00" * 16_000,
+            response_audio_sink=play,
+            response_cancel_sink=cancel,
+        )
+    )
+    await asyncio.wait_for(tts.waiting.wait(), timeout=1)
+
+    assert (
+        await runtime.process_pcm(
+            satellite_id="lounge-microphone",
+            room_id="lounge",
+            pcm16=b"\x00\x00" * 8_000,
+        )
+        is None
+    )
+    assert cancellations == []
+
+    tts.release.set()
+    await response_task
+
+    assert played == [b"\x01\x00" * 50, b"\x02\x00" * 50]
+    assert conversations.active("lounge")

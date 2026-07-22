@@ -2,12 +2,12 @@
 
 ## Outcome
 
-Build a low-latency, completely local voice layer that treats the Nova
-dashboard API/MCP as its first tool surface. Iridium performs STT, intent and
-emotion interpretation, LLM tool planning, and TTS. Nocturnium, Indium,
-Iridium, and later household clients run independent native microphone/speaker
-satellites. No satellite is implemented in, hosted by, or stopped with a
-dashboard page.
+Build a low-latency voice layer whose audio and inference remain local and that
+treats the Nova dashboard API/MCP as its first tool surface. Iridium performs
+STT, intent and emotion interpretation, LLM tool planning, and TTS. Native
+microphone/speaker satellites run independently of the dashboard. The supported
+browser satellite is an explicit page-bound client hosted by the dashboard; it
+relays audio to the same Iridium runtime and owns no inference or tool logic.
 
 The system supports both:
 
@@ -15,7 +15,8 @@ The system supports both:
    command, or a continuing turn. These have natural multi-turn dialogue and permissive
    pronoun resolution.
 2. **Passive room understanding** in which Indium and Nocturnium continuously
-   stream audio to Iridium, central VAD delimits every speech segment, and every
+   capture and transmit activity-gated audio to Iridium, central VAD delimits
+   every speech segment, and every
    final transcript is classified. Only a high-confidence directive or explicit
    desired state can act.
 
@@ -129,7 +130,7 @@ candidate. Do not introduce runtime swapping.
 Create an Ubuntu service composed of small replaceable adapters:
 
 ```text
-edge activity gate -> audio conditioning -> central VAD/wake -> streaming STT
+edge activity gate -> audio conditioning -> central VAD/wake -> final-buffer STT
           -> prosody features -> interpretation/session policy
           -> Nova tool adapter -> response renderer -> TTS -> transport
 ```
@@ -151,18 +152,19 @@ nova_voice/
   observability/    redacted metrics, traces and health
 ```
 
-Use two CUDA-owning processes: a pinned `llama-server` for Qwen3.5 and one Python
-voice process holding the selected STT and TTS in a shared PyTorch CUDA context
-plus the orchestrator. Both expose health. The orchestrator owns deadlines,
-cancellation, backpressure, and bounded queues; streaming ASR has GPU priority.
+The deployed topology uses a pinned `llama-server`, the Python Voice/STT
+orchestrator, and a separate two-stage vLLM-Omni TTS service. All expose health.
+The orchestrator owns deadlines, cancellation, backpressure, and bounded queues.
+The selected STT adapter retains a cache-aware streaming interface, but the
+current turn path decodes only after central VAD finalizes the utterance.
 Model-load failure fails health instead of causing an automatic downgrade.
 The core packages must not reference Nova or dashboard types. Provider manifests
 register tool schemas, risk classes, verification behavior, and compact skills
 through dependency injection. Manifests also declare `iridium_local` or an
 explicit household-LAN service; local-AI providers are rejected anywhere but
-Iridium. One noisy satellite must not block another. A
-single GPU scheduler serializes
-LLM/TTS bursts when required while ASR streams retain priority.
+Iridium. One noisy satellite must not block another. Cross-service GPU
+residency and contention are bounded by pinned service configuration and remain
+subject to the live latency/endurance acceptance gates.
 
 Gate: a local WAV can traverse the complete pipeline, execute a mocked tool,
 and return audio with component timing recorded and no transcript in logs.
@@ -266,11 +268,16 @@ TESTING.md pass without special-casing their exact sentences.
 Build one small, headless satellite protocol/client core with platform audio and
 supervisor packaging. It sends device/room ID, protocol version, capture format,
 RMS/SNR, playback state, and optional dashboard-foreground context over mutually
-authenticated TLS WebSocket with a provisioned device certificate. Continuously
-stream 16 kHz mono PCM16 in 20 ms frames; do not edge-VAD-drop speech. Iridium
-aggregates frames for central VAD, wake scoring, and STT. Use the TTS native
+authenticated TLS WebSocket with a provisioned device certificate. Capture
+continuously, but transmit 16 kHz mono PCM16 in 20 ms frames while the local
+activity gate is open, including its pre-roll and silence tail. Iridium
+aggregates frames for authoritative central VAD, wake scoring, and STT. Use the TTS native
 sample rate for return audio. Add Opus only if measured LAN conditions justify
-its complexity. Browser microphones are outside v1.
+its complexity. Browser microphones are in scope through the implemented
+dashboard browser satellite: `getUserMedia`/AudioWorklet frames use same-origin
+WSS to a dashboard-hosted relay, then mTLS to Iridium. Push-to-talk and
+page-bound always-on capture are supported; secure context, permission, an open
+page, and the per-device switch are explicit lifecycle constraints.
 
 The client has no normal quit UI. It exposes a read-only health command/socket
 and accepts intentional enable/disable only through administrator-owned service

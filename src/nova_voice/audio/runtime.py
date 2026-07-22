@@ -18,8 +18,12 @@ from nova_voice.audio.dedup import TranscriptDeduplicator, normalize_transcript
 from nova_voice.audio.denoise import NoiseSuppressor
 from nova_voice.audio.echo import PlaybackEchoGuard
 from nova_voice.audio.election import SegmentElection
+from nova_voice.audio.endpointing import EndpointDecision
+from nova_voice.audio.interruption import InterruptionKind, classify_interruption
+from nova_voice.audio.listening_ack import ListeningAckController
 from nova_voice.audio.pcm import scale_pcm16
 from nova_voice.audio.pitch import StreamingPitchShifter
+from nova_voice.audio.prefetch import ForegroundPrefetch, StableInterimTracker
 from nova_voice.audio.prosody import extract_acoustic_features
 from nova_voice.audio.segmenter import SpeechSegment, SpeechSegmenter
 from nova_voice.audio.speech_timing import (
@@ -28,14 +32,26 @@ from nova_voice.audio.speech_timing import (
     consonant_onsets_ms,
     estimate_speech_duration_ms,
 )
+from nova_voice.audio.speech_units import sentence_speech_units
 from nova_voice.audio.vocab import SimplifiedEnglishGate
-from nova_voice.domain import AcousticFeatures, HandleResult, SpeakerIdentity, Utterance
+from nova_voice.domain import (
+    AcousticFeatures,
+    Decision,
+    HandleResult,
+    SpeakerIdentity,
+    TurnCancellationRecord,
+    TurnStage,
+    TurnStageStatus,
+    TurnTerminalStatus,
+    Utterance,
+)
 from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService
 from nova_voice.speech_normalization import normalize_spoken_numbers
+from nova_voice.turns import ForegroundTurnStateMachine
 from nova_voice.voice_settings import VoiceSettings
 
 logger = logging.getLogger(__name__)
@@ -284,6 +300,10 @@ class PendingAudioTurn:
     response_cancel_sink: ResponseCancelSink | None
     response_playback_events: ResponsePlaybackEvents | None
     arbiter_claim: TurnClaim | None = None
+    endpoint_decision: EndpointDecision = EndpointDecision.COMPLETE
+    endpoint_wait_ms: int = 0
+    endpoint_probability: float = 1.0
+    prefetch_task: asyncio.Task[ForegroundPrefetch] | None = None
 
 
 class SatelliteAudioRuntime:
@@ -310,6 +330,7 @@ class SatelliteAudioRuntime:
         arbitration_scope: str = "household",
         dedup: TranscriptDeduplicator | None = None,
         ambient_min_words: int = 2,
+        listening_ack_controller: ListeningAckController | None = None,
     ) -> None:
         self.service = service
         self.stt = stt
@@ -321,6 +342,9 @@ class SatelliteAudioRuntime:
         self._arbitration_scope = arbitration_scope
         self._dedup = dedup if dedup is not None else TranscriptDeduplicator()
         self._ambient_min_words = max(1, int(ambient_min_words))
+        self._interim_trackers: dict[str, StableInterimTracker] = {}
+        self._prefetch_tasks: dict[str, asyncio.Task[ForegroundPrefetch]] = {}
+        self._listening_ack = listening_ack_controller or ListeningAckController()
         self._monitor_sink = monitor_sink
         self._denoiser = denoiser
         self._speaker_recognizer = speaker_recognizer
@@ -837,6 +861,7 @@ class SatelliteAudioRuntime:
         response_audio_sink: ResponseAudioSink | None = None,
         response_cancel_sink: ResponseCancelSink | None = None,
         response_playback_events: ResponsePlaybackEvents | None = None,
+        listening_ack_sink: ResponseAudioSink | None = None,
     ) -> PendingAudioTurn | None:
         """Consume one ordered mic frame and return a completed elected segment."""
 
@@ -856,8 +881,65 @@ class SatelliteAudioRuntime:
         # in the ordered consumer avoids a thread-pool round trip for every
         # 20 ms packet; the socket worker yields after each frame.
         segment = segmenter.accept(frame)
+        stream_id = f"foreground:{satellite_id}"
+        conversation_open = (
+            self._conversations.active(room_id) if self._conversations is not None else False
+        )
+        if segment is None and segmenter.speaking:
+            # Cache-aware STT may expose a hypothesis while capture continues.
+            # Compatibility adapters return an empty string here, keeping the
+            # normal final-utterance batch path unchanged.
+            partial, _ = await self.stt.transcribe_chunk(
+                frame,
+                sample_rate=16_000,
+                stream_id=stream_id,
+                final=False,
+            )
+            tracker = self._interim_trackers.setdefault(
+                satellite_id,
+                StableInterimTracker(),
+            )
+            stable_text = tracker.observe(partial)
+            prefetch_foreground = getattr(self.service, "prefetch_foreground", None)
+            if stable_text and callable(prefetch_foreground):
+                previous = self._prefetch_tasks.get(satellite_id)
+                if previous is not None and not previous.done():
+                    previous.cancel()
+                self._prefetch_tasks[satellite_id] = asyncio.create_task(
+                    prefetch_foreground(room_id, stable_text)
+                )
+                await self._record_monitor(
+                    "interim_prefetch_started",
+                    satelliteId=satellite_id,
+                    roomId=room_id,
+                    stableWordCount=len(stable_text.split()),
+                )
+            if segmenter.consume_endpoint_wait_started() and listening_ack_sink is not None:
+                acknowledgement = self._listening_ack.choose(
+                    room_id,
+                    addressed=wake_detected or conversation_open,
+                )
+                if acknowledgement is not None:
+                    await listening_ack_sink(
+                        acknowledgement.pcm16,
+                        acknowledgement.sample_rate,
+                    )
+                    await self._record_monitor(
+                        "listening_acknowledgement",
+                        satelliteId=satellite_id,
+                        roomId=room_id,
+                        soundId=acknowledgement.sound_id,
+                        impliesCompletion=acknowledgement.implies_completion,
+                    )
         if segment is None:
             return None
+        cancel_stt_stream = getattr(self.stt, "cancel_stream", None)
+        if callable(cancel_stt_stream):
+            await cancel_stt_stream(stream_id)
+        tracker = self._interim_trackers.pop(satellite_id, None)
+        if tracker is not None:
+            tracker.reset()
+        prefetch_task = self._prefetch_tasks.pop(satellite_id, None)
         scope_id = self._scope_id(room_id)
         has_wake = wake_detected
         # Turn gate: while another satellite owns an in-flight turn (through
@@ -963,9 +1045,19 @@ class SatelliteAudioRuntime:
             response_cancel_sink=response_cancel_sink,
             response_playback_events=response_playback_events,
             arbiter_claim=claim,
+            endpoint_decision=segment.endpoint_decision,
+            endpoint_wait_ms=segment.endpoint_wait_ms,
+            endpoint_probability=segment.endpoint_probability,
+            prefetch_task=prefetch_task,
         )
 
     async def process_pending(self, pending: PendingAudioTurn) -> ProcessedAudioTurn | None:
+        prefetch: ForegroundPrefetch | None = None
+        if pending.prefetch_task is not None:
+            try:
+                prefetch = await pending.prefetch_task
+            except (asyncio.CancelledError, Exception):
+                prefetch = None
         return await self.process_pcm(
             satellite_id=pending.satellite_id,
             room_id=pending.room_id,
@@ -977,6 +1069,10 @@ class SatelliteAudioRuntime:
             response_cancel_sink=pending.response_cancel_sink,
             response_playback_events=pending.response_playback_events,
             arbiter_claim=pending.arbiter_claim,
+            endpoint_decision=pending.endpoint_decision,
+            endpoint_wait_ms=pending.endpoint_wait_ms,
+            endpoint_probability=pending.endpoint_probability,
+            prefetch=prefetch,
         )
 
     async def process_pcm(
@@ -992,6 +1088,10 @@ class SatelliteAudioRuntime:
         response_cancel_sink: ResponseCancelSink | None = None,
         response_playback_events: ResponsePlaybackEvents | None = None,
         arbiter_claim: TurnClaim | None = None,
+        endpoint_decision: EndpointDecision = EndpointDecision.COMPLETE,
+        endpoint_wait_ms: int = 0,
+        endpoint_probability: float = 1.0,
+        prefetch: ForegroundPrefetch | None = None,
     ) -> ProcessedAudioTurn | None:
         """Process one bounded PCM utterance through the resident voice stack.
 
@@ -1109,6 +1209,74 @@ class SatelliteAudioRuntime:
         conversation_active = (
             self._conversations.active(room_id) if self._conversations is not None else False
         )
+        if scope_id in self._speech_cancel_events:
+            explicit_speech_stop = has_speech_interrupt(
+                transcript,
+                self._wake_matcher.words,
+            )
+            interruption = classify_interruption(
+                transcript,
+                acoustic=selected_acoustic,
+                explicitly_addressed=wake_detected or conversation_active,
+                explicit_stop=explicit_speech_stop,
+            )
+            await self._record_monitor(
+                "interruption_classified",
+                satelliteId=satellite_id,
+                roomId=room_id,
+                classification=interruption.kind.value,
+                confidence=interruption.confidence,
+                reason=interruption.reason,
+            )
+            if interruption.kind != InterruptionKind.TRUE_BARGE_IN:
+                # The existing stream was never irreversibly cancelled, so a
+                # false trigger/backchannel naturally resumes with its next PCM.
+                self.release_turn(arbiter_claim)
+                return None
+            if not explicit_speech_stop:
+                await self.interrupt_speech(room_id)
+        if has_abandonment(transcript, self._wake_matcher.words):
+            request_task_cancellation = getattr(
+                self.service, "request_task_cancellation", None
+            )
+            task_cancellation = (
+                request_task_cancellation(room_id)
+                if callable(request_task_cancellation)
+                else None
+            )
+            if task_cancellation is not None and task_cancellation.active:
+                interrupt_speaker = await self._resolve_current_speaker(
+                    speaker_task,
+                    room_id=room_id,
+                    conversation_active=conversation_active,
+                    eligible=True,
+                )
+                self._announce_transcript(
+                    "user",
+                    spoken_transcript,
+                    satellite_id=satellite_id,
+                    room_id=room_id,
+                    speaker_name=(
+                        interrupt_speaker.display_name
+                        if interrupt_speaker is not None
+                        and interrupt_speaker.status == "recognized"
+                        else None
+                    ),
+                )
+                playback_interrupted = await self.interrupt_speech(room_id)
+                self.service.end_conversation(room_id)
+                await self._record_monitor(
+                    "conversation_ended",
+                    satelliteId=satellite_id,
+                    roomId=room_id,
+                    reason="task_cancellation_requested",
+                    taskCancellationAccepted=task_cancellation.accepted,
+                    taskCancellationPhase=task_cancellation.phase,
+                    taskCancellationReason=task_cancellation.reason,
+                    playbackInterrupted=playback_interrupted,
+                )
+                self.release_turn(arbiter_claim)
+                return None
         if has_speech_interrupt(transcript, self._wake_matcher.words) and (
             conversation_active or scope_id in self._speech_cancel_events
         ):
@@ -1288,23 +1456,43 @@ class SatelliteAudioRuntime:
                 kind="thinking",
             )
 
+        utterance = Utterance(
+            id=str(uuid4()),
+            satellite_id=satellite_id,
+            room_id=room_id,
+            started_at=now - timedelta(milliseconds=selected_acoustic.duration_ms),
+            ended_at=now,
+            transcript=spoken_transcript,
+            transcript_confidence=confidence,
+            wake_detected=wake_detected,
+            conversation_active=conversation_active,
+            dashboard_foreground=dashboard_foreground,
+            acoustic=selected_acoustic,
+            **({"speaker": speaker_identity} if speaker_identity is not None else {}),
+        )
+        turn_machine = ForegroundTurnStateMachine(utterance)
+        turn_machine.advance(
+            TurnStage.CAPTURE,
+            elapsed_ms=selected_acoustic.duration_ms,
+        )
+        turn_machine.advance(
+            TurnStage.ENDPOINT,
+            elapsed_ms=endpoint_wait_ms + denoise_ms + stt_ms,
+            detail=(
+                f"{endpoint_decision.value} probability={endpoint_probability:.3f} "
+                f"wait_ms={endpoint_wait_ms}"
+            ),
+        )
         try:
             result = await self.service.handle(
-                Utterance(
-                    id=str(uuid4()),
-                    satellite_id=satellite_id,
-                    room_id=room_id,
-                    started_at=now - timedelta(milliseconds=selected_acoustic.duration_ms),
-                    ended_at=now,
-                    transcript=spoken_transcript,
-                    transcript_confidence=confidence,
-                    wake_detected=wake_detected,
-                    conversation_active=conversation_active,
-                    dashboard_foreground=dashboard_foreground,
-                    acoustic=selected_acoustic,
-                    **({"speaker": speaker_identity} if speaker_identity is not None else {}),
-                ),
+                utterance,
                 on_thinking=announce_thinking,
+                turn_machine=turn_machine,
+                prefetch=(
+                    prefetch
+                    if prefetch is not None and prefetch.compatible_with(spoken_transcript)
+                    else None
+                ),
             )
         except Exception as error:
             await self._record_monitor(
@@ -1445,6 +1633,7 @@ class SatelliteAudioRuntime:
         tts_ms = 0.0
         tts_first_chunk_ms = 0.0
         text_ready_at: float | None = None
+        speech_cancelled = False
         spoken_response_text = (
             normalize_spoken_numbers(result.response_text) if result.response_text else None
         )
@@ -1528,47 +1717,53 @@ class SatelliteAudioRuntime:
                 else:
                     first_chunk_at: float | None = None
                     delivered_seconds = 0.0
-                    async for chunk, sample_rate in self.tts.synthesize_stream(
-                        spoken_response_text,
-                        instruction,
-                    ):
+                    speech_units = sentence_speech_units(spoken_response_text)
+                    for speech_unit in speech_units:
+                        # Unit boundaries are explicit safe cancellation points:
+                        # no later sentence starts after barge-in.
                         if cancel_event.is_set():
                             break
-                        if self._pitch_percent:
-                            if pitch_shifter is None:
-                                pitch_shifter = StreamingPitchShifter(
-                                    self._pitch_percent, sample_rate
+                        async for chunk, sample_rate in self.tts.synthesize_stream(
+                            speech_unit,
+                            instruction,
+                        ):
+                            if cancel_event.is_set():
+                                break
+                            if self._pitch_percent:
+                                if pitch_shifter is None:
+                                    pitch_shifter = StreamingPitchShifter(
+                                        self._pitch_percent, sample_rate
+                                    )
+                                chunk = await asyncio.to_thread(pitch_shifter.process, chunk)
+                            if volume_percent != 100:
+                                chunk = await asyncio.to_thread(
+                                    scale_pcm16, chunk, volume_percent
                                 )
-                            chunk = await asyncio.to_thread(pitch_shifter.process, chunk)
-                        if volume_percent != 100:
-                            chunk = await asyncio.to_thread(scale_pcm16, chunk, volume_percent)
-                        arrived = time.perf_counter()
-                        if first_chunk_at is None:
-                            first_chunk_at = arrived
-                            tts_first_chunk_ms = round((arrived - tts_started) * 1000, 3)
-                        else:
-                            # If generation falls behind realtime the satellite
-                            # can underrun.  Record the worst shortfall so
-                            # stutter risk is visible per turn.
-                            deficit = (arrived - first_chunk_at) - delivered_seconds
-                            if deficit > worst_pacing_deficit_s:
-                                worst_pacing_deficit_s = deficit
-                        delivered_seconds += len(chunk) / 2 / sample_rate
-                        played_seconds = delivered_seconds
-                        response_sample_rate = sample_rate
-                        self.note_playback(room_id, chunk, sample_rate)
-                        if arbiter_claim is not None:
-                            # Chunks arrive faster than realtime; the audio
-                            # still to play is the delivered total minus the
-                            # wall time since the first chunk.
-                            self._arbiter.extend_for_playback(
-                                arbiter_claim,
-                                delivered_seconds - (arrived - first_chunk_at),
-                            )
-                        await response_audio_sink(chunk, sample_rate)
-                        audio_ready.set()
-                        if cancel_event.is_set():
-                            break
+                            arrived = time.perf_counter()
+                            if first_chunk_at is None:
+                                first_chunk_at = arrived
+                                tts_first_chunk_ms = round(
+                                    (arrived - tts_started) * 1000, 3
+                                )
+                            else:
+                                # If generation falls behind realtime the satellite
+                                # can underrun. Record the worst shortfall per turn.
+                                deficit = (arrived - first_chunk_at) - delivered_seconds
+                                if deficit > worst_pacing_deficit_s:
+                                    worst_pacing_deficit_s = deficit
+                            delivered_seconds += len(chunk) / 2 / sample_rate
+                            played_seconds = delivered_seconds
+                            response_sample_rate = sample_rate
+                            self.note_playback(room_id, chunk, sample_rate)
+                            if arbiter_claim is not None:
+                                self._arbiter.extend_for_playback(
+                                    arbiter_claim,
+                                    delivered_seconds - (arrived - first_chunk_at),
+                                )
+                            await response_audio_sink(chunk, sample_rate)
+                            audio_ready.set()
+                            if cancel_event.is_set():
+                                break
                     if worst_pacing_deficit_s > 0.05:
                         logger.info(
                             "tts pacing satellite=%s room=%s worst_deficit_ms=%.0f "
@@ -1600,6 +1795,7 @@ class SatelliteAudioRuntime:
                     stage="tts_or_playback",
                     errorType=type(error).__name__,
                 )
+                turn_machine.fail(type(error).__name__)
                 raise
             finally:
                 # Complete the fallback lifecycle even on cancellation or a
@@ -1617,8 +1813,42 @@ class SatelliteAudioRuntime:
                     self._speech_cancel_events.pop(scope_id, None)
                     self._speech_cancel_sinks.pop(scope_id, None)
                     self._speech_satellites.pop(scope_id, None)
+                speech_cancelled = cancel_event.is_set()
             self._calibrate_speaking_rate(len(spoken_response_text), played_seconds)
             tts_ms = round((time.perf_counter() - tts_started) * 1000, 3)
+        if result.response_text is None:
+            turn_machine.skip_until(
+                TurnStage.SPEAK,
+                "service adapter did not emit foreground stages",
+            )
+            turn_machine.advance(
+                TurnStage.SPEAK,
+                status=TurnStageStatus.SKIPPED,
+                detail="no spoken response",
+            )
+        else:
+            turn_machine.skip_until(
+                TurnStage.SPEAK,
+                "service adapter did not emit foreground stages",
+            )
+            turn_machine.advance(
+                TurnStage.SPEAK,
+                elapsed_ms=tts_ms,
+                status=(
+                    TurnStageStatus.CANCELLED
+                    if speech_cancelled
+                    else TurnStageStatus.COMPLETED
+                ),
+            )
+            if speech_cancelled:
+                turn_machine.record_cancellation(
+                    TurnCancellationRecord(
+                        kind="speech",
+                        accepted=True,
+                        phase="playback",
+                        reason="response playback interrupted",
+                    )
+                )
         # Only a genuinely engaged turn extends the follow-up window; ambient,
         # third-party, and media speech inside a conversation must let it time
         # out rather than keep it alive indefinitely (mirrors the service rule).
@@ -1634,6 +1864,17 @@ class SatelliteAudioRuntime:
             and not has_abandonment(transcript, self._wake_matcher.words)
         ):
             self._conversations.refresh(room_id)
+        turn_machine.advance(TurnStage.COMMIT)
+        terminal = (
+            TurnTerminalStatus.CANCELLED
+            if speech_cancelled or any(item.code == "cancelled" for item in result.results)
+            else TurnTerminalStatus.IGNORED
+            if result.interpretation.decision == Decision.IGNORE
+            and result.response_text is None
+            else TurnTerminalStatus.COMPLETED
+        )
+        turn_machine.finish(terminal)
+        result = result.model_copy(update={"turn_trace": turn_machine.snapshot()})
         total_ms = round((time.perf_counter() - turn_started) * 1000, 3)
         logger.info(
             "audio turn timing satellite=%s room=%s stt_ms=%s service_ms=%s tts_ms=%s total_ms=%s",
@@ -1670,5 +1911,10 @@ class SatelliteAudioRuntime:
             agentName=self._agent_name,
             wakeWords=list(self._wake_matcher.words),
             timingsMs={**result.timings_ms, **turn.timings_ms},
+            turnTrace=(
+                result.turn_trace.model_dump(mode="json")
+                if result.turn_trace is not None
+                else None
+            ),
         )
         return turn

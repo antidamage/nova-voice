@@ -4,8 +4,8 @@ Nova Voice includes an opt-in development page at
 `https://<voice-server-host>:8766/diagnostics` (hostname: see
 `PRIVATEREF.md#1.1`). It is owned and served by Nova Voice;
 it does not import, modify, or depend on the Nova dashboard. It is a
-push-to-record test client, not a replacement for the always-on native Indium
-and Nocturnium satellites.
+push-to-record test client, distinct from both the always-on native Indium and
+Nocturnium satellites and the supported dashboard browser satellite.
 
 The page exercises the deployed resident path:
 

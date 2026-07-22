@@ -407,7 +407,11 @@ class NovaProvider(CapabilityProvider):
             skill_files=["nova-home-control/SKILL.md", "nova-tasks/SKILL.md"],
             tool_policies={
                 "nova.query": ToolPolicy(
-                    risk="low", reversible=True, idempotent=True, parallel_safe=True
+                    risk="low",
+                    reversible=True,
+                    idempotent=True,
+                    parallel_safe=True,
+                    cancellation="anytime",
                 ),
                 "nova.control": ToolPolicy(
                     risk="low", reversible=True, idempotent=True, parallel_safe=False

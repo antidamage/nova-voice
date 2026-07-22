@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from nova_voice.audio.endpointing import EndpointDecision, EndpointResult, SemanticEndpointDetector
 from nova_voice.audio.pcm import FRAME_MS, pcm16_to_float32, rms_db
 from nova_voice.audio.prosody import extract_acoustic_features
 from nova_voice.domain import AcousticFeatures
@@ -15,6 +16,9 @@ from nova_voice.domain import AcousticFeatures
 class SpeechSegment:
     pcm16: bytes
     acoustic: AcousticFeatures
+    endpoint_decision: EndpointDecision = EndpointDecision.COMPLETE
+    endpoint_wait_ms: int = 0
+    endpoint_probability: float = 1.0
 
 
 class EnergyVad:
@@ -67,16 +71,38 @@ class SpeechSegmenter:
         pre_roll_ms: int = 400,
         end_silence_ms: int = 600,
         max_utterance_ms: int = 30_000,
+        endpoint_detector: SemanticEndpointDetector | None = None,
     ) -> None:
         self.score = score
         self.threshold = threshold
         self.pre_roll_frames = max(1, pre_roll_ms // FRAME_MS)
         self.end_silence_frames = max(1, end_silence_ms // FRAME_MS)
         self.max_frames = max_utterance_ms // FRAME_MS
+        self.endpoint_detector = endpoint_detector
         self._pre_roll: deque[bytes] = deque(maxlen=self.pre_roll_frames)
         self._utterance: list[bytes] = []
         self._silence_frames = 0
         self._speaking = False
+        self._endpoint_result: EndpointResult | None = None
+        self._endpoint_target_frames = self.end_silence_frames
+        self._endpoint_wait_announced = False
+
+    @property
+    def speaking(self) -> bool:
+        return self._speaking
+
+    @property
+    def endpoint_waiting(self) -> bool:
+        return bool(
+            self._endpoint_result is not None
+            and self._silence_frames < self._endpoint_target_frames
+        )
+
+    def consume_endpoint_wait_started(self) -> bool:
+        if not self.endpoint_waiting or self._endpoint_wait_announced:
+            return False
+        self._endpoint_wait_announced = True
+        return True
 
     def accept(self, frame: bytes) -> SpeechSegment | None:
         probability = self.score(frame)
@@ -90,12 +116,33 @@ class SpeechSegmenter:
             return None
 
         self._utterance.append(frame)
-        self._silence_frames = 0 if speech else self._silence_frames + 1
+        if speech:
+            self._silence_frames = 0
+            self._endpoint_result = None
+            self._endpoint_target_frames = self.end_silence_frames
+            self._endpoint_wait_announced = False
+        else:
+            self._silence_frames += 1
         if (
             self._silence_frames < self.end_silence_frames
             and len(self._utterance) < self.max_frames
         ):
             return None
+        if (
+            len(self._utterance) < self.max_frames
+            and self.endpoint_detector is not None
+            and self._silence_frames >= self.end_silence_frames
+        ):
+            if self._endpoint_result is None:
+                self._endpoint_result = self.endpoint_detector.decide(
+                    b"".join(self._utterance),
+                    trailing_silence_ms=self._silence_frames * FRAME_MS,
+                )
+                self._endpoint_target_frames = self.end_silence_frames + (
+                    self._endpoint_result.additional_wait_ms // FRAME_MS
+                )
+            if self._silence_frames < self._endpoint_target_frames:
+                return None
         return self._finish()
 
     def flush(self) -> SpeechSegment | None:
@@ -103,10 +150,27 @@ class SpeechSegmenter:
 
     def _finish(self) -> SpeechSegment:
         payload = b"".join(self._utterance)
-        segment = SpeechSegment(pcm16=payload, acoustic=extract_acoustic_features(payload))
+        endpoint = self._endpoint_result or EndpointResult(
+            EndpointDecision.COMPLETE,
+            1.0,
+            0,
+        )
+        segment = SpeechSegment(
+            pcm16=payload,
+            acoustic=extract_acoustic_features(payload),
+            endpoint_decision=endpoint.decision,
+            endpoint_wait_ms=max(
+                0,
+                self._silence_frames * FRAME_MS - self.end_silence_frames * FRAME_MS,
+            ),
+            endpoint_probability=endpoint.completion_probability,
+        )
         self._utterance = []
         self._silence_frames = 0
         self._speaking = False
+        self._endpoint_result = None
+        self._endpoint_target_frames = self.end_silence_frames
+        self._endpoint_wait_announced = False
         # Stateful VAD implementations (for example Silero's recurrent
         # model) must start each utterance from a clean state.  Keep the
         # segmenter interface callable-only while honoring an optional reset.

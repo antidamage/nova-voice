@@ -9,26 +9,42 @@
 5. Live Iridium/satellite latency, echo, and endurance tests.
 6. Shadow-mode household observation before any passive action is enabled.
 7. Repository-boundary and native-service recovery tests.
+8. Foreground state-machine trace and cancellation-phase tests.
+9. Turn-taking tests: recorded cadence endpoints, maximum waits, adaptive
+   interruption recovery, stable-interim final gates, listening earcons, and
+   sentence-boundary TTS cancellation.
 
 For manual microphone, interpretation, emotion, and response-voice inspection,
 use the mTLS-protected push-to-record page in [DIAGNOSTICS.md](DIAGNOSTICS.md).
 It is available only when explicitly enabled in development shadow mode and is
-not a continuous/browser satellite.
+separate from the supported dashboard browser satellite.
 
 The deployed authenticated synthetic-speech check on 2026-07-15 completed the
 real cache-aware STT, Qwen3.5 interpretation, response renderer, emotion/tone
 instruction, and Qwen3-TTS path. The final full-text-quality run returned a
 valid 130,604-byte WAV and measured 2.78 s STT, 2.02 s interpretation, and 8.57
 s TTS. These are evidence, not acceptance of the latency targets below. The
-current upstream Python API buffers the whole waveform, so real microphone
-trials and a validated streaming-runtime optimization remain required.
+then-current Python TTS API buffered the whole waveform. The deployed
+vLLM-Omni adapter now streams finalized sentence/clause units. Live cache-aware
+interims can warm read-only state, while a final batch transcript remains the
+commit gate. Real microphone trials and the complete streaming
+acceptance gate therefore remain required.
+
+The model-independent foreground suite asserts all ten stages are ordered,
+trace models are immutable, input/context and observed state are represented by
+revisions, tool/verification/response journals are complete, and terminal state
+is explicit. Cancellation fixtures cover requests before provider invocation,
+during read-only and mutating calls, after side effects, and during response
+playback. A mutating provider must never be abandoned once its side effects may
+have begun.
 
 ## Independence and extensibility gates
 
 - `nova-voice` contains no imports, workspace links, generated types, assets, or
   build steps from `nova-ha-dashboard`
 - dashboard checkout absent: Nova Voice unit/contract builds still pass
-- dashboard browser closes/reloads/updates: both satellite streams continue
+- dashboard browser closes/reloads/updates: native satellite streams continue;
+  the page-bound browser satellite disconnects and reconnects with the page
 - dashboard service is unavailable: Nova provider reports unhealthy while audio,
   conversation, and a fake second provider remain operational
 - register a fixture provider with one query and one reversible action without

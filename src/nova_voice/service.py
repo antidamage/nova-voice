@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import random
@@ -13,6 +14,7 @@ from typing import Any
 from nova_voice.affectations import apply_affectations
 from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.conversation import ConversationSnapshot, ConversationTracker
+from nova_voice.audio.prefetch import ForegroundPrefetch, likely_tools
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.domain import (
@@ -27,6 +29,9 @@ from nova_voice.domain import (
     SelfProfileUpdate,
     SpeechAct,
     ToolResult,
+    TurnStage,
+    TurnStageStatus,
+    TurnTerminalStatus,
     Utterance,
     VerificationVerdict,
 )
@@ -51,6 +56,11 @@ from nova_voice.sessions import SessionManager
 from nova_voice.speaker_profiles import (
     SpeakerProfileStore,
     validated_self_profile_update,
+)
+from nova_voice.turns import (
+    ForegroundTurnStateMachine,
+    TaskCancellationDecision,
+    TurnCancellationController,
 )
 from nova_voice.voice_settings import VoiceSettings
 
@@ -339,6 +349,7 @@ class NovaVoiceService:
         )
         self._scope_key = scope_key if scope_key is not None else lambda room_id: room_id
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._active_task_cancellations: dict[str, TurnCancellationController] = {}
         self.policy = ExecutionPolicy(settings)
         self.voice_settings: VoiceSettings | None = None
         self.agent_settings = AgentSettings()
@@ -438,6 +449,7 @@ class NovaVoiceService:
         relevant_state: dict[str, Any],
         temperature: float,
         session_active: bool,
+        cancellation: TurnCancellationController | None = None,
     ) -> tuple[Interpretation, list[ToolResult], PolicyOutcome, str | None] | None:
         """Run one policy-checked web lookup after an epistemic reply failure."""
 
@@ -491,7 +503,10 @@ class NovaVoiceService:
             )
             return None
 
-        fallback_results = await self._execute_plan([action])
+        fallback_results = await self._execute_plan(
+            [action],
+            cancellation=cancellation,
+        )
         deterministic = self.persona.render(
             utterance,
             fallback_interpretation.decision,
@@ -599,21 +614,115 @@ class NovaVoiceService:
         except NovaDashboardError:
             logger.warning("Nova provider unavailable during startup", exc_info=True)
 
+    async def prefetch_foreground(
+        self,
+        room_id: str,
+        stable_text: str,
+    ) -> ForegroundPrefetch:
+        """Warm only read-only state for a stable, non-final transcript.
+
+        This method intentionally has no access to policy execution, transcript
+        persistence, response rendering, or TTS. The final turn must still pass
+        every normal foreground stage before any externally visible effect.
+        """
+
+        try:
+            context = await asyncio.wait_for(
+                self.nova_provider.prompt_context(room_id),
+                timeout=self.settings.provider_context_timeout_seconds,
+            )
+        except (NovaDashboardError, TimeoutError):
+            context = {"room": room_id, "zones": [], "nearbyTargets": []}
+        selected_tools = likely_tools(stable_text, self._available_tools())
+        return ForegroundPrefetch.create(
+            stable_text,
+            copy.deepcopy(context),
+            selected_tools,
+        )
+
     async def handle(
         self,
         utterance: Utterance,
         *,
         on_thinking: Callable[[], Awaitable[None]] | None = None,
+        turn_machine: ForegroundTurnStateMachine | None = None,
+        prefetch: ForegroundPrefetch | None = None,
     ) -> HandleResult:
-        lock = self._turn_locks.setdefault(self._scope_key(utterance.room_id), asyncio.Lock())
+        scope = self._scope_key(utterance.room_id)
+        lock = self._turn_locks.setdefault(scope, asyncio.Lock())
         async with lock:
-            return await self._handle(utterance, on_thinking=on_thinking)
+            owns_machine = turn_machine is None
+            machine = turn_machine or ForegroundTurnStateMachine(utterance)
+            if owns_machine:
+                machine.advance(
+                    TurnStage.CAPTURE,
+                    status=TurnStageStatus.SKIPPED,
+                    detail="text/already-captured entry",
+                )
+                machine.advance(
+                    TurnStage.ENDPOINT,
+                    status=TurnStageStatus.SKIPPED,
+                    detail="text/already-finalized entry",
+                )
+            cancellation = TurnCancellationController()
+            self._active_task_cancellations[scope] = cancellation
+            try:
+                result = await self._handle(
+                    utterance,
+                    on_thinking=on_thinking,
+                    turn_machine=machine,
+                    cancellation=cancellation,
+                    prefetch=prefetch,
+                )
+                for decision in cancellation.decisions:
+                    machine.record_cancellation(decision.trace_record())
+                if owns_machine:
+                    machine.advance(
+                        TurnStage.SPEAK,
+                        status=TurnStageStatus.SKIPPED,
+                        detail="no audio runtime",
+                    )
+                    machine.advance(TurnStage.COMMIT)
+                    terminal = (
+                        TurnTerminalStatus.CANCELLED
+                        if any(item.code == "cancelled" for item in result.results)
+                        else TurnTerminalStatus.IGNORED
+                        if result.interpretation.decision == Decision.IGNORE
+                        and result.response_text is None
+                        else TurnTerminalStatus.COMPLETED
+                    )
+                    machine.finish(terminal)
+                return result.model_copy(update={"turn_trace": machine.snapshot()})
+            except BaseException as error:
+                if machine.snapshot().terminal_status == TurnTerminalStatus.IN_PROGRESS:
+                    machine.fail(type(error).__name__)
+                raise
+            finally:
+                cancellation.close()
+                if self._active_task_cancellations.get(scope) is cancellation:
+                    self._active_task_cancellations.pop(scope, None)
+
+    def request_task_cancellation(self, room_id: str) -> TaskCancellationDecision:
+        """Request cancellation without conflating it with response playback."""
+
+        controller = self._active_task_cancellations.get(self._scope_key(room_id))
+        if controller is None:
+            return TaskCancellationDecision(
+                active=False,
+                accepted=False,
+                phase="idle",
+                reason="no foreground task is active",
+            )
+        return controller.request()
 
     async def _handle(
         self,
         utterance: Utterance,
         *,
         on_thinking: Callable[[], Awaitable[None]] | None = None,
+        turn_machine: ForegroundTurnStateMachine,
+        cancellation: TurnCancellationController,
+        prefetch: ForegroundPrefetch | None = None,
     ) -> HandleResult:
         started = time.perf_counter()
         timings_ms: dict[str, float] = {}
@@ -638,16 +747,24 @@ class NovaVoiceService:
             self._zero_render_temperature_scopes.discard(scope)
         goal = self.sessions.active_goal(utterance.room_id, utterance.ended_at)
         context_started = time.perf_counter()
-        try:
-            relevant_state = await asyncio.wait_for(
-                self.nova_provider.prompt_context(utterance.room_id),
-                timeout=self.settings.provider_context_timeout_seconds,
-            )
-        except (NovaDashboardError, TimeoutError):
-            # Ambient speech must still be transcribed/classified while Nova is
-            # offline or DNS is slow, but a missing dashboard must never add
-            # seconds to the spoken turn. No stale household state is supplied.
-            relevant_state = {"room": utterance.room_id, "zones": [], "nearbyTargets": []}
+        if prefetch is not None and prefetch.compatible_with(utterance.transcript):
+            relevant_state = copy.deepcopy(prefetch.context)
+            timings_ms["prefetchHit"] = 1.0
+        else:
+            try:
+                relevant_state = await asyncio.wait_for(
+                    self.nova_provider.prompt_context(utterance.room_id),
+                    timeout=self.settings.provider_context_timeout_seconds,
+                )
+            except (NovaDashboardError, TimeoutError):
+                # Ambient speech must still be transcribed/classified while Nova is
+                # offline or DNS is slow, but a missing dashboard must never add
+                # seconds to the spoken turn. No stale household state is supplied.
+                relevant_state = {
+                    "room": utterance.room_id,
+                    "zones": [],
+                    "nearbyTargets": [],
+                }
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.
@@ -663,6 +780,22 @@ class NovaVoiceService:
                 persona_prompt=self.persona.response_prompt,
             )
         timings_ms["providerContext"] = round((time.perf_counter() - context_started) * 1000, 3)
+        turn_machine.set_context(
+            {
+                "relevantState": relevant_state,
+                "conversation": conversation,
+                "activeGoal": goal,
+            }
+        )
+        turn_machine.advance(
+            TurnStage.CONTEXTUALIZE,
+            elapsed_ms=timings_ms["providerContext"],
+            detail=(
+                f"prefetch {prefetch.llm_state_revision} reused"
+                if prefetch is not None and prefetch.compatible_with(utterance.transcript)
+                else None
+            ),
+        )
 
         addressed_identity_turn = bool(
             self.speaker_profiles is not None
@@ -818,6 +951,10 @@ class NovaVoiceService:
                 )
             else:
                 interpretation = interpretation.model_copy(update={"actions": still_valid_actions})
+        turn_machine.advance(
+            TurnStage.INTERPRET,
+            elapsed_ms=round((time.perf_counter() - interpretation_started) * 1000, 3),
+        )
         policy_started = time.perf_counter()
         outcome = self.policy.evaluate(
             utterance,
@@ -825,6 +962,12 @@ class NovaVoiceService:
             session_active=goal is not None,
         )
         timings_ms["policy"] = round((time.perf_counter() - policy_started) * 1000, 3)
+        turn_machine.set_policy(
+            execute=outcome.execute,
+            shadowed=outcome.shadowed,
+            reason=outcome.reason,
+        )
+        turn_machine.advance(TurnStage.AUTHORIZE, elapsed_ms=timings_ms["policy"])
 
         # Ambient speech must still be classified so the assistant can decide
         # whether to act, but its verbatim words are only retained when the
@@ -872,7 +1015,10 @@ class NovaVoiceService:
                 return await self.interpreter.confirm_objective(utterance, pending)
 
             with verify_loop.turn_scope(thinking=on_thinking, llm_confirm=confirm_pending):
-                results = await self._execute_plan(interpretation.actions)
+                results = await self._execute_plan(
+                    interpretation.actions,
+                    cancellation=cancellation,
+                )
         timings_ms["execution"] = round((time.perf_counter() - execution_started) * 1000, 3)
 
         # A failed dashboard command opens a conversation (if one is not already
@@ -923,6 +1069,7 @@ class NovaVoiceService:
             results,
             shadowed=outcome.shadowed,
         )
+        turn_machine.record_response("deterministic", response_text)
         # A nonzero renderer temperature opts successful command turns into
         # the model renderer too — otherwise confirmations are a fixed
         # template and the dashboard temperature control is inaudible on the
@@ -977,6 +1124,8 @@ class NovaVoiceService:
                 command_max_words=command_max_words,
             )
             response_text = rendered or response_text
+            if rendered:
+                turn_machine.record_response("model", response_text)
 
         fallback_started = time.perf_counter()
         fallback = await self._recover_knowledge_failure(
@@ -988,6 +1137,7 @@ class NovaVoiceService:
             relevant_state=relevant_state,
             temperature=effective_render_temperature,
             session_active=goal is not None,
+            cancellation=cancellation,
         )
         if fallback is not None:
             interpretation, results, outcome, response_text = fallback
@@ -1008,10 +1158,38 @@ class NovaVoiceService:
                 (time.perf_counter() - fallback_started) * 1000,
                 3,
             )
+            turn_machine.record_response("knowledge_fallback", response_text)
+        turn_machine.set_policy(
+            execute=outcome.execute,
+            shadowed=outcome.shadowed,
+            reason=outcome.reason,
+        )
+        turn_machine.record_tools(list(interpretation.actions), results)
+        turn_machine.advance(
+            TurnStage.EXECUTE,
+            elapsed_ms=timings_ms["execution"] + timings_ms.get("knowledgeFallback", 0),
+            status=(
+                TurnStageStatus.COMPLETED
+                if interpretation.actions or results
+                else TurnStageStatus.SKIPPED
+            ),
+            detail=None if interpretation.actions or results else "no tool plan",
+        )
+        verify_started = time.perf_counter()
+        turn_machine.record_verification(results)
+        turn_machine.advance(
+            TurnStage.VERIFY,
+            elapsed_ms=round((time.perf_counter() - verify_started) * 1000, 3),
+            status=TurnStageStatus.COMPLETED if results else TurnStageStatus.SKIPPED,
+            detail=None if results else "no tool results",
+        )
         # Affectations run on the finished reply — template or model alike — so
         # the quirk is consistent everywhere the text goes: TTS, transcript,
         # and the conversation history the model sees on later turns.
+        before_affectations = response_text
         response_text = self._apply_affectations(response_text)
+        if response_text != before_affectations:
+            turn_machine.record_response("affectations", response_text)
         if (
             verified_dashboard_command
             and command_max_words is not None
@@ -1022,6 +1200,8 @@ class NovaVoiceService:
             # Affectations run after the renderer and may remove words. Keep the
             # user's sampled command length exact even after those transforms.
             response_text = command_acknowledgement(command_max_words)
+            turn_machine.record_response("final", response_text)
+        turn_machine.record_response("final", response_text, force=True)
         engaged = (
             utterance.wake_detected or interpretation.speech_act not in _AMBIENT_SPEECH_ACTS
         )
@@ -1056,6 +1236,7 @@ class NovaVoiceService:
                 if observations:
                     self.conversations.record_observations(utterance.room_id, observations)
         timings_ms["response"] = round((time.perf_counter() - response_started) * 1000, 3)
+        turn_machine.advance(TurnStage.RENDER, elapsed_ms=timings_ms["response"])
         timings_ms["total"] = round((time.perf_counter() - started) * 1000, 3)
         logger.info(
             "utterance handled id=%s room=%s decision=%s actions=%d executed=%s shadowed=%s",
@@ -1079,7 +1260,12 @@ class NovaVoiceService:
             timings_ms=timings_ms,
         )
 
-    async def _execute_plan(self, actions: Iterable[PlannedAction]) -> list[ToolResult]:
+    async def _execute_plan(
+        self,
+        actions: Iterable[PlannedAction],
+        *,
+        cancellation: TurnCancellationController | None = None,
+    ) -> list[ToolResult]:
         """Execute a bounded action DAG with provider-declared parallelism.
 
         Actions are still considered in their declared order.  Independent
@@ -1144,9 +1330,26 @@ class NovaVoiceService:
             by_id[action.id] = result
             results.append(result)
 
-        async def invoke(action: PlannedAction, provider) -> ToolResult:
+        async def invoke(action: PlannedAction, policy, provider) -> ToolResult:
+            provider_task = asyncio.create_task(provider.execute(action))
+            if cancellation is not None:
+                cancellation.bind_provider(
+                    action.id,
+                    getattr(policy, "cancellation", "before_side_effects"),
+                    provider_task,
+                )
             try:
-                return await provider.execute(action)
+                return await provider_task
+            except asyncio.CancelledError:
+                if cancellation is None or not cancellation.requested.is_set():
+                    raise
+                return ToolResult(
+                    action_id=action.id,
+                    ok=False,
+                    code="cancelled",
+                    requested=action.call.arguments,
+                    message="Capability execution was cancelled by request",
+                )
             except Exception:  # providers must not take down sibling actions
                 logger.exception(
                     "capability execution failed provider=%s tool=%s",
@@ -1160,8 +1363,26 @@ class NovaVoiceService:
                     requested=action.call.arguments,
                     message="Capability provider failed while executing the action",
                 )
+            finally:
+                if cancellation is not None:
+                    cancellation.provider_finished(provider_task)
 
         while pending:
+            if cancellation is not None and cancellation.requested.is_set():
+                for action in sorted(
+                    pending.values(), key=lambda candidate: candidate.order
+                ):
+                    append_result(
+                        action,
+                        ToolResult(
+                            action_id=action.id,
+                            ok=False,
+                            code="cancelled",
+                            requested=action.call.arguments,
+                            message="Action was cancelled before provider side effects",
+                        ),
+                    )
+                break
             # Dependencies are constrained to earlier actions by Interpretation,
             # but retain a safe guard here for callers that invoke this method
             # directly or provide a malformed plan.
@@ -1299,8 +1520,8 @@ class NovaVoiceService:
                 None,
             )
             if first_serial is not None and first_serial == 0:
-                action, canonical_action, _policy, provider = runnable[0]
-                append_result(action, await invoke(canonical_action, provider))
+                action, canonical_action, policy, provider = runnable[0]
+                append_result(action, await invoke(canonical_action, policy, provider))
                 continue
 
             if first_serial is not None:
@@ -1311,8 +1532,8 @@ class NovaVoiceService:
             # deterministic even when provider calls complete out of order.
             outputs = await asyncio.gather(
                 *(
-                    invoke(canonical_action, provider)
-                    for _action, canonical_action, _policy, provider in runnable
+                    invoke(canonical_action, policy, provider)
+                    for _action, canonical_action, policy, provider in runnable
                 )
             )
             for (action, _canonical_action, _policy, _provider), result in zip(

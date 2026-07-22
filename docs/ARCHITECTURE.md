@@ -3,12 +3,12 @@
 ## System map
 
 ```text
-Nocturnium native service / Indium LaunchAgent / Iridium mic
-        | authenticated TLS WebSocket + framed audio     |
-        +----------------------+--------------------+
+Nocturnium service / Indium LaunchAgent / Iridium mic / dashboard browser
+        | native mTLS WebSocket       | browser WSS via dashboard mTLS bridge
+        +-----------------------------+----------------+
                                v
                     Nova Voice on Iridium
-  edge activity gate -> central VAD/wake -> streaming STT -> prosody -> interpretation
+  edge/capture gate -> central VAD/wake -> final-buffer STT -> prosody -> interpretation
                                                    |
                                       session + policy engine
                                                    |
@@ -39,12 +39,21 @@ persona -> TTS path. It is not a dashboard component, an always-on microphone,
 or an alternate inference pipeline, and it is unavailable outside development
 shadow mode.
 
+The supported dashboard browser satellite is a separate production path. Its
+AudioWorklet emits the same framed PCM protocol through a same-origin WSS
+connection; a dashboard-hosted bridge relays bytes to Iridium with the
+dashboard's mTLS client identity. Push-to-talk sends `begin_turn`; page-bound
+always-on mode uses normal wake gating. It depends on a secure context,
+microphone permission, an open page, and the per-device Voice Agent setting.
+
 ## Repository and ownership boundary
 
-Nova Voice owns its binaries, services, schemas, configuration, health endpoint,
-metrics, satellite status, and deployment. It never imports from, writes into,
-or ships a component inside `nova-ha-dashboard`. The dashboard is an external
-service whose REST/MCP contracts are consumed like any third-party protocol.
+Nova Voice owns its inference runtime, services, schemas, configuration, health
+endpoint, metrics, native satellite protocol, and deployment. It never imports
+dashboard source. The dashboard remains an external capability provider over
+REST/MCP, and separately owns the optional browser capture client and its dumb
+mTLS relay. Those browser-edge components do not contain inference, policy, or
+tool execution logic.
 
 The only permitted knowledge crossing that boundary is:
 
@@ -54,9 +63,11 @@ The only permitted knowledge crossing that boundary is:
 - runtime state and action results returned by those interfaces
 
 Contract fixtures live under Nova Voice and are tested against a fake provider
-plus a read-only dashboard integration test. A dashboard release may not be
-required to add, deploy, disable, or repair voice. Conversely, killing Nova
-Voice must leave the dashboard, Home Assistant, and touch control unchanged.
+plus a read-only dashboard integration test. A dashboard release is not
+required to add, deploy, disable, or repair the native voice runtime.
+Browser-satellite changes are coordinated across the Voice/Dashboard deployment
+chain. Killing Nova Voice must leave the dashboard, Home Assistant, and touch
+control unchanged.
 
 The core depends on a generic `CapabilityProvider` interface. The initial
 `NovaDashboardProvider` is one adapter; later local-AI, media, household, or
@@ -80,11 +91,13 @@ processors remain outside the core.
 1. `SatelliteIdentityProcessor`: authenticates and attaches device/room metadata.
 2. `AudioConditioningProcessor`: resamples to 16 kHz mono for STT/wake and emits
    a parallel playback-quality stream.
-3. `ActivityProcessor`: server VAD, utterance framing, pre-roll, and end-of-speech.
+3. `ActivityProcessor`: server VAD, utterance framing, pre-roll, audio-cadence
+   endpointing, bounded pause extension, and one-shot listening-cue signal.
 4. `WakeProcessor`: transcript-first matching against the dashboard-managed
    accepted-word list, with an optional acoustic model when one has been provisioned.
-5. `StreamingSttService`: per-stream state for the selected benchmark-winning
-   STT and interim/final text.
+5. `SttService`: the selected Nemotron adapter. Cache-aware live hypotheses feed
+   a stable-prefix gate for read-only prefetch; a final batch decode remains
+   authoritative.
 6. `ProsodyProcessor`: deterministic, baseline-relative acoustic features.
 7. `DeduplicationProcessor`: elects one of overlapping household streams.
 8. `InterpretationProcessor`: calls the single LLM with bounded structured context.
@@ -95,8 +108,25 @@ processors remain outside the core.
 11. `PersonaRenderer`: renders verified results, bounds complaint/style behavior,
     and compiles tone. Common results are deterministic; complex results may use
     the same resident LLM after execution.
-12. `StreamingTtsService`: selected TTS output with barge-in cancellation.
+12. `StreamingTtsService`: sentence/clause output with mid-unit and inter-unit
+    barge-in cancellation.
 13. `RetentionObserver`: writes TTL data; regular observers record redacted metrics.
+
+These processors are coordinated by `ForegroundTurnStateMachine`. Its immutable
+snapshots contain hashed input/context revisions rather than transcript text,
+ordered stage records and timings, the deterministic policy decision, tool and
+verification journals, response revisions, cancellation decisions, and a
+terminal status. The audio runtime owns capture/endpoint/speak; the service owns
+contextualize through render; commit closes the trace. The completed trace is
+attached to `HandleResult` and emitted with the redacted `response_completed`
+monitor event.
+
+Speech and task cancellation are separate controls. `playback_cancel` stops the
+source satellite promptly without cancelling provider work. An explicit task
+cancellation request may skip queued actions; during a provider call it cancels
+only tools whose manifest declares `cancellation: "anytime"`. Mutating tools
+default to `before_side_effects`, so an in-flight mutation completes its
+verification and later queued actions are cancelled.
 
 ## Activation and execution policy
 
@@ -128,12 +158,13 @@ pronouns do not act. Passive context expires quickly and never becomes durable m
 
 ### Active conversation
 
-Starts when a wake-word turn is accepted. For the next 20 seconds after each
-usable turn, all accepted user speech in that room is addressed to the agent;
-the user does not repeat the wake word. The room retains user/assistant history
-for the LLM until that idle timeout or an explicit end. A separate room may run
-an independent conversation. This context never overrides tool validation or
-supplies a missing high-impact confirmation.
+Starts when a wake-word turn is accepted. For 60 seconds by default after each
+usable turn, accepted follow-up speech is addressed to the agent without a
+repeated wake word. The timeout is dashboard-tunable and applied live. Under
+the default household arbitration scope, microphones share the conversation
+and its user/assistant history; changing to room-scoped arbitration separates
+them. This context never overrides tool validation or supplies a missing
+high-impact confirmation.
 
 The persona, system context, rounded household-local time (minute precision with
 AM/PM), and weather snapshot are established at conversation start. The model
@@ -227,7 +258,7 @@ LISTENING -> INTERPRETING -> ACTING -> RESPONDING
                           v
              ALL ACTIONS VERIFIED -> GOAL SATISFIED -> LISTENING
                                                        |
-                                             20 seconds idle / end
+                                             60 seconds idle / end (default)
                                                        v
                                                     PASSIVE
 ```
@@ -244,38 +275,41 @@ succeeded.
 
 ## Iridium process topology
 
-Only two processes own CUDA contexts:
+The deployed resident topology has three model services:
 
-1. a pinned `llama-server` process containing Qwen3.5-4B
-2. the Python voice process containing the selected STT and TTS in one PyTorch
-   CUDA context, plus the pipeline/orchestrator
+1. `nova-voice-llm.service`: pinned `llama-server` with Qwen3.5-4B
+2. `nova-voice.service`: Python orchestration plus resident Nemotron STT
+3. `nova-voice-tts.service`: vLLM-Omni Qwen3-TTS, implemented by separate
+   stage-0 talker and stage-1 codec CUDA workers
 
-The GPU scheduler gives streaming ASR priority, bounds LLM/TTS work, and exposes
-queue/VRAM health. A model-load failure fails service health; it never triggers a
-silent downgrade or live model swap.
+The lightweight DeepFilterNet sidecar is CPU-only. Service health and the
+deployment verifier require all resident services and ports; a model-load
+failure never triggers a silent downgrade or live model swap.
 
 ## Latency strategy
 
 - keep all three models resident and warm
 - use the chunk operating point selected by the local STT bake-off rather than
   hard-coding 320 ms across different architectures
-- start intent preparation from stable interim text, but dispatch only on final
+- use stable interim STT only to prefetch read-only room context, likely tools,
+  and an LLM-state revision; discard it when the final transcript diverges
 - send the LLM compact state and three tools, with thinking disabled
 - generate short persona-aware success acknowledgements only after verified
   results; use the same resident LLM renderer for confirmations and dialogue
 - benchmark equivalent REST and MCP operations from Iridium, then pin the
   measured hot path behind the semantic provider
-- chunk long social replies at sentence boundaries for TTS
+- stream finalized sentence/clause units from vLLM-Omni and check cancellation
+  at every chunk and semantic-unit boundary
 - cancel queued TTS immediately on barge-in while retaining the verified tool result
-- give ASR CUDA work priority over LLM/TTS bursts
+- preserve resident headroom and measure cross-service GPU contention in the
+  live latency/endurance gate
 
 ## Satellite lifecycle
 
-Satellites are native, headless processes—not dashboard features or web mics.
-They capture and play audio, apply local echo/noise processing, stream framed
-audio, and expose a local health/status command. There is no tray/menu quit
-control in normal operation. Installation and intentional disablement remain
-administrator actions.
+Native satellites are headless processes. They capture and play audio, apply
+local echo/noise processing, stream framed audio, and expose a local
+health/status command. There is no tray/menu quit control in normal operation.
+Installation and intentional disablement remain administrator actions.
 
 - **Indium:** signed native macOS helper installed as a per-user LaunchAgent,
   with `RunAtLoad`/`KeepAlive`, bounded restart backoff, and one-time Local
@@ -328,9 +362,13 @@ so every microphone in scope can reject the source satellite's echo even when
 native cancellation or playback tagging misses a tail. A `playback_cancel`
 control frame closes the source satellite's output on barge-in.
 
-Browser microphones are outside v1. A future standalone browser satellite must
-be served over HTTPS and is explicitly foreground/permission-bound; it cannot be
-implemented in or hosted by the dashboard.
+Browser microphones are in scope and supported through the dashboard browser
+satellite. The client is explicitly foreground/permission-bound, defaults off
+per device, and can use push-to-talk or page-bound always-on capture. Caddy
+provides the trusted same-origin HTTPS/WSS edge; the dashboard bridge relays the
+satellite protocol over mTLS to Iridium. Closing/reloading the page interrupts
+this browser client but never the native services. The separate Voice Lab page
+remains development-only and shadow-mode-only.
 
 ## Failure isolation
 
@@ -349,9 +387,11 @@ implemented in or hosted by the dashboard.
 
 ## Privacy and data lifecycle
 
-Runtime network calls are limited to Iridium and household LAN services. Models
-are downloaded during explicit installation, pinned locally, then runtime egress
-is blocked.
+Audio, model, dashboard, and home-control traffic stays on Iridium or the
+household LAN. Models are downloaded during explicit installation and pinned
+locally. The orchestrator alone may use configured public web-search providers
+for bounded knowledge queries; model and sidecar units otherwise retain their
+local-only network policy.
 
 In development:
 
