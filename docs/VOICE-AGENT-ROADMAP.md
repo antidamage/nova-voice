@@ -5,7 +5,7 @@
   Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, and 438 passing tests.
+  routing, short-lived context, diagnostics, and 442 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -156,7 +156,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 16 of 58 tasks complete. Next task: **T0-14**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 17 of 58 tasks complete. Next task: **T0-15**.
 
   ### Milestone decision map
 
@@ -165,7 +165,7 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 6 of 26 complete. Ready to choose now: **M0-06 Dependable real-time core accepted** or **M1-01 Durable goal and
+  Milestone progress: 6 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-01 Durable goal and
   plan engine**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
@@ -175,7 +175,7 @@
   | **Complete** | **M0-03 — Natural turn-taking** | Nova detects semantic turn completion, handles interruptions/backchannels, prefetches safely, and streams cancellable speech. | `T0-05`–`T0-09` | `M0-02` |
   | **Complete** | **M0-04 — Knowledge and speech reliability** | Knowledge gaps recover through one safe web lookup and numbers are spoken contextually. | `T0-10`–`T0-11` | None |
   | **Complete** | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
-  | Ready | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
+  | In progress | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
   | Ready | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | Blocked | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
   | Blocked | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
@@ -225,7 +225,7 @@
     false-activation samples with pinned expected traces and latency measurements (`T0-02`).
   - [x] **T0-13 — Build the fake-clock household simulator.** Add deterministic providers, delayed state convergence, failures,
     occupancy, concurrent speakers, and repeatable time/event control (`T0-03`).
-  - [ ] **T0-14 — Build live latency and endurance runners.** Measure endpoint, first audio, queue depth, interruption recovery,
+  - [x] **T0-14 — Build live latency and endurance runners.** Measure endpoint, first audio, queue depth, interruption recovery,
     resource residency, and duplicate-mutation invariants over sustained runs (`T0-08`, `OPS-01`).
   - [ ] **T0-15 — Complete the household acceptance corpus.** Run far-field, echo/barge-in, false-activation shadow, and spoken-number
     cases with recorded evidence (`T0-06`, `T0-11`, `T0-12`).
@@ -469,7 +469,7 @@
 
   ## Test and Acceptance Plan
 
-  - Preserve the 438-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
+  - Preserve the 442-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
   - Build a virtual household with fake time, occupancy, HA entities, calendars, communications, failures, delayed state convergence,
     and concurrent speakers.
 

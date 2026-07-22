@@ -209,6 +209,16 @@ periodic commands and TTS, no OOM/reload/CPU hot-path fallback, measured peak
 leaving at least 1 GiB or 10% physical VRAM free (whichever is larger), bounded
 queues, and no ASR starvation during TTS.
 
+`ops/tier0_endurance_monitor.py` is installed with the inactive
+`nova-voice-tier0-endurance.service`. Start it only after the exact candidate is
+deployed and healthy. It samples once per minute for 86,400 seconds and exits
+non-zero on service PID/restart changes, model endpoint failure, or insufficient
+GPU headroom. Evidence is written under `/var/lib/nova-voice/evaluation/`.
+`EnduranceRunner` adds queue, ASR/TTS, duplicate-mutation, and latency metrics to
+scenario-driven runs. `config/tier0-acceptance.json` is the required eleven-case
+far-field, echo/barge-in, false-activation, and spoken-number corpus. The Tier 0
+gate is fail-closed for missing corpus evidence or a short endurance duration.
+
 ## Wake, duplicate, and echo gates
 
 - tune Beemo on real rooms; target false accepts <=0.2/hour and false reject <=5%
