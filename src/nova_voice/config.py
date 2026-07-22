@@ -44,9 +44,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_durable_database_path(self) -> Path:
-        return self.durable_database_path or self.database_path.with_name(
-            "durable-agent.sqlite3"
-        )
+        return self.durable_database_path or self.database_path.with_name("durable-agent.sqlite3")
 
     # IANA timezone of the household. Day/night playback volume and the spoken
     # clock context use this rather than the host clock. An explicit empty
@@ -57,6 +55,26 @@ class Settings(BaseSettings):
     nova_mcp_token: str | None = None
     nova_contract_version: str = "nova-provider-v1"
     provider_context_timeout_seconds: float = Field(default=0.75, gt=0, le=5)
+
+    # Optional iCloud CalDAV provider. Use an Apple app-specific password and
+    # explicit collection URLs discovered for this account; credentials never
+    # pass through the dashboard or model prompt.
+    icloud_username: str | None = None
+    icloud_app_password: str | None = None
+    icloud_calendar_url: str | None = None
+    icloud_reminders_url: str | None = None
+    icloud_timeout_seconds: float = Field(default=10, gt=0, le=30)
+
+    @property
+    def icloud_configured(self) -> bool:
+        return all(
+            (
+                self.icloud_username,
+                self.icloud_app_password,
+                self.icloud_calendar_url,
+                self.icloud_reminders_url,
+            )
+        )
 
     llm_base_url: str = "http://127.0.0.1:8765/v1"
     llm_model: str = "Qwen3.5-4B"

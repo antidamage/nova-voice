@@ -29,6 +29,8 @@ def action_capability(action: PlannedAction) -> str:
     call = action.call
     if call.provider == "web":
         return "knowledge.read"
+    if call.provider == "icloud":
+        return call.tool if call.tool.startswith("icloud.") else f"icloud.{call.tool}"
     if call.provider != "nova":
         return f"{call.provider}.{call.tool}"
     if call.tool == "nova.query":
@@ -68,15 +70,11 @@ class HouseholdAuthority:
             self.store.list(DelegationGrantRecord),
         )
         self._identities = {
-            cast(IdentityPolicyRecord, row.record).person_id: cast(
-                IdentityPolicyRecord, row.record
-            )
+            cast(IdentityPolicyRecord, row.record).person_id: cast(IdentityPolicyRecord, row.record)
             for row in identities
         }
         self._grants = {
-            cast(DelegationGrantRecord, row.record).id: cast(
-                DelegationGrantRecord, row.record
-            )
+            cast(DelegationGrantRecord, row.record).id: cast(DelegationGrantRecord, row.record)
             for row in grants
         }
 
