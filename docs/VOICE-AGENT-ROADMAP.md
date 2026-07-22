@@ -308,7 +308,7 @@
     listening, disagreement, humour, and storytelling (`T0-05`, `T3-01`).
   - [x] **T3-04 — Add multi-party dialogue.** Implement speaker-attributed history, addressee detection, turn allocation, and “ask
     Addie”/“tell the household” semantics (`T3-01`).
-  - [ ] **T3-05 — Enforce private/shared memory boundaries.** Apply participant/audience policy to every retrieval, write, callback,
+  - [x] **T3-05 — Enforce private/shared memory boundaries.** Apply participant/audience policy to every retrieval, write, callback,
     correction, export, and forget operation (`T1-07`, `T1-11`, `T3-04`).
   - [ ] **T3-06 — Add multilingual and user-specific speech support.** Implement code-switching, pronunciation dictionaries,
     whisper/night mode, accessibility pacing, and per-user speech preferences (`T0-08`, `T3-01`).

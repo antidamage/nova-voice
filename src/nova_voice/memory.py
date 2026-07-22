@@ -40,6 +40,15 @@ class MemoryStatus(StrEnum):
     DELETED = "deleted"
 
 
+class MemoryOperation(StrEnum):
+    RETRIEVE = "retrieve"
+    WRITE = "write"
+    CALLBACK = "callback"
+    CORRECT = "correct"
+    EXPORT = "export"
+    FORGET = "forget"
+
+
 class MemoryRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     text: str = Field(min_length=1, max_length=2000)
@@ -59,6 +68,73 @@ class MemoryRecord(BaseModel):
     supersedes: str | None = None
     pinned: bool = False
     needs_confirmation: bool = False
+
+
+@dataclass(frozen=True)
+class MemoryAccessContext:
+    actor_id: str | None
+    recognized: bool = False
+    participant_ids: tuple[str, ...] = ()
+    administrative: bool = False
+
+    def model_payload(self) -> dict[str, Any]:
+        return {
+            "actor_id": self.actor_id,
+            "recognized": self.recognized,
+            "participant_ids": list(self.participant_ids),
+            "administrative": self.administrative,
+        }
+
+
+class MemoryAudiencePolicy:
+    """One fail-closed audience policy for every MemPalace operation."""
+
+    @staticmethod
+    def _audience_ids(memory: MemoryRecord) -> set[str]:
+        return {
+            item.removeprefix("person:") for item in memory.audience if item and item != "household"
+        }
+
+    def can_access(
+        self,
+        memory: MemoryRecord,
+        context: MemoryAccessContext,
+        operation: MemoryOperation,
+    ) -> bool:
+        if context.administrative:
+            return True
+        actor = context.actor_id
+        if not context.recognized or not actor:
+            return False
+        if operation in {MemoryOperation.CORRECT, MemoryOperation.FORGET}:
+            return memory.owner_id == actor
+        return (
+            memory.owner_id == actor
+            or "household" in memory.audience
+            or actor in self._audience_ids(memory)
+        )
+
+    def can_create(self, memory: MemoryRecord, context: MemoryAccessContext) -> bool:
+        if context.administrative:
+            return True
+        actor = context.actor_id
+        if not context.recognized or not actor or memory.owner_id != actor:
+            return False
+        permitted = {actor, *context.participant_ids}
+        audience_ids = self._audience_ids(memory)
+        if not audience_ids.issubset(permitted):
+            return False
+        if memory.sensitivity != MemorySensitivity.NORMAL:
+            return "household" not in memory.audience and audience_ids.issubset({actor})
+        return True
+
+    def filter(
+        self,
+        memories: list[MemoryRecord],
+        context: MemoryAccessContext,
+        operation: MemoryOperation,
+    ) -> list[MemoryRecord]:
+        return [item for item in memories if self.can_access(item, context, operation)]
 
 
 class MemoryCandidate(BaseModel):
@@ -188,12 +264,21 @@ class MemPalaceClient:
     def enabled(self) -> bool:
         return self._enabled
 
-    async def search(self, query: str, *, owner_id: str | None) -> list[MemoryRecord]:
-        if not self._enabled or not owner_id:
+    async def search(
+        self,
+        query: str,
+        *,
+        owner_id: str | None = None,
+        access: MemoryAccessContext | None = None,
+        operation: MemoryOperation = MemoryOperation.RETRIEVE,
+    ) -> list[MemoryRecord]:
+        context = access or MemoryAccessContext(actor_id=owner_id, recognized=bool(owner_id))
+        if not self._enabled or (not context.actor_id and not context.administrative):
             return []
         try:
             response = await self._client.post(
-                "/v1/search", json={"query": query, "owner_id": owner_id}
+                "/v1/search",
+                json={"query": query, "operation": operation.value, **context.model_payload()},
             )
             response.raise_for_status()
             return [
@@ -202,22 +287,44 @@ class MemPalaceClient:
         except (httpx.HTTPError, ValueError):
             return []
 
-    async def create(self, memory: MemoryRecord) -> MemoryRecord | None:
+    async def create(
+        self, memory: MemoryRecord, *, access: MemoryAccessContext | None = None
+    ) -> MemoryRecord | None:
         if not self._enabled:
             return None
         try:
-            response = await self._client.post("/v1/memories", json=memory.model_dump(mode="json"))
+            context = access or MemoryAccessContext(
+                actor_id=memory.owner_id, recognized=bool(memory.owner_id)
+            )
+            response = await self._client.post(
+                "/v1/memories",
+                json={"memory": memory.model_dump(mode="json"), "access": context.model_payload()},
+            )
             response.raise_for_status()
             return MemoryRecord.model_validate(response.json()["memory"])
         except (httpx.HTTPError, ValueError):
             return None
 
-    async def list(self, *, owner_id: str | None = None) -> list[MemoryRecord]:
+    async def list(
+        self,
+        *,
+        owner_id: str | None = None,
+        access: MemoryAccessContext | None = None,
+        operation: MemoryOperation = MemoryOperation.RETRIEVE,
+    ) -> list[MemoryRecord]:
         if not self._enabled:
             return []
         try:
+            context = access or MemoryAccessContext(actor_id=owner_id, recognized=bool(owner_id))
             response = await self._client.get(
-                "/v1/memories", params={"owner_id": owner_id} if owner_id else None
+                "/v1/memories",
+                params={
+                    "actor_id": context.actor_id or "",
+                    "recognized": str(context.recognized).lower(),
+                    "administrative": str(context.administrative).lower(),
+                    "participant_ids": ",".join(context.participant_ids),
+                    "operation": operation.value,
+                },
             )
             response.raise_for_status()
             return [
@@ -232,7 +339,12 @@ class MemPalaceClient:
         if not self._enabled:
             return None
         try:
-            response = await self._client.request(method, path, json=payload)
+            response = await self._client.request(
+                method,
+                path,
+                params=payload if method.upper() == "GET" else None,
+                json=None if method.upper() == "GET" else payload,
+            )
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError):

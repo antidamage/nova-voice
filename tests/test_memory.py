@@ -1,10 +1,63 @@
 from nova_voice.memory import (
+    MemoryAccessContext,
+    MemoryAudiencePolicy,
     MemoryIntentKind,
+    MemoryOperation,
+    MemoryRecord,
     MemorySensitivity,
     MemoryType,
     classify_memory_intent,
     salient_memory_candidate,
 )
+
+
+def _memory(*, owner: str = "addie", audience: list[str] | None = None) -> MemoryRecord:
+    return MemoryRecord(
+        text="A durable fact",
+        memory_type=MemoryType.PROFILE,
+        owner_id=owner,
+        audience=audience or [owner],
+        provenance="test",
+    )
+
+
+def test_memory_audience_policy_denies_unknown_and_cross_user_private_access() -> None:
+    policy = MemoryAudiencePolicy()
+    private = _memory()
+
+    assert not policy.can_access(private, MemoryAccessContext(None), MemoryOperation.RETRIEVE)
+    assert not policy.can_access(
+        private,
+        MemoryAccessContext("other-person", recognized=True),
+        MemoryOperation.CALLBACK,
+    )
+
+
+def test_memory_audience_policy_allows_explicit_and_household_shares_but_only_owner_mutation() -> (
+    None
+):
+    policy = MemoryAudiencePolicy()
+    explicitly_shared = _memory(audience=["addie", "person:alex"])
+    household = _memory(audience=["household"])
+    alex = MemoryAccessContext("alex", recognized=True)
+
+    assert policy.can_access(explicitly_shared, alex, MemoryOperation.RETRIEVE)
+    assert policy.can_access(household, alex, MemoryOperation.EXPORT)
+    assert not policy.can_access(explicitly_shared, alex, MemoryOperation.CORRECT)
+    assert not policy.can_access(household, alex, MemoryOperation.FORGET)
+
+
+def test_memory_audience_policy_rejects_unauthorized_or_sensitive_widening() -> None:
+    policy = MemoryAudiencePolicy()
+    addie = MemoryAccessContext("addie", recognized=True, participant_ids=("alex",))
+    outside = _memory(audience=["addie", "sam"])
+    sensitive = _memory(audience=["addie", "household"]).model_copy(
+        update={"sensitivity": MemorySensitivity.SENSITIVE}
+    )
+
+    assert not policy.can_create(outside, addie)
+    assert not policy.can_create(sensitive, addie)
+    assert policy.can_create(_memory(audience=["addie", "alex"]), addie)
 
 
 def test_memory_formation_rejects_routine_device_controls_and_transient_state() -> None:
