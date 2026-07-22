@@ -29,8 +29,12 @@ def action_capability(action: PlannedAction) -> str:
     call = action.call
     if call.provider == "web":
         return "knowledge.read"
-    if call.provider == "icloud":
-        return call.tool if call.tool.startswith("icloud.") else f"icloud.{call.tool}"
+    if call.provider in {"icloud", "personal"}:
+        return (
+            call.tool
+            if call.tool.startswith(f"{call.provider}.")
+            else f"{call.provider}.{call.tool}"
+        )
     if call.provider != "nova":
         return f"{call.provider}.{call.tool}"
     if call.tool == "nova.query":

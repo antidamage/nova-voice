@@ -34,3 +34,18 @@ grant use is recorded in the durable audit store.
 Provider health appears under `capabilityProviders.icloud` when configured.
 An iCloud outage degrades these tools without taking down ordinary local voice
 or smart-home control.
+
+## Private notes, lists, and contacts
+
+The always-local `personal` provider stores these records in a separate SQLite
+database on Iridium. Name-based writes execute only when one record matches;
+ambiguous results return stable record IDs and do not mutate anything. List-item
+completion/removal uses the same rule. Contacts retain structured phone, email,
+and relationship fields rather than flattening identity into prompt text.
+
+Every successful mutation returns a one-time `undoToken`. Undo is revision
+checked: it restores the prior snapshot only if the record has not changed
+since the token was issued, and refuses to overwrite newer work. Stable IDs
+derived from action IDs make retries idempotent. The database location is set by
+`NOVA_VOICE_PERSONAL_DATA_PATH` and provider health is exposed under
+`capabilityProviders.personal`.

@@ -280,7 +280,7 @@
 
   - [x] **T2-01 — Add iCloud calendar and reminders.** Implement read/write contracts, recurrence, timezone handling, verification,
     cancellation, and audit under explicit grants (`T1-16`).
-  - [ ] **T2-02 — Add notes, lists, and contacts.** Provide identity-safe lookup and mutation with ambiguity handling and undo
+  - [x] **T2-02 — Add notes, lists, and contacts.** Provide identity-safe lookup and mutation with ambiguity handling and undo
     (`T2-01`).
   - [ ] **T2-03 — Add weather, media, recipes, documents, and household knowledge providers.** Keep replaceable contracts, citations,
     privacy boundaries, and read/write classification (`T2-02`).
