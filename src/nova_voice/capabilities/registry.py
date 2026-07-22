@@ -60,6 +60,18 @@ class CapabilityRegistry:
     def manifests(self) -> list[CapabilityManifest]:
         return [provider.manifest() for provider in self._providers.values()]
 
+    async def health(self) -> dict[str, dict]:
+        results: dict[str, dict] = {}
+        for provider_id, provider in self._providers.items():
+            try:
+                results[provider_id] = await provider.health()
+            except Exception as error:
+                results[provider_id] = {
+                    "ok": False,
+                    "error": type(error).__name__,
+                }
+        return results
+
     def tool_catalog(self) -> list[dict]:
         return [tool for manifest in self.manifests() for tool in manifest.tools]
 

@@ -13,6 +13,8 @@ from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
+from nova_voice.providers.icloud.client import ICloudCalDAVClient
+from nova_voice.providers.icloud.provider import ICloudProvider
 from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.web.client import BraveScrapeClient, GeminiClient, WebSearchClient
@@ -56,9 +58,21 @@ def build_service(settings: Settings) -> NovaVoiceService:
         default_backend=settings.web_backend_default,
         search_results=settings.web_search_results,
     )
-    registry = CapabilityRegistry(allowlist={"nova", "web"})
+    registry = CapabilityRegistry(allowlist={"nova", "web", "icloud"})
     registry.register(nova_provider)
     registry.register(web_provider)
+    if settings.icloud_configured:
+        registry.register(
+            ICloudProvider(
+                ICloudCalDAVClient(
+                    username=settings.icloud_username or "",
+                    app_password=settings.icloud_app_password or "",
+                    calendar_url=settings.icloud_calendar_url or "",
+                    reminders_url=settings.icloud_reminders_url or "",
+                    timeout_seconds=settings.icloud_timeout_seconds,
+                )
+            )
+        )
     interpreter = LlamaCppInterpreter(
         settings.llm_base_url,
         settings.llm_model,

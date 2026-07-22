@@ -810,9 +810,7 @@ class NovaVoiceService:
             memory_text = utterance.transcript.strip()
             memory_intent = classify_memory_intent(memory_text)
             if memory_intent.kind == MemoryIntentKind.QUERY_ALL:
-                selected_memories = await self.memory.list(
-                    owner_id=utterance.speaker.person_id
-                )
+                selected_memories = await self.memory.list(owner_id=utterance.speaker.person_id)
             elif memory_intent.kind == MemoryIntentKind.QUERY_TOPIC:
                 selected_memories = await self.memory.search(
                     memory_intent.query or memory_text,
@@ -1747,6 +1745,7 @@ class NovaVoiceService:
                 "maxWords": self.settings.speaker_short_execute_max_words,
             },
             "provider": provider_health,
+            "capabilityProviders": await self.registry.health(),
             "llm": llm_health,
             "retainedTranscripts": await self.store.count(),
             "durableAgent": (
@@ -1783,5 +1782,6 @@ class NovaVoiceService:
             await self.event_consumer.close()
         if self.memory is not None:
             await self.memory.close()
+        await self.registry.close()
         await self.interpreter.close()
         await self.registry.close()

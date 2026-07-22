@@ -278,7 +278,7 @@
 
   ### Tier 2 task queue — personal digital assistant
 
-  - [ ] **T2-01 — Add iCloud calendar and reminders.** Implement read/write contracts, recurrence, timezone handling, verification,
+  - [x] **T2-01 — Add iCloud calendar and reminders.** Implement read/write contracts, recurrence, timezone handling, verification,
     cancellation, and audit under explicit grants (`T1-16`).
   - [ ] **T2-02 — Add notes, lists, and contacts.** Provide identity-safe lookup and mutation with ambiguity handling and undo
     (`T2-01`).

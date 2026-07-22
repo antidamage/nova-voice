@@ -96,3 +96,12 @@ def test_registry_resolves_provider_owned_resource_templates() -> None:
     )
 
     assert registry.resources_for(action) == ("entity:light.office",)
+
+
+async def test_registry_reports_each_provider_health() -> None:
+    registry = CapabilityRegistry(allowlist={"fixture"})
+    registry.register(_FixtureProvider({"fixture.query": ToolPolicy()}))
+
+    health = await registry.health()
+
+    assert health == {"fixture": {"ok": True}}
