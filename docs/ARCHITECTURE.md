@@ -285,6 +285,16 @@ failed. Explicit "never mind" abandons immediately. Inactivity closes a
 clarification/follow-up window but is not used to claim that an unfinished goal
 succeeded.
 
+## Durable goals and plans
+
+The room-local goal above is intentionally an immediate conversation helper.
+Longer work uses the independent restart-safe engine described in
+[DURABLE-AGENT.md](DURABLE-AGENT.md). Its versioned records, transactional
+SQLite store, execution leases, stable idempotency keys, pause/resume step
+types, resource locks, and partial-failure recovery are initialized with the
+production service. Event ingestion, household authority, MemPalace, and
+proactive plan creation build on that engine in later milestones.
+
 ## Iridium process topology
 
 The deployed resident topology has three model services:
