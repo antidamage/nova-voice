@@ -383,7 +383,7 @@ async def test_explicit_pcm_turn_forwards_tts_chunks_without_buffering() -> None
     ]
 
 
-async def test_streaming_tts_stops_between_finalized_sentence_units() -> None:
+async def test_streaming_tts_keeps_one_response_level_acoustic_anchor() -> None:
     class SentenceService(FakeService):
         async def handle(self, utterance, **_kwargs):
             self.utterance = utterance
@@ -405,7 +405,7 @@ async def test_streaming_tts_stops_between_finalized_sentence_units() -> None:
         response_audio_sink=play,
     )
 
-    assert tts.texts == ["First sentence."]
+    assert tts.texts == ["First sentence. Second sentence."]
     assert played == [b"\x01\x00" * 50]
 
 
