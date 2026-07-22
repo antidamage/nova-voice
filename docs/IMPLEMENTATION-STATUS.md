@@ -22,6 +22,11 @@ Implemented in this increment:
   monotonic cursor, normalized HA/occupancy/device-health/weather/energy/task
   classes, durable Voice checkpoints, duplicate suppression, cursor-gap
   records, restart recovery, and structural health reporting;
+- deterministic owner, recognized-household, and guest execution classes plus
+  persistent standing grants scoped by capability, target, recipient,
+  location, schedule, expiry, use count, and amount budget; immediate
+  revocation, mTLS administration, durable cancellation, Dashboard controls,
+  and immutable audit replay are included;
 - a self-contained, responsive development diagnostics page at `/diagnostics`
   for explicit browser microphone capture, real STT/LLM/emotion/policy/TTS
   inspection, timing display, and returned-audio playback;

@@ -7,6 +7,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -25,6 +26,18 @@ from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
+from nova_voice.durable.models import (
+    DelegationGrantRecord,
+    ExecutionRecord,
+    GoalRecord,
+    GoalState,
+    GrantSchedule,
+    HouseholdRole,
+    IdentityPolicyRecord,
+    PlanRecord,
+    PlanState,
+    utc_now,
+)
 from nova_voice.interpretation.llama_cpp import InterpretationError
 from nova_voice.monitor import VoiceMonitor
 from nova_voice.monitor import page_html as monitor_page_html
@@ -67,6 +80,28 @@ class SpeakerProfileUpdateRequest(BaseModel):
 
 class SpeakerTemplateAssignmentRequest(BaseModel):
     person_id: str
+
+
+class IdentityRoleRequest(BaseModel):
+    role: HouseholdRole
+
+
+class DelegationGrantRequest(BaseModel):
+    grantee_id: str
+    capability: str
+    target_scope: tuple[str, ...] = ()
+    recipients: tuple[str, ...] = ()
+    locations: tuple[str, ...] = ()
+    schedule: GrantSchedule | None = None
+    expires_at: datetime | None = None
+    max_uses: int | None = None
+    max_amount: float | None = None
+    currency: str | None = None
+    notify_on_use: bool = True
+
+
+class AgentCancellationRequest(BaseModel):
+    reason: str = "cancelled by household owner"
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -316,6 +351,153 @@ def create_app(
             current.model_dump(mode="json", by_alias=True) if current is not None else None
         )
         return payload
+
+    def require_agent_administration():
+        if selected_service.durable_store is None or selected_service.authority is None:
+            raise HTTPException(status_code=503, detail="Durable agent administration is disabled")
+        return selected_service.durable_store, selected_service.authority
+
+    @app.get("/v1/agent/administration")
+    async def agent_administration(audit_limit: int = 100) -> dict:
+        durable, _ = require_agent_administration()
+        goals, plans, executions, grants, identities, audit = await asyncio.gather(
+            durable.list(GoalRecord),
+            durable.list(PlanRecord),
+            durable.list(ExecutionRecord),
+            durable.list(DelegationGrantRecord),
+            durable.list(IdentityPolicyRecord),
+            durable.list_audit(),
+        )
+        bounded = max(1, min(500, audit_limit))
+        return {
+            "goals": [row.record.model_dump(mode="json") for row in goals],
+            "plans": [row.record.model_dump(mode="json") for row in plans],
+            "executions": [row.record.model_dump(mode="json") for row in executions],
+            "grants": [row.record.model_dump(mode="json") for row in grants],
+            "identities": [row.record.model_dump(mode="json") for row in identities],
+            "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
+            "auditTotal": len(audit),
+        }
+
+    @app.get("/v1/agent/audit")
+    async def agent_audit(
+        after: int = 0,
+        limit: int = 100,
+        object_type: str | None = None,
+        object_id: str | None = None,
+    ) -> dict:
+        durable, _ = require_agent_administration()
+        if after < 0:
+            raise HTTPException(status_code=422, detail="Audit cursor cannot be negative")
+        records = await durable.list_audit()
+        indexed = [
+            (index, record)
+            for index, record in enumerate(records, start=1)
+            if index > after
+            and (object_type is None or record.object_type == object_type)
+            and (object_id is None or record.object_id == object_id)
+        ][: max(1, min(500, limit))]
+        return {
+            "after": after,
+            "nextCursor": indexed[-1][0] if indexed else after,
+            "events": [
+                {"cursor": cursor, **record.model_dump(mode="json")}
+                for cursor, record in indexed
+            ],
+        }
+
+    @app.put("/v1/agent/identities/{person_id}")
+    async def set_agent_identity_role(person_id: str, request: IdentityRoleRequest) -> dict:
+        _, authority = require_agent_administration()
+        record = await authority.set_role(person_id, request.role, actor_id="dashboard-admin")
+        return {"identity": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/grants", status_code=201)
+    async def create_agent_grant(request: DelegationGrantRequest) -> dict:
+        _, authority = require_agent_administration()
+        now = utc_now()
+        grant = DelegationGrantRecord(
+            id=authority.new_grant_id(),
+            created_at=now,
+            updated_at=now,
+            grantor_id="dashboard-admin",
+            **request.model_dump(),
+        )
+        await authority.create_grant(grant, actor_id="dashboard-admin")
+        return {"grant": grant.model_dump(mode="json")}
+
+    @app.delete("/v1/agent/grants/{grant_id}")
+    async def revoke_agent_grant(grant_id: str) -> dict:
+        _, authority = require_agent_administration()
+        try:
+            grant = await authority.revoke_grant(grant_id, actor_id="dashboard-admin")
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown delegation grant") from error
+        return {"grant": grant.model_dump(mode="json")}
+
+    @app.post("/v1/agent/plans/{plan_id}/cancel")
+    async def cancel_agent_plan(plan_id: str, request: AgentCancellationRequest) -> dict:
+        durable, _ = require_agent_administration()
+        try:
+            plan = await durable.terminate_plan(
+                plan_id,
+                status=PlanState.CANCELLED,
+                reason=request.reason,
+                actor_id="dashboard-admin",
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown durable plan") from error
+        return {"plan": plan.model_dump(mode="json")}
+
+    @app.post("/v1/agent/goals/{goal_id}/cancel")
+    async def cancel_agent_goal(goal_id: str, request: AgentCancellationRequest) -> dict:
+        durable, _ = require_agent_administration()
+        stored = await durable.get(GoalRecord, goal_id)
+        if stored is None:
+            raise HTTPException(status_code=404, detail="Unknown durable goal")
+        goal = stored.record
+        assert isinstance(goal, GoalRecord)
+        for plan_id in goal.plan_ids:
+            plan = await durable.get(PlanRecord, plan_id)
+            if (
+                plan is not None
+                and isinstance(plan.record, PlanRecord)
+                and plan.record.status not in {
+                PlanState.SATISFIED,
+                PlanState.CANCELLED,
+                PlanState.EXPIRED,
+                PlanState.FAILED,
+                }
+            ):
+                await durable.terminate_plan(
+                    plan_id,
+                    status=PlanState.CANCELLED,
+                    reason=request.reason,
+                    actor_id="dashboard-admin",
+                )
+        refreshed = await durable.get(GoalRecord, goal_id)
+        if refreshed is not None and isinstance(refreshed.record, GoalRecord):
+            goal = refreshed.record
+        if not goal.plan_ids and goal.status not in {
+            GoalState.SATISFIED,
+            GoalState.CANCELLED,
+            GoalState.EXPIRED,
+            GoalState.FAILED,
+        }:
+            cancelled = goal.model_copy(
+                update={
+                    "status": GoalState.CANCELLED,
+                    "terminal_reason": request.reason,
+                    "updated_at": utc_now(),
+                }
+            )
+            await durable.save(
+                cancelled,
+                expected_revision=stored.revision,
+                actor_id="dashboard-admin",
+            )
+            goal = cancelled
+        return {"goal": goal.model_dump(mode="json")}
 
     @app.get("/v1/speaker-profiles")
     async def speaker_profiles() -> dict:
