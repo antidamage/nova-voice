@@ -43,6 +43,9 @@ def test_addresses_rooms_and_phone_numbers_are_spoken_as_digits() -> None:
     assert normalize_spoken_numbers("Call 021 123 4567.") == (
         "Call zero two one one two three four five six seven."
     )
+    assert normalize_spoken_numbers("My saved phone number is 0212345678.") == (
+        "My saved phone number is zero two one two three four five six seven eight."
+    )
 
 
 def test_dates_times_decimals_currency_versions_and_network_addresses() -> None:
@@ -51,6 +54,12 @@ def test_dates_times_decimals_currency_versions_and_network_addresses() -> None:
     )
     assert normalize_spoken_numbers("Meet at 10:05am.") == "Meet at ten oh five a m."
     assert normalize_spoken_numbers("The value is 3.14.") == "The value is three point one four."
+    assert normalize_spoken_numbers("It is 9.8C outside.") == (
+        "It is nine point eight degrees outside."
+    )
+    assert normalize_spoken_numbers("The freezer is -2°C.") == (
+        "The freezer is minus two degrees."
+    )
     assert normalize_spoken_numbers("It costs $10.50.") == (
         "It costs ten dollars and fifty cents."
     )

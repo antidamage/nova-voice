@@ -22,6 +22,7 @@ from nova_voice.domain import (
     TurnTerminalStatus,
 )
 from nova_voice.interpretation.base import Interpreter
+from nova_voice.memory import MemoryRecord, MemoryType
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.service import (
     NovaVoiceService,
@@ -224,6 +225,29 @@ class _SpeakerProfiles:
         )
 
 
+class _Memory:
+    def __init__(self, records: list[MemoryRecord] | None = None) -> None:
+        self.records = records or []
+        self.searches: list[tuple[str, str | None]] = []
+        self.listed: list[str | None] = []
+        self.created: list[MemoryRecord] = []
+
+    async def search(self, query: str, *, owner_id: str | None):
+        self.searches.append((query, owner_id))
+        return list(self.records)
+
+    async def list(self, *, owner_id: str | None = None):
+        self.listed.append(owner_id)
+        return list(self.records)
+
+    async def create(self, memory: MemoryRecord):
+        self.created.append(memory)
+        return memory
+
+    async def request(self, _method: str, _path: str, _payload=None):
+        return None
+
+
 class _Persona:
     response_prompt = "fixture persona"
 
@@ -293,6 +317,69 @@ def test_explicit_profile_fallback_rejects_third_party_or_quoted_claims(
     transcript: str,
 ) -> None:
     assert explicit_self_profile_update(transcript, ["Nova"]) is None
+
+
+@pytest.mark.asyncio
+async def test_memory_topic_query_uses_mempalace_and_reaches_renderer(utterance) -> None:
+    record = MemoryRecord(
+        text="My phone number is 0212345678",
+        memory_type=MemoryType.PROFILE,
+        owner_id="person-a",
+        provenance="test",
+    )
+    memory = _Memory([record])
+    interpreter = _Interpreter(
+        interpretation(decision=Decision.REPLY, speech_act=SpeechAct.QUESTION),
+        rendered="Your saved phone number is 0212345678.",
+    )
+    service = NovaVoiceService(
+        Settings(), interpreter, _Registry(_Provider()), _Provider(), _Store(), _Persona(),
+        memory=memory,
+    )
+    spoken = utterance.model_copy(
+        update={
+            "transcript": "Do you remember my phone number?",
+            "wake_detected": True,
+            "speaker": SpeakerIdentity(
+                status="recognized", person_id="person-a", confidence=0.95
+            ),
+        }
+    )
+
+    result = await service.handle(spoken)
+
+    assert memory.searches == [("my phone number", "person-a")]
+    assert interpreter.contexts[0]["selectedMemory"][0]["text"] == record.text
+    assert interpreter.render_calls[0]["relevant_state"]["selectedMemory"][0]["text"] == record.text
+    assert result.response_text == "Your saved phone number is 0212345678."
+
+
+@pytest.mark.asyncio
+async def test_memory_query_without_match_has_deterministic_reply(utterance) -> None:
+    memory = _Memory()
+    provider = _Provider()
+    interpreter = _Interpreter(
+        interpretation(decision=Decision.REPLY, speech_act=SpeechAct.QUESTION),
+        rendered="I might remember something.",
+    )
+    service = NovaVoiceService(
+        Settings(), interpreter, _Registry(provider), provider, _Store(), _Persona(),
+        memory=memory,
+    )
+    spoken = utterance.model_copy(
+        update={
+            "transcript": "What have you saved about my passport?",
+            "wake_detected": True,
+            "speaker": SpeakerIdentity(
+                status="recognized", person_id="person-a", confidence=0.95
+            ),
+        }
+    )
+
+    result = await service.handle(spoken)
+
+    assert memory.searches == [("my passport", "person-a")]
+    assert result.response_text == "I don't have a saved memory about that."
 
 
 @pytest.mark.asyncio

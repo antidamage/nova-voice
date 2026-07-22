@@ -8,6 +8,7 @@ Routine device commands and transient device state are intentionally excluded.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -67,6 +68,70 @@ class MemoryCandidate(BaseModel):
     needs_confirmation: bool = False
 
 
+class MemoryIntentKind(StrEnum):
+    NONE = "none"
+    SAVE = "save"
+    QUERY_ALL = "query_all"
+    QUERY_TOPIC = "query_topic"
+    CONTROL = "control"
+
+
+@dataclass(frozen=True)
+class MemoryIntent:
+    kind: MemoryIntentKind
+    query: str | None = None
+
+
+_MEMORY_CONTROL = re.compile(
+    r"^(?:please )?(?:pin|forget)\s+.+$|"
+    r"^(?:please )?correct memory .+? to .+$|"
+    r"^(?:please )?expire memory .+? in \d{1,3} days?$",
+    re.I,
+)
+_MEMORY_SAVE = re.compile(
+    r"^(?:please\s+)?(?:remember|save|note)(?:\s+(?:down|that))?\s+(.+)$|"
+    r"^(?:please\s+)?(?:don't|do not)\s+forget(?:\s+that)?\s+(.+)$",
+    re.I,
+)
+_MEMORY_QUERY_ALL = re.compile(
+    r"\b(?:what\s+(?:do|did)\s+you\s+remember(?:\s+about\s+me)?|"
+    r"what\s+have\s+you\s+saved(?:\s+about\s+me)?|"
+    r"(?:show|list|check)(?:\s+me)?\s+(?:your|my|the)?\s*(?:saved\s+)?memories|"
+    r"(?:show|list|check)\s+(?:your|my|the)\s+memory|"
+    r"what(?:'s|\s+is)\s+in\s+(?:your|my|the)\s+memory)\b",
+    re.I,
+)
+_MEMORY_QUERY_TOPIC = re.compile(
+    r"\b(?:do\s+you\s+remember|"
+    r"what\s+(?:do|did|have)\s+you\s+(?:remember(?:ed)?|save(?:d)?)\s+about|"
+    r"what(?:'s|\s+is)\s+my\s+saved)\s+(.+)$",
+    re.I,
+)
+_MEMORY_WORD = re.compile(r"\b(?:remember|remembered|memory|memories|saved)\b", re.I)
+
+
+def classify_memory_intent(transcript: str) -> MemoryIntent:
+    """Classify explicit MemPalace operations before general interpretation."""
+
+    text = " ".join(transcript.split()).strip()
+    if not text:
+        return MemoryIntent(MemoryIntentKind.NONE)
+    if _MEMORY_CONTROL.match(text):
+        return MemoryIntent(MemoryIntentKind.CONTROL, text)
+    save = _MEMORY_SAVE.match(text)
+    if save:
+        topic = next((group for group in save.groups() if group), text)
+        return MemoryIntent(MemoryIntentKind.SAVE, topic.strip())
+    if _MEMORY_QUERY_ALL.fullmatch(text.rstrip(" ?.!")):
+        return MemoryIntent(MemoryIntentKind.QUERY_ALL)
+    topic = _MEMORY_QUERY_TOPIC.search(text)
+    if topic:
+        return MemoryIntent(MemoryIntentKind.QUERY_TOPIC, topic.group(1).strip(" ?."))
+    if _MEMORY_WORD.search(text):
+        return MemoryIntent(MemoryIntentKind.QUERY_TOPIC, text)
+    return MemoryIntent(MemoryIntentKind.NONE)
+
+
 _ROUTINE = re.compile(r"\b(?:turn|switch|set|dim|brighten|lights?|thermostat|volume)\b", re.I)
 _TRANSIENT = re.compile(r"\b(?:is|were?)\s+(?:on|off|open|closed)\b", re.I)
 _SENSITIVE = re.compile(
@@ -90,7 +155,7 @@ def salient_memory_candidate(transcript: str) -> MemoryCandidate | None:
     if _TRANSIENT.search(text) and not re.search(r"\bremember\b", text, re.I):
         return None
     lowered = text.casefold()
-    explicit = bool(re.search(r"\b(?:remember|don't forget|please note)\b", text, re.I))
+    explicit = classify_memory_intent(text).kind == MemoryIntentKind.SAVE
     if "i prefer" in lowered or "i like" in lowered or "my favorite" in lowered:
         kind = MemoryType.PREFERENCE
     elif re.search(r"\b(?:i(?:'ll| will)|we(?:'ll| will)|promise|need to)\b", text, re.I):

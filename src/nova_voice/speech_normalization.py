@@ -49,6 +49,11 @@ _TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _VERSION_RE = re.compile(r"\bv(?P<parts>\d+(?:\.\d+)+)\b", re.IGNORECASE)
+_TEMPERATURE_RE = re.compile(
+    r"(?<!\w)(?P<sign>[+-])?(?P<integer>\d+)(?:\.(?P<fraction>\d+))?"
+    r"\s*(?:°\s*)?[CF]\b",
+    re.IGNORECASE,
+)
 _PHONE_SEQUENCE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d() .-]{3,}\d)(?!\w)")
 _NUMBER_RE = re.compile(
     r"(?<!\w)(?P<currency>[$£€])?(?P<sign>[+-])?"
@@ -221,6 +226,18 @@ def _replace_version(match: re.Match[str]) -> str:
     return "version " + " point ".join(integer_to_words(int(part)) for part in parts)
 
 
+def _replace_temperature(match: re.Match[str]) -> str:
+    rendered = integer_to_words(int(match.group("integer")))
+    fraction = match.group("fraction")
+    if fraction is not None:
+        rendered += " point " + " ".join(_digit_words(fraction))
+    if match.group("sign") == "-":
+        rendered = "minus " + rendered
+    elif match.group("sign") == "+":
+        rendered = "plus " + rendered
+    return rendered + " degrees"
+
+
 def _looks_like_phone_sequence(match: re.Match[str], text: str) -> bool:
     raw = match.group(0)
     digits = "".join(character for character in raw if character.isdigit())
@@ -229,6 +246,10 @@ def _looks_like_phone_sequence(match: re.Match[str], text: str) -> bool:
         return 3 <= len(digits) <= 15
     groups = [group for group in re.split(r"\D+", raw) if group]
     date_shaped = [len(group) for group in groups] in ([4, 2, 2], [2, 2, 4])
+    if len(groups) == 1:
+        # Ungrouped NZ-style phone numbers are common in contacts and saved
+        # memories. A leading zero distinguishes them from ordinary counts.
+        return digits.startswith("0") and 7 <= len(digits) <= 11
     return (
         not date_shaped
         and 7 <= len(digits) <= 15
@@ -317,6 +338,7 @@ def normalize_spoken_numbers(text: str) -> str:
     normalized = _NZ_DATE_RE.sub(_replace_date, normalized)
     normalized = _TIME_RE.sub(_replace_time, normalized)
     normalized = _VERSION_RE.sub(_replace_version, normalized)
+    normalized = _TEMPERATURE_RE.sub(_replace_temperature, normalized)
     normalized = _PHONE_SEQUENCE_RE.sub(
         lambda match: _replace_phone_sequence(match, normalized), normalized
     )

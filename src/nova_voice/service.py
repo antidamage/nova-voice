@@ -49,7 +49,13 @@ from nova_voice.interpretation.speech_cues import (
     enforce_speech_cues,
     has_abandonment,
 )
-from nova_voice.memory import MemoryRecord, MemPalaceClient, salient_memory_candidate
+from nova_voice.memory import (
+    MemoryIntentKind,
+    MemoryRecord,
+    MemPalaceClient,
+    classify_memory_intent,
+    salient_memory_candidate,
+)
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.policy import ExecutionPolicy, PolicyOutcome
@@ -787,14 +793,22 @@ class NovaVoiceService:
         # personal context, and a service fault can never delay a normal turn.
         if self.memory is not None and utterance.speaker.status == "recognized":
             memory_text = utterance.transcript.strip()
-            asking_for_memory = bool(
-                re.search(r"\bwhat (?:do|did) you remember\b", memory_text, re.I)
-            )
-            selected_memories = (
-                await self.memory.list(owner_id=utterance.speaker.person_id)
-                if asking_for_memory
-                else await self.memory.search(memory_text, owner_id=utterance.speaker.person_id)
-            )
+            memory_intent = classify_memory_intent(memory_text)
+            if memory_intent.kind == MemoryIntentKind.QUERY_ALL:
+                selected_memories = await self.memory.list(
+                    owner_id=utterance.speaker.person_id
+                )
+            elif memory_intent.kind == MemoryIntentKind.QUERY_TOPIC:
+                selected_memories = await self.memory.search(
+                    memory_intent.query or memory_text,
+                    owner_id=utterance.speaker.person_id,
+                )
+            elif memory_intent.kind == MemoryIntentKind.CONTROL:
+                selected_memories = await self.memory.search(
+                    memory_text, owner_id=utterance.speaker.person_id
+                )
+            else:
+                selected_memories = []
             # Direct spoken pin/forget requests act only on one unambiguous
             # personal match. Ambiguity is left to the dashboard review screen.
             memory_control = re.match(r"^(?:please )?(pin|forget)\s+(.+)$", memory_text, re.I)
@@ -848,6 +862,11 @@ class NovaVoiceService:
                     }
                     for memory in selected_memories
                 ]
+            elif memory_intent.kind in {
+                MemoryIntentKind.QUERY_ALL,
+                MemoryIntentKind.QUERY_TOPIC,
+            }:
+                memory_control_reply = "I don't have a saved memory about that."
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.
@@ -1247,7 +1266,7 @@ class NovaVoiceService:
             turn_machine.record_response("knowledge_fallback", response_text)
         if memory_control_reply is not None:
             response_text = memory_control_reply
-            turn_machine.record_response("memory_control", response_text)
+            turn_machine.record_response("deterministic", response_text)
         # Persist only explicit/salient non-routine memories for a recognized
         # speaker. Sensitive material is intentionally not auto-filed: the
         # owner must use the dashboard confirmation workflow once exposed.
