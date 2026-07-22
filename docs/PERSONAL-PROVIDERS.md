@@ -177,3 +177,18 @@ humour, and storytelling. Deep mode allows up to five substantive sentences;
 normal mode retains the existing sampled three-sentence option and brief mode is
 one short sentence. The renderer receives these controls even when no household
 state is relevant.
+
+## Multi-party dialogue
+
+Every live conversation message already carries the recognized speaker’s name
+and pronouns. `detect_dialogue_routing` now separately classifies explicit
+assistant, known-person, household, and unspecified addressees. A turn prefixed
+with another participant’s name is not allocated to the assistant. Explicit
+“ask person…” and “tell the household…” phrases compile to the local `dialogue`
+provider rather than relying on model inference.
+
+Relay messages preserve sender, person/household audience, ask/tell act, source
+conversation, content, status, and per-person delivery acknowledgements. A
+recognized person can retrieve only messages for their ID/name plus household
+messages they have not acknowledged. Unknown speakers receive no pending relay
+content.

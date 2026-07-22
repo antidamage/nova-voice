@@ -23,6 +23,7 @@ from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import CommunicationManager
 from nova_voice.config import Settings
 from nova_voice.continuity import ConversationContinuityManager
+from nova_voice.dialogue import MultiPartyDialogueManager, detect_dialogue_routing
 from nova_voice.domain import (
     ActiveGoal,
     CapabilityToolCall,
@@ -347,6 +348,7 @@ class NovaVoiceService:
         research: ResearchManager | None = None,
         briefings: BriefingManager | None = None,
         continuity: ConversationContinuityManager | None = None,
+        dialogue: MultiPartyDialogueManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -366,6 +368,7 @@ class NovaVoiceService:
         self.research = research
         self.briefings = briefings
         self.continuity = continuity
+        self.dialogue = dialogue
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -923,6 +926,38 @@ class NovaVoiceService:
                 )
             except Exception:
                 logger.warning("discussion mode retrieval failed", exc_info=True)
+        dialogue_routing = detect_dialogue_routing(
+            utterance.transcript,
+            agent_names=tuple(self._address_words()),
+            participant_names=tuple(
+                dict.fromkeys(
+                    message.speaker_name
+                    for message in (conversation.messages if conversation else ())
+                    if message.speaker_name
+                )
+            ),
+        )
+        if dialogue_routing.addressee != "unspecified":
+            relevant_state["dialogueRouting"] = {
+                "addressee": dialogue_routing.addressee,
+                "targetName": dialogue_routing.target_name,
+                "relayAct": dialogue_routing.relay_act,
+            }
+        if self.dialogue is not None and utterance.speaker.status == "recognized":
+            pending_messages = await self.dialogue.pending_for(
+                person_id=utterance.speaker.person_id or "",
+                display_name=utterance.speaker.display_name,
+            )
+            if pending_messages:
+                relevant_state["pendingDialogueMessages"] = [
+                    {
+                        "id": item.id,
+                        "senderId": item.sender_id,
+                        "speechAct": item.speech_act,
+                        "content": item.content,
+                    }
+                    for item in pending_messages[:5]
+                ]
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.
@@ -1011,12 +1046,50 @@ class NovaVoiceService:
                     ),
                 }
             )
+        elif dialogue_routing.relay_act is not None and dialogue_routing.relay_content:
+            interpretation = interpretation.model_copy(
+                update={
+                    "speech_act": SpeechAct.DIRECTIVE,
+                    "addressed_probability": 1.0,
+                    "decision": Decision.EXECUTE,
+                    "confidence": 1.0,
+                    "actions": [
+                        PlannedAction(
+                            id=f"dialogue-relay:{utterance.id}",
+                            order=0,
+                            call=CapabilityToolCall(
+                                provider="dialogue",
+                                tool="dialogue.relay",
+                                arguments={
+                                    "senderId": utterance.speaker.person_id or "unknown",
+                                    "recipientScope": dialogue_routing.addressee,
+                                    "recipientName": dialogue_routing.target_name,
+                                    "speechAct": dialogue_routing.relay_act,
+                                    "content": dialogue_routing.relay_content,
+                                    "conversationId": conversation.id if conversation else None,
+                                },
+                            ),
+                        )
+                    ],
+                    "response_plan": interpretation.response_plan.model_copy(
+                        update={"requires_post_tool_rendering": True}
+                    ),
+                }
+            )
         interpretation = enforce_decision_consistency(
             utterance,
             interpretation,
             addressed_threshold=self.settings.active_addressed_threshold,
             wake_words=self._address_words(),
         )
+        if dialogue_routing.addressee == "person" and dialogue_routing.relay_act is None:
+            interpretation = interpretation.model_copy(
+                update={
+                    "decision": Decision.IGNORE,
+                    "addressed_probability": 0.0,
+                    "actions": [],
+                }
+            )
         # Identity claims are bound only to the biometric template extracted
         # from this exact addressed utterance. Never inherit a prior speaker
         # merely because the household-wide conversation remains open.

@@ -136,6 +136,12 @@ class ResearchState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class DialogueMessageState(StrEnum):
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -190,6 +196,29 @@ class RelationshipContinuityRecord(DurableModel):
             raise ValueError("callback topic ids must be unique")
         if len(set(self.provenance_conversation_ids)) != len(self.provenance_conversation_ids):
             raise ValueError("relationship provenance ids must be unique")
+        return self
+
+
+class DialogueMessageRecord(DurableModel):
+    sender_id: str
+    recipient_scope: Literal["person", "household"]
+    recipient_id: str | None = None
+    recipient_name: str | None = None
+    speech_act: Literal["tell", "ask"]
+    content: str = Field(min_length=1, max_length=2000)
+    source_conversation_id: str | None = None
+    status: DialogueMessageState = DialogueMessageState.PENDING
+    delivered_to: tuple[str, ...] = ()
+    delivered_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_dialogue_message(self) -> DialogueMessageRecord:
+        if self.recipient_scope == "person" and not (self.recipient_id or self.recipient_name):
+            raise ValueError("person relay requires a recipient")
+        if self.delivered_at is not None and self.delivered_at.utcoffset() is None:
+            raise ValueError("dialogue delivery time must be timezone-aware")
+        if len(set(self.delivered_to)) != len(self.delivered_to):
+            raise ValueError("dialogue delivery recipients must be unique")
         return self
 
 

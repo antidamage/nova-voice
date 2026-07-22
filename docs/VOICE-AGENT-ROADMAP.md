@@ -306,7 +306,7 @@
     resurfacing, and conversation-specific speaking style without fabricated recollection (`T3-01`).
   - [x] **T3-03 — Add long-form discussion mode.** Support user-controlled depth, deliberate pauses, clarification, reflective
     listening, disagreement, humour, and storytelling (`T0-05`, `T3-01`).
-  - [ ] **T3-04 — Add multi-party dialogue.** Implement speaker-attributed history, addressee detection, turn allocation, and “ask
+  - [x] **T3-04 — Add multi-party dialogue.** Implement speaker-attributed history, addressee detection, turn allocation, and “ask
     Addie”/“tell the household” semantics (`T3-01`).
   - [ ] **T3-05 — Enforce private/shared memory boundaries.** Apply participant/audience policy to every retrieval, write, callback,
     correction, export, and forget operation (`T1-07`, `T1-11`, `T3-04`).

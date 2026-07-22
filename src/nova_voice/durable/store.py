@@ -20,6 +20,7 @@ from nova_voice.durable.models import (
     ConversationRecord,
     ConversationTopicRecord,
     DelegationGrantRecord,
+    DialogueMessageRecord,
     DurableModel,
     EventRecord,
     EventSubscriptionRecord,
@@ -48,6 +49,7 @@ Record = (
     | ConversationTopicRecord
     | CommitmentRecord
     | DelegationGrantRecord
+    | DialogueMessageRecord
     | EventRecord
     | EventSubscriptionRecord
     | ExecutionRecord
@@ -73,6 +75,7 @@ _RECORD_TYPES: dict[str, type[Record]] = {
         ConversationTopicRecord,
         CommitmentRecord,
         DelegationGrantRecord,
+        DialogueMessageRecord,
         EventRecord,
         EventSubscriptionRecord,
         ExecutionRecord,

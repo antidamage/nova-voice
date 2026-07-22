@@ -13,6 +13,7 @@ from nova_voice.communications import (
 )
 from nova_voice.config import Settings
 from nova_voice.continuity import ConversationContinuityManager
+from nova_voice.dialogue import MultiPartyDialogueManager
 from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
@@ -24,6 +25,7 @@ from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.briefings.provider import BriefingsProvider
 from nova_voice.providers.commitments.provider import CommitmentsProvider
 from nova_voice.providers.communications.provider import CommunicationsProvider
+from nova_voice.providers.dialogue.provider import DialogueProvider
 from nova_voice.providers.icloud.client import ICloudCalDAVClient
 from nova_voice.providers.icloud.provider import ICloudProvider
 from nova_voice.providers.library.provider import HouseholdLibraryProvider
@@ -92,6 +94,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "commitments",
             "research",
             "briefings",
+            "dialogue",
         }
     )
     registry.register(nova_provider)
@@ -99,6 +102,8 @@ def build_service(settings: Settings) -> NovaVoiceService:
     personal_store = PersonalDataStore(settings.personal_data_path)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
     continuity = ConversationContinuityManager(durable_store)
+    dialogue = MultiPartyDialogueManager(durable_store)
+    registry.register(DialogueProvider(dialogue))
     registry.register(PersonalDataProvider(personal_store))
     registry.register(HouseholdLibraryProvider(personal_store))
     delivery_transport = (
@@ -209,4 +214,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         research=research,
         briefings=briefings,
         continuity=continuity,
+        dialogue=dialogue,
     )
