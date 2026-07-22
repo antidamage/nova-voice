@@ -132,6 +132,7 @@ class MemoryPalace:
 
         records = await self.list()
         groups: dict[tuple[str | None, str, str], list[MemoryRecord]] = {}
+        subject_groups: dict[tuple[str | None, str, str], set[str]] = {}
         for record in records:
             if record.status != MemoryStatus.ACTIVE:
                 continue
@@ -141,6 +142,10 @@ class MemoryPalace:
                 " ".join(record.text.casefold().split()),
             )
             groups.setdefault(key, []).append(record)
+            subject = " ".join(record.text.casefold().split()[:3])
+            subject_groups.setdefault(
+                (record.owner_id, record.memory_type.value, subject), set()
+            ).add(" ".join(record.text.casefold().split()))
         merged = 0
         for duplicates in groups.values():
             if len(duplicates) < 2:
@@ -158,7 +163,10 @@ class MemoryPalace:
                     )
                 )
                 merged += 1
-        return {"merged": merged, "conflicts": 0, "proceduresProposed": 0}
+        # Similar subject text with distinct claims is a review signal only;
+        # policies/procedures are never rewritten automatically.
+        conflicts = sum(1 for values in subject_groups.values() if len(values) > 1)
+        return {"merged": merged, "conflicts": conflicts, "proceduresProposed": 0}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

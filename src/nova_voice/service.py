@@ -8,7 +8,7 @@ import random
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 from nova_voice.affectations import apply_affectations
@@ -756,6 +756,7 @@ class NovaVoiceService:
         if conversation is None:
             self._zero_render_temperature_scopes.discard(scope)
         goal = self.sessions.active_goal(utterance.room_id, utterance.ended_at)
+        memory_control_reply: str | None = None
         context_started = time.perf_counter()
         if prefetch is not None and prefetch.compatible_with(utterance.transcript):
             relevant_state = copy.deepcopy(prefetch.context)
@@ -791,16 +792,46 @@ class NovaVoiceService:
             # Direct spoken pin/forget requests act only on one unambiguous
             # personal match. Ambiguity is left to the dashboard review screen.
             memory_control = re.match(r"^(?:please )?(pin|forget)\s+(.+)$", memory_text, re.I)
-            if memory_control and len(selected_memories) == 1:
+            correction = re.match(r"^(?:please )?correct memory (.+?) to (.+)$", memory_text, re.I)
+            expiry = re.match(
+                r"^(?:please )?expire memory (.+?) in (\d{1,3}) days?$", memory_text, re.I
+            )
+            if correction:
+                selected_memories = await self.memory.search(
+                    correction.group(1), owner_id=utterance.speaker.person_id
+                )
+                if len(selected_memories) == 1:
+                    result = await self.memory.request(
+                        "PATCH",
+                        f"/v1/memories/{selected_memories[0].id}",
+                        {"text": correction.group(2).strip()},
+                    )
+                    memory_control_reply = "Corrected." if result is not None else None
+            elif expiry:
+                selected_memories = await self.memory.search(
+                    expiry.group(1), owner_id=utterance.speaker.person_id
+                )
+                if len(selected_memories) == 1:
+                    expires_at = datetime.now(UTC) + timedelta(days=int(expiry.group(2)))
+                    result = await self.memory.request(
+                        "PATCH",
+                        f"/v1/memories/{selected_memories[0].id}",
+                        {"expires_at": expires_at.isoformat()},
+                    )
+                    memory_control_reply = "Expiry set." if result is not None else None
+            elif memory_control and len(selected_memories) == 1:
                 action, _ = memory_control.groups()
                 memory_id = selected_memories[0].id
                 if action.casefold() == "forget":
-                    await self.memory.request("DELETE", f"/v1/memories/{memory_id}")
-                    selected_memories = []
+                    result = await self.memory.request("DELETE", f"/v1/memories/{memory_id}")
+                    if result is not None:
+                        selected_memories = []
+                        memory_control_reply = "Forgot it."
                 else:
-                    await self.memory.request(
+                    result = await self.memory.request(
                         "PATCH", f"/v1/memories/{memory_id}", {"pinned": True}
                     )
+                    memory_control_reply = "Pinned." if result is not None else None
             if selected_memories:
                 relevant_state["selectedMemory"] = [
                     {
@@ -1208,6 +1239,9 @@ class NovaVoiceService:
                 3,
             )
             turn_machine.record_response("knowledge_fallback", response_text)
+        if memory_control_reply is not None:
+            response_text = memory_control_reply
+            turn_machine.record_response("memory_control", response_text)
         # Persist only explicit/salient non-routine memories for a recognized
         # speaker. Sensitive material is intentionally not auto-filed: the
         # owner must use the dashboard confirmation workflow once exposed.
