@@ -5,7 +5,7 @@
   Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, and 421 passing tests.
+  routing, short-lived context, diagnostics, and 427 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -21,8 +21,9 @@
     interruption recovery, and stable read-only prefetch on the authoritative
     final transcript; live household tuning and acceptance evidence remain.
 
-  - Most coverage is mocked/unit-level; recorded-audio replay, household simulation, endurance, false-activation, and long-running-task
-    evaluation remain incomplete.
+  - Deterministic recorded-audio replay and fake-clock household simulation are
+    available; the full household corpus, endurance, false-activation shadowing,
+    and long-running-task evaluation remain incomplete.
 
   - Runtime documentation now matches the deployed 60-second default, supported browser microphone paths, Iridium/Nova topology, and
     final-buffer STT/incremental-PCM TTS limits. Live latency, replay, physical-audio, residency, and endurance acceptance evidence is
@@ -155,7 +156,8 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 11 of 58 tasks complete. Next task: **T0-12**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 13 of 58 tasks complete. Next task: **OPS-01** (dependency for
+  `M0-06`).
 
   ### Milestone decision map
 
@@ -164,8 +166,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 4 of 26 complete. Ready to choose now: **M0-05 Reproducible household simulation** or **M1-01 Durable goal and
-  plan engine**.
+  Milestone progress: 5 of 26 complete. Ready to choose now: **MOPS-01 Reproducible observability and evaluation** or **M1-01 Durable
+  goal and plan engine**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -173,7 +175,7 @@
   | **Complete** | **M0-02 — Traceable foreground turns** | Every foreground turn runs through explicit stages with a complete immutable trace and safe cancellation semantics. | `T0-02`–`T0-04` | None |
   | **Complete** | **M0-03 — Natural turn-taking** | Nova detects semantic turn completion, handles interruptions/backchannels, prefetches safely, and streams cancellable speech. | `T0-05`–`T0-09` | `M0-02` |
   | **Complete** | **M0-04 — Knowledge and speech reliability** | Knowledge gaps recover through one safe web lookup and numbers are spoken contextually. | `T0-10`–`T0-11` | None |
-  | Ready | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
+  | **Complete** | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
   | Blocked | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
   | Ready | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | Blocked | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
@@ -193,7 +195,7 @@
   | Blocked | **M4-02 — Household digital twin** | Nova simulates household behavior, explains causes, rehearses automation, and evaluates energy scenarios. | `T4-03` | `M1-05` |
   | Blocked | **M4-03 — Visual assistance and continuity** | Visual help, object/location context, maintenance walkthroughs, and cross-device continuity obey memory policy. | `T4-04` | `M1-04`, `M4-01`, `M4-02` |
   | Blocked | **M4-04 — Frontier capabilities accepted** | Offline optimizers pass their safety/evaluation gate while the production speech path remains cascade-based. | `T4-05` | `M4-01`–`M4-03`, `MOPS-01` |
-  | Blocked | **MOPS-01 — Reproducible observability and evaluation** | Redacted telemetry, pinned replay, the evaluation registry, and deterministic/model graders support release decisions. | `OPS-01`–`OPS-03` | `M0-02`, `M0-05` |
+  | Ready | **MOPS-01 — Reproducible observability and evaluation** | Redacted telemetry, pinned replay, the evaluation registry, and deterministic/model graders support release decisions. | `OPS-01`–`OPS-03` | `M0-02`, `M0-05` |
   | Blocked | **MOPS-02 — Continuous validation and staged rollout** | Nightly regression/consolidation and fixture-to-autonomy promotion run with revocation and rollback. | `OPS-04`–`OPS-05` | `M1-04`, `MOPS-01` |
 
   ### Tier 0 task queue — dependable real-time core
@@ -220,9 +222,9 @@
     with operational/local/permission/social/unaddressed exclusions and non-recursive failure handling.
   - [x] **T0-11 — Add context-aware spoken-number normalization.** Deterministic TTS-boundary handling for years, ordinals, counts,
     addresses, rooms, phones, dates, times, currency, versions, and IPs is deployed while canonical response text remains unchanged.
-  - [ ] **T0-12 — Build recorded-audio replay.** Create a deterministic runner for saved far-field, echo, interruption, disfluency, and
+  - [x] **T0-12 — Build recorded-audio replay.** Create a deterministic runner for saved far-field, echo, interruption, disfluency, and
     false-activation samples with pinned expected traces and latency measurements (`T0-02`).
-  - [ ] **T0-13 — Build the fake-clock household simulator.** Add deterministic providers, delayed state convergence, failures,
+  - [x] **T0-13 — Build the fake-clock household simulator.** Add deterministic providers, delayed state convergence, failures,
     occupancy, concurrent speakers, and repeatable time/event control (`T0-03`).
   - [ ] **T0-14 — Build live latency and endurance runners.** Measure endpoint, first audio, queue depth, interruption recovery,
     resource residency, and duplicate-mutation invariants over sustained runs (`T0-08`, `OPS-01`).
@@ -468,7 +470,7 @@
 
   ## Test and Acceptance Plan
 
-  - Preserve the 421-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
+  - Preserve the 427-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
   - Build a virtual household with fake time, occupancy, HA entities, calendars, communications, failures, delayed state convergence,
     and concurrent speakers.
 
