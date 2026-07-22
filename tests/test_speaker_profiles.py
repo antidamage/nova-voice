@@ -7,7 +7,7 @@ import numpy as np
 from nova_voice.api import create_app
 from nova_voice.config import Settings
 from nova_voice.domain import SelfProfileUpdate
-from nova_voice.speaker_profiles import SpeakerProfileStore
+from nova_voice.speaker_profiles import SpeakerProfileStore, SpeakerSpeechPreferences
 
 
 def embedding(*values: float) -> np.ndarray:
@@ -191,6 +191,32 @@ def test_recognized_person_updates_metadata_directly(tmp_path) -> None:
     )
     assert updated.status == "recognized"
     assert updated.pronouns == "she/they"
+
+
+def test_speech_preferences_persist_with_recognized_person(tmp_path) -> None:
+    store = SpeakerProfileStore(tmp_path / "voice.sqlite3", activation_samples=1)
+    store.initialize_sync()
+    identity = store.apply_disclosure_sync(
+        store.recognize_sync(embedding(1, 0, 0)),
+        SelfProfileUpdate(name="Addie", evidence="my name is Addie"),
+        "my name is Addie",
+    )
+    preferences = SpeakerSpeechPreferences(
+        language="French",
+        speech_rate=85,
+        delivery_mode="whisper",
+        accessibility_pacing=True,
+        pronunciations={"Ngā": "Ngar"},
+    )
+
+    assert store.update_person_sync(
+        identity.person_id or "",
+        display_name=None,
+        pronouns=None,
+        speech_preferences=preferences,
+    )
+    assert store.speech_preferences_sync(identity.person_id or "") == preferences
+    assert store.list_profiles_sync()["profiles"][0]["speechPreferences"]["speech_rate"] == 85
 
 
 def test_disclosure_requires_verbatim_current_turn_evidence(tmp_path) -> None:

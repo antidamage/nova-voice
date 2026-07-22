@@ -11,9 +11,11 @@ from nova_voice.domain import (
     SpeechAct,
 )
 from nova_voice.speech_normalization import (
+    apply_pronunciation_dictionary,
     integer_to_words,
     normalize_spoken_numbers,
     ordinal_to_words,
+    spoken_language_for_text,
 )
 
 
@@ -74,6 +76,19 @@ def test_dates_times_decimals_currency_versions_and_network_addresses() -> None:
 def test_urls_and_email_addresses_are_not_rewritten() -> None:
     text = "Visit https://example.com/2026 or email room105@example.com."
     assert normalize_spoken_numbers(text) == text
+
+
+def test_pronunciation_dictionary_is_token_bounded_and_protects_links() -> None:
+    text = "Ngā mihi from Nova at https://nova.example/Ngā."
+    assert apply_pronunciation_dictionary(text, {"Ngā": "Ngar", "Nova": "No-vah"}) == (
+        "Ngar mihi from No-vah at https://nova.example/Ngā."
+    )
+
+
+def test_spoken_language_uses_auto_for_code_switching() -> None:
+    assert spoken_language_for_text("Bonjour Addie", "French") == "French"
+    assert spoken_language_for_text("Hello こんにちは", "English") == "Auto"
+    assert spoken_language_for_text("Привет", "Auto") == "Russian"
 
 
 class _RuntimeStt:

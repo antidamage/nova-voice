@@ -51,7 +51,12 @@ from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService
-from nova_voice.speech_normalization import normalize_spoken_numbers
+from nova_voice.speaker_profiles import SpeakerSpeechPreferences
+from nova_voice.speech_normalization import (
+    apply_pronunciation_dictionary,
+    normalize_spoken_numbers,
+    spoken_language_for_text,
+)
 from nova_voice.turns import ForegroundTurnStateMachine, TaskCancellationDecision
 from nova_voice.voice_settings import VoiceSettings
 
@@ -364,6 +369,8 @@ class SatelliteAudioRuntime:
         # instructions (see nova_voice.audio.pitch).
         self._pitch_percent = 0
         self._configured_speech_rate = 100
+        self._configured_speaker = "Ryan"
+        self._configured_language = "English"
         self._configured_emotion_mirroring = 0
         # Playback volume (percent) by time of day, applied as DSP gain on
         # response PCM before the echo guard and the satellite sink.
@@ -778,6 +785,8 @@ class SatelliteAudioRuntime:
             speaker=settings.speaker.value,
             language=settings.language.value,
         )
+        self._configured_speaker = settings.speaker.value
+        self._configured_language = settings.language.value
         self._pitch_percent = settings.pitch
         self._configured_speech_rate = settings.speech_rate
         self._configured_emotion_mirroring = settings.emotion_mirroring
@@ -1729,9 +1738,34 @@ class SatelliteAudioRuntime:
         tts_first_chunk_ms = 0.0
         text_ready_at: float | None = None
         speech_cancelled = False
-        spoken_response_text = (
-            normalize_spoken_numbers(result.response_text) if result.response_text else None
-        )
+        speech_preferences = SpeakerSpeechPreferences()
+        if (
+            result.speaker is not None
+            and result.speaker.status == "recognized"
+            and result.speaker.person_id
+            and self._speaker_recognizer is not None
+        ):
+            try:
+                speech_preferences = await self._speaker_recognizer.store.speech_preferences(
+                    result.speaker.person_id
+                )
+            except Exception:
+                logger.warning("speaker speech preferences unavailable", exc_info=True)
+        spoken_response_text = None
+        spoken_language = self._configured_language
+        if result.response_text:
+            pronounced = apply_pronunciation_dictionary(
+                result.response_text, speech_preferences.pronunciations
+            )
+            spoken_response_text = normalize_spoken_numbers(pronounced)
+            preferred_language = (
+                speech_preferences.language.value
+                if speech_preferences.language.value != "Auto"
+                else self._configured_language
+            )
+            spoken_language = spoken_language_for_text(
+                spoken_response_text, preferred_language
+            )
         if not result.response_text:
             logger.info(
                 "audio turn timing satellite=%s room=%s stt_ms=%s service_ms=%s total_ms=%s",
@@ -1747,6 +1781,23 @@ class SatelliteAudioRuntime:
             instruction = (
                 result.response_tone_instruction or "Natural conversational delivery."
             )
+            delivery_mode = speech_preferences.delivery_mode
+            local_hour = datetime.now(self._playback_timezone).hour
+            night = not (DAY_VOLUME_START_HOUR <= local_hour < NIGHT_VOLUME_START_HOUR)
+            if delivery_mode == "whisper" or (delivery_mode == "auto" and night):
+                instruction += " Use a soft, close, quiet near-whisper while staying intelligible."
+            if speech_preferences.accessibility_pacing:
+                instruction += " Use clear accessibility pacing with deliberate word boundaries."
+            if speech_preferences.speech_rate != 100:
+                instruction += (
+                    f" Speak at {speech_preferences.speech_rate} percent of natural pace."
+                )
+            configure_tts = getattr(self.tts, "configure", None)
+            if callable(configure_tts):
+                await configure_tts(
+                    speaker=self._configured_speaker,
+                    language=spoken_language,
+                )
             instruction_revision = hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:16]
             if self._echo_guard is not None:
                 self._echo_guard.note_response_text(scope_id, spoken_response_text)

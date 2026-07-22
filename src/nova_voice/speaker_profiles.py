@@ -6,11 +6,37 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 import numpy as np
+from pydantic import BaseModel, Field, field_validator
 
 from nova_voice.domain import SelfProfileUpdate, SpeakerIdentity
+from nova_voice.voice_settings import VoiceLanguage
+
+
+class SpeakerSpeechPreferences(BaseModel):
+    language: VoiceLanguage = VoiceLanguage.AUTO
+    speech_rate: int = Field(default=100, ge=70, le=130)
+    delivery_mode: Literal["auto", "normal", "whisper"] = "auto"
+    accessibility_pacing: bool = False
+    pronunciations: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("pronunciations", mode="before")
+    @classmethod
+    def clean_pronunciations(cls, value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        cleaned: dict[str, str] = {}
+        for raw, spoken in list(value.items())[:64]:
+            if not isinstance(raw, str) or not isinstance(spoken, str):
+                continue
+            source = " ".join(raw.split()).strip()
+            replacement = " ".join(spoken.split()).strip()
+            if source and replacement and len(source) <= 80 and len(replacement) <= 120:
+                cleaned[source] = replacement
+        return cleaned
 
 
 def _name_key(value: str) -> str:
@@ -176,6 +202,7 @@ class SpeakerProfileStore:
                     display_name TEXT NOT NULL,
                     name_key TEXT NOT NULL,
                     pronouns TEXT,
+                    speech_preferences TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -201,6 +228,14 @@ class SpeakerProfileStore:
                     ON speaker_templates(expires_at);
                 """
             )
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(speaker_people)")
+            }
+            if "speech_preferences" not in columns:
+                connection.execute(
+                    "ALTER TABLE speaker_people ADD COLUMN speech_preferences "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self.initialize_sync)
@@ -598,6 +633,9 @@ class SpeakerProfileStore:
                     "id": row["id"],
                     "displayName": row["display_name"],
                     "pronouns": row["pronouns"],
+                    "speechPreferences": SpeakerSpeechPreferences.model_validate_json(
+                        row["speech_preferences"] or "{}"
+                    ).model_dump(mode="json"),
                     "createdAt": row["created_at"],
                     "updatedAt": row["updated_at"],
                     "templates": by_person.get(row["id"], []),
@@ -611,7 +649,12 @@ class SpeakerProfileStore:
         return await asyncio.to_thread(self.list_profiles_sync)
 
     def update_person_sync(
-        self, person_id: str, *, display_name: str | None, pronouns: str | None
+        self,
+        person_id: str,
+        *,
+        display_name: str | None,
+        pronouns: str | None,
+        speech_preferences: SpeakerSpeechPreferences | None = None,
     ) -> bool:
         with self._connect() as connection:
             person = self._person(connection, person_id)
@@ -619,16 +662,23 @@ class SpeakerProfileStore:
                 return False
             name = _clean(display_name) or person["display_name"]
             selected_pronouns = _clean(pronouns) if pronouns is not None else person["pronouns"]
+            selected_preferences = (
+                speech_preferences.model_dump_json()
+                if speech_preferences is not None
+                else person["speech_preferences"]
+            )
             connection.execute(
                 """
                 UPDATE speaker_people
-                SET display_name = ?, name_key = ?, pronouns = ?, updated_at = ?
+                SET display_name = ?, name_key = ?, pronouns = ?, speech_preferences = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     name,
                     _name_key(name),
                     selected_pronouns,
+                    selected_preferences,
                     datetime.now(UTC).isoformat(),
                     person_id,
                 ),
@@ -636,7 +686,12 @@ class SpeakerProfileStore:
             return True
 
     async def update_person(
-        self, person_id: str, *, display_name: str | None, pronouns: str | None
+        self,
+        person_id: str,
+        *,
+        display_name: str | None,
+        pronouns: str | None,
+        speech_preferences: SpeakerSpeechPreferences | None = None,
     ) -> bool:
         async with self._lock:
             return await asyncio.to_thread(
@@ -644,7 +699,23 @@ class SpeakerProfileStore:
                 person_id,
                 display_name=display_name,
                 pronouns=pronouns,
+                speech_preferences=speech_preferences,
             )
+
+    def speech_preferences_sync(self, person_id: str) -> SpeakerSpeechPreferences:
+        with self._connect() as connection:
+            person = self._person(connection, person_id)
+            if person is None:
+                return SpeakerSpeechPreferences()
+            try:
+                return SpeakerSpeechPreferences.model_validate_json(
+                    person["speech_preferences"] or "{}"
+                )
+            except ValueError:
+                return SpeakerSpeechPreferences()
+
+    async def speech_preferences(self, person_id: str) -> SpeakerSpeechPreferences:
+        return await asyncio.to_thread(self.speech_preferences_sync, person_id)
 
     def delete_person_sync(self, person_id: str) -> bool:
         with self._connect() as connection:
