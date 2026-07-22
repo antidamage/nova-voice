@@ -324,7 +324,7 @@
     privacy and retention policy (`T4-01`).
   - [x] **T4-03 — Build the household digital twin.** Support simulation, causal explanations, automation rehearsal, energy
     optimization, and “what would happen if…” queries (`T1-14`, `T1-15`).
-  - [ ] **T4-04 — Add visual assistance and object/location continuity.** Provide maintenance walkthroughs, proactive visual help, and
+  - [x] **T4-04 — Add visual assistance and object/location continuity.** Provide maintenance walkthroughs, proactive visual help, and
     cross-device context without silently creating sensitive memories (`T1-12`, `T4-02`, `T4-03`).
   - [ ] **T4-05 — Add offline optimizer workers and pass the Tier 4 gate.** Run bounded research/automation/memory/plan evaluators off
     the speech path; compare duplex models only as evaluation targets and retain the cascade runtime (`OPS-03`, `T4-01` through

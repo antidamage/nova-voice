@@ -111,6 +111,25 @@ class LocalMultimodalInputProvider(MultimodalProvider):
             raise ValueError("camera content must use granted acquisition")
         return await self._persist(request, content, mime_type)
 
+    async def get_asset(self, asset_id: str) -> MultimodalAsset | None:
+        if not re.fullmatch(r"asset-[0-9a-f]{32}", asset_id):
+            return None
+        if not self.root.exists():
+            return None
+        matches = list(self.root.glob(f"{asset_id}.*.json"))
+        if len(matches) != 1:
+            return None
+        try:
+            asset = MultimodalAsset.model_validate_json(
+                await asyncio.to_thread(matches[0].read_text, encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        if asset.permission.retain_until and asset.permission.retain_until <= datetime.now(UTC):
+            await self.purge_expired()
+            return None
+        return asset
+
     async def acquire(self, request: MultimodalRequest) -> MultimodalAsset:
         match = re.fullmatch(
             r"camera://([A-Za-z0-9_-]{1,64})/snapshots/([A-Za-z0-9_-]{1,120})",
