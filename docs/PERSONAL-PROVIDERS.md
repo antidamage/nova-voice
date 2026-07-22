@@ -66,3 +66,23 @@ Recognized household members receive only `library.search_shared` by default,
 while private reads and every write require owner authority or an explicit
 grant. Writes are revisioned, resource-locked, retry-safe, and return the same
 conflict-safe undo tokens as notes, lists, and contacts.
+
+## Draft-first communications
+
+Email, messages, and invitations use a separate `communications` provider and
+database. Voice may resolve one contact and create or preview a draft, but the
+immediate voice executor cannot send: `communications.send` is a confirmation
+policy and is therefore blocked on that path. The authenticated Voice API must
+preview the exact draft revision, return a random one-time approval token to the
+Dashboard, and receive that token back in a separate send request.
+
+Only a contact with exactly one address for the selected channel is accepted.
+The approval token is stored as a hash, bound to the draft revision, consumed
+before the delivery call, and cannot be replayed. Success requires a delivery
+receipt from the owner-operated bridge. Failed delivery is retained as failure,
+not reported as sent. Pending drafts and delivered invitations/messages can be
+cancelled when the bridge verifies cancellation. Draft, preview, authorization,
+delivery, failure, and cancellation transitions are append-only audited.
+
+With no bridge configured, drafting remains available and health reports
+`configured: false`; external delivery fails closed.

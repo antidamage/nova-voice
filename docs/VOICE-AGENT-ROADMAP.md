@@ -284,7 +284,7 @@
     (`T2-01`).
   - [x] **T2-03 — Add weather, media, recipes, documents, and household knowledge providers.** Keep replaceable contracts, citations,
     privacy boundaries, and read/write classification (`T2-02`).
-  - [ ] **T2-04 — Add email, messages, and invitations.** Require draft/preview, recipient validation, explicit send authority, delivery
+  - [x] **T2-04 — Add email, messages, and invitations.** Require draft/preview, recipient validation, explicit send authority, delivery
     verification, cancellation, and audit (`T1-08`, `T2-02`).
   - [ ] **T2-05 — Add travel, shopping, bookings, finance, and purchase providers.** Enforce recipient/amount validation, standing
     budgets, confirmation boundaries, and compensating cancellation (`T2-04`).
