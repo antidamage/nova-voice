@@ -294,7 +294,8 @@
     results plus Dashboard detail (`T1-04`, `T2-03`).
   - [x] **T2-08 — Implement briefings and subscriptions.** Add morning/evening briefings, schedule conflicts, preparation prompts, and
     “tell me when…” event subscriptions (`T1-06`, `T2-06`).
-  - [ ] **T2-09 — Pass the Tier 2 gate.** Complete multi-day restart scenarios, timezone tests, recipient/amount verification,
+  - [~] **T2-09 — Pass the Tier 2 gate.** The fail-closed structural evidence harness is implemented; final owner acceptance remains
+    deferred to the consolidated acceptance pass. Complete multi-day restart scenarios, timezone tests, recipient/amount verification,
     external-effect audits, and visible cancellation/undo (`T2-01` through `T2-08`).
 
   ### Tier 3 task queue — conversational depth and continuity

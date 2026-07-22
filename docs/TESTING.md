@@ -232,6 +232,20 @@ Automated suites may produce the structural evidence, but owner acceptance is
 recorded separately at the final consolidated acceptance pass. Deferring that
 manual pass never changes a failed result into a pass.
 
+## Tier 2 acceptance gate
+
+`evaluate_tier2_gate` requires one unique, content-addressed evidence artifact
+for each of multi-day restart continuity, timezone correctness, recipient
+verification, amount verification, external-effect audit completeness, and
+visible cancellation/undo. Missing, duplicated, or failed evidence fails
+closed. Duplicate external effects, unverified recipients, amount mismatches,
+unaudited external effects, and invisible cancellation/undo each have explicit
+zero-tolerance counters.
+
+As with earlier tiers, automated suites establish structural evidence. The
+physical and subjective owner pass remains separate and deferred; no harness
+result fabricates that evidence.
+
 ## Wake, duplicate, and echo gates
 
 - tune Beemo on real rooms; target false accepts <=0.2/hour and false reject <=5%
