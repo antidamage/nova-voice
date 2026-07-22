@@ -109,6 +109,16 @@ class ProactiveInterventionState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class AutomationState(StrEnum):
+    DRAFT = "draft"
+    SIMULATED = "simulated"
+    APPROVED = "approved"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    ROLLED_BACK = "rolled_back"
+    FAILED = "failed"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -271,6 +281,19 @@ class ProactiveInterventionRecord(DurableModel):
     feedback: Literal["accepted", "dismissed", "redundant", "annoying"] | None = None
     delivered_at: datetime | None = None
     feedback_at: datetime | None = None
+
+
+class AutomationRecord(DurableModel):
+    owner_id: str
+    summary: str
+    trigger: dict[str, Any] = Field(default_factory=dict)
+    proposed_actions: tuple[dict[str, Any], ...] = ()
+    simulation: dict[str, Any] | None = None
+    state: AutomationState = AutomationState.DRAFT
+    approval_id: str | None = None
+    activated_at: datetime | None = None
+    rolled_back_at: datetime | None = None
+    monitor_failures: int = Field(default=0, ge=0)
 
 
 class MemoryReferenceRecord(DurableModel):

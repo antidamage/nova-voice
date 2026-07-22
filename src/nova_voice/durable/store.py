@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from nova_voice.durable.models import (
     AuditRecord,
+    AutomationRecord,
     ConversationRecord,
     DelegationGrantRecord,
     DurableModel,
@@ -33,6 +34,7 @@ from nova_voice.durable.models import (
 
 Record = (
     AuditRecord
+    | AutomationRecord
     | ConversationRecord
     | DelegationGrantRecord
     | EventRecord
@@ -50,6 +52,7 @@ _RECORD_TYPES: dict[str, type[Record]] = {
     model.__name__: model
     for model in (
         AuditRecord,
+        AutomationRecord,
         ConversationRecord,
         DelegationGrantRecord,
         EventRecord,

@@ -2,6 +2,7 @@
 
 from nova_voice.durable.models import (
     AuditRecord,
+    AutomationRecord,
     ConversationRecord,
     DelegationGrantRecord,
     EventRecord,
@@ -17,6 +18,7 @@ from nova_voice.durable.store import DurableAgentStore
 
 __all__ = [
     "AuditRecord",
+    "AutomationRecord",
     "ConversationRecord",
     "DelegationGrantRecord",
     "DurableAgentStore",
