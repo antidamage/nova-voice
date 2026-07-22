@@ -88,6 +88,23 @@ class HouseholdAuthority:
             return HouseholdRole.RECOGNIZED_HOUSEHOLD
         return HouseholdRole.GUEST
 
+    def role_for_person(self, person_id: str) -> HouseholdRole | None:
+        """Return an explicitly assigned active role for an administrative actor.
+
+        A dashboard/API caller is not a speaker-recognition result, so it must
+        never inherit the permissive recognised-household default.  Sensitive
+        administration flows use this method to require a persisted owner
+        assignment.
+        """
+
+        assigned = self._identities.get(person_id)
+        if assigned is None or not assigned.active:
+            return None
+        return assigned.role
+
+    def is_owner(self, person_id: str) -> bool:
+        return self.role_for_person(person_id) == HouseholdRole.OWNER
+
     def _schedule_allows(self, grant: DelegationGrantRecord, now: datetime) -> bool:
         schedule = grant.schedule
         if schedule is None:

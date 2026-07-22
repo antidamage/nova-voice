@@ -115,3 +115,15 @@ async def test_roles_and_grants_reload_from_durable_store(tmp_path) -> None:
     )
     assert outcome.allowed
     assert outcome.grant_ids == ("grant-1",)
+
+
+async def test_administrative_owner_lookup_requires_an_explicit_assignment(tmp_path) -> None:
+    value = await authority(tmp_path)
+
+    assert value.role_for_person("addie") is None
+    assert not value.is_owner("addie")
+
+    await value.set_role("addie", HouseholdRole.OWNER, actor_id="dashboard-admin")
+
+    assert value.role_for_person("addie") == HouseholdRole.OWNER
+    assert value.is_owner("addie")

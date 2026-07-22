@@ -53,6 +53,7 @@ from nova_voice.memory import MemoryRecord, MemPalaceClient, salient_memory_cand
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.policy import ExecutionPolicy, PolicyOutcome
+from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.providers.nova.provider import NovaProvider
@@ -326,6 +327,7 @@ class NovaVoiceService:
         event_consumer: HouseholdEventConsumer | None = None,
         authority: HouseholdAuthority | None = None,
         automations: AutomationManager | None = None,
+        proactive: ProactiveInterventionEngine | None = None,
         memory: MemPalaceClient | None = None,
     ) -> None:
         self.settings = settings
@@ -338,6 +340,7 @@ class NovaVoiceService:
         self.event_consumer = event_consumer
         self.authority = authority
         self.automations = automations
+        self.proactive = proactive
         self.memory = memory
         self.speaker_profiles = speaker_profiles
         self.persona = persona

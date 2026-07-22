@@ -110,5 +110,6 @@ def build_service(settings: Settings) -> NovaVoiceService:
         event_consumer=event_consumer,
         authority=authority,
         automations=automations,
+        proactive=proactive,
         memory=memory,
     )
