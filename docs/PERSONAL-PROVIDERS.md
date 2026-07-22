@@ -169,3 +169,11 @@ explicit phrases such as “I prefer…” or “keep it brief”; it does not i
 preference from one-off behavior. Before an addressed turn, topic-word overlap
 selects relevant callbacks and open questions with source IDs for the model’s
 context. Unknown speakers receive none of this context.
+
+Long-form discussion controls are scoped to the durable conversation rather
+than global personality. Explicit phrases select brief/normal/deep depth,
+deliberate clause pacing, reflective listening, candid/supportive disagreement,
+humour, and storytelling. Deep mode allows up to five substantive sentences;
+normal mode retains the existing sampled three-sentence option and brief mode is
+one short sentence. The renderer receives these controls even when no household
+state is relevant.

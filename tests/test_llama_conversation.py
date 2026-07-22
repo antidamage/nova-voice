@@ -54,9 +54,7 @@ async def test_dedicated_identity_pass_extracts_only_the_current_transcript(
                                     "disclosed": True,
                                     "name": "Adeline",
                                     "pronouns": "she/her",
-                                    "evidence": (
-                                        "my name is Adeline and my pronouns are she her"
-                                    ),
+                                    "evidence": ("my name is Adeline and my pronouns are she her"),
                                 }
                             )
                         }
@@ -71,11 +69,7 @@ async def test_dedicated_identity_pass_extracts_only_the_current_transcript(
         transport=httpx.MockTransport(handler),
     )
     spoken = utterance.model_copy(
-        update={
-            "transcript": (
-                "By the way, my name is Adeline and my pronouns are she her"
-            )
-        }
+        update={"transcript": ("By the way, my name is Adeline and my pronouns are she her")}
     )
 
     update = await interpreter.extract_self_profile_update(spoken)
@@ -87,14 +81,10 @@ async def test_dedicated_identity_pass_extracts_only_the_current_transcript(
     )
     assert len(requests) == 1
     payload = requests[0]
-    assert payload["response_format"]["json_schema"]["name"] == (
-        "nova_identity_disclosure"
-    )
+    assert payload["response_format"]["json_schema"]["name"] == ("nova_identity_disclosure")
     assert payload["max_tokens"] == 120
     assert payload["messages"][0]["content"] == IDENTITY_DISCLOSURE_PROMPT
-    assert json.loads(payload["messages"][1]["content"]) == {
-        "transcript": spoken.transcript
-    }
+    assert json.loads(payload["messages"][1]["content"]) == {"transcript": spoken.transcript}
     assert len(payload["messages"]) == 2
 
     await interpreter.close()
@@ -115,9 +105,9 @@ async def test_recognized_current_speaker_overrides_prior_speaker_context(
                 "choices": [
                     {
                         "message": {
-                            "content": interpretation(
-                                decision=Decision.REPLY
-                            ).model_dump_json(by_alias=True)
+                            "content": interpretation(decision=Decision.REPLY).model_dump_json(
+                                by_alias=True
+                            )
                         }
                     }
                 ]
@@ -425,6 +415,49 @@ async def test_long_reply_is_conversational_only_and_capped_at_three_sentences(u
     assert "up to three substantial sentences" in requests[0]["messages"][0]["content"]
     assert "final sentence back" in requests[0]["messages"][0]["content"]
     assert bounded_long_reply(rendered) == rendered
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_deep_discussion_mode_allows_five_sentences_and_reaches_renderer(
+    utterance,
+) -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        answer = "One. Two. Three. Four. Five. Six."
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"text": answer})}}]},
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    mode = {
+        "discussion_depth": "deep",
+        "deliberate_pauses": True,
+        "reflective_listening": True,
+        "disagreement_style": "candid",
+        "humour_enabled": False,
+        "storytelling_enabled": False,
+    }
+
+    rendered = await interpreter.render_response(
+        utterance,
+        interpretation(decision=Decision.REPLY),
+        [],
+        persona="Thoughtful.",
+        relevant_state={"discussionMode": mode},
+    )
+
+    system = requests[0]["messages"][0]["content"]
+    facts = json.loads(requests[0]["messages"][-1]["content"])
+    assert rendered == "One. Two. Three. Four. Six."
+    assert "up to five substantial sentences" in system
+    assert facts["discussionMode"] == mode
+    assert requests[0]["max_tokens"] == 240
     await interpreter.close()
 
 

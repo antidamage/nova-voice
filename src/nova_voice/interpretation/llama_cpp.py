@@ -627,6 +627,8 @@ class LlamaCppInterpreter(Interpreter):
             "results": [result.model_dump(mode="json") for result in results],
             "environment": environment if conversation is None else conversation_environment,
             "selectedMemory": (relevant_state or {}).get("selectedMemory", []),
+            "conversationContinuity": (relevant_state or {}).get("conversationContinuity"),
+            "discussionMode": (relevant_state or {}).get("discussionMode"),
             "relevantState": (
                 {
                     key: value
@@ -644,12 +646,25 @@ class LlamaCppInterpreter(Interpreter):
             else persona
         )
         conversational_reply = not results and interpretation.decision == "reply"
-        long_form = conversational_reply and random.random() < self.long_response_probability
+        discussion_mode = (relevant_state or {}).get("discussionMode") or {}
+        requested_depth = discussion_mode.get("discussion_depth", "normal")
+        long_form = conversational_reply and (
+            requested_depth == "deep"
+            or (requested_depth == "normal" and random.random() < self.long_response_probability)
+        )
         web_budget = max(1, int(self.web_answer_max_sentences))
         if web_answered:
             length_instruction = (
                 f"Relay the web answer as at most {web_budget} natural spoken "
                 f"sentence{'s' if web_budget != 1 else ''}; be informative, not padded."
+            )
+        elif requested_depth == "brief":
+            length_instruction = "Reply in one direct sentence of at most 10 spoken words."
+        elif requested_depth == "deep":
+            length_instruction = (
+                "This conversational reply may use up to five substantial sentences. Develop "
+                "the user's topic without padding, and ask one clarification when a missing "
+                "detail would materially change the response."
             )
         elif long_form:
             length_instruction = (
@@ -680,6 +695,13 @@ facts.relevantState is either null or the current authoritative smart-home state
 facts.selectedMemory contains only private MemPalace results selected for this recognized
 speaker. When the speaker asks what was remembered or saved, answer from those results and
 preserve phone numbers exactly as digit strings; never turn their groups into quantities.
+facts.conversationContinuity contains only source-linked continuity for this recognized
+speaker. Refer to a callback only when it directly supports the reply; never claim a memory
+outside those records. facts.discussionMode is the user's explicit current-conversation
+preference. Honour its depth, use reflective listening when enabled, disagree candidly but
+respectfully when requested, omit humour when disabled, use humour sparingly when enabled,
+and use storytelling only when enabled. Deliberate pauses mean natural clause punctuation,
+never filler text or artificial silence claims.
 Its indoorRooms are inside, climateControls offer only on/off plus target temperature, and
 outdoor weather is separate. Use measured room temperature only for that named indoor room.
 facts.environment is either null or a vetted conversation-start time/weather
@@ -756,7 +778,9 @@ greet briefly and offer help. Return only the response JSON schema."""
                 if spoken_word_count(rendered) != command_max_words:
                     return command_acknowledgement(command_max_words)
             if long_form:
-                return bounded_long_reply(rendered)
+                return bounded_long_reply(
+                    rendered, max_sentences=5 if requested_depth == "deep" else 3
+                )
             return rendered
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
             return None

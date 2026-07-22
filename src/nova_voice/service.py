@@ -916,6 +916,13 @@ class NovaVoiceService:
                 logger.warning("relationship continuity retrieval failed", exc_info=True)
             if continuity_context:
                 relevant_state["conversationContinuity"] = continuity_context
+        if self.continuity is not None and conversation is not None:
+            try:
+                relevant_state["discussionMode"] = await self.continuity.discussion_mode_for(
+                    conversation.id, utterance.transcript
+                )
+            except Exception:
+                logger.warning("discussion mode retrieval failed", exc_info=True)
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.

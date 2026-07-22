@@ -144,3 +144,34 @@ async def test_relationship_api_exposes_provenance_bound_records(tmp_path) -> No
     record = response.json()["relationships"][0]
     assert record["person_id"] == "addie"
     assert record["provenance_conversation_ids"] == ["conversation-relationship-api"]
+
+
+async def test_discussion_mode_is_user_controlled_and_persists_per_conversation(tmp_path) -> None:
+    manager = await _manager(tmp_path)
+    current = await manager.discussion_mode_for(
+        "conversation-depth", "Go deeper, reflect that back, challenge me, and no jokes."
+    )
+    await manager.observe(
+        conversation_id="conversation-depth",
+        room_id="lounge",
+        participant_id="addie",
+        topic_summary="Career decision",
+        user_text=(
+            "Go deeper, take your time, reflect that back, challenge me, no jokes, "
+            "and tell it as a story."
+        ),
+    )
+    persisted = await manager.discussion_mode_for("conversation-depth", "Continue.")
+
+    assert current["discussion_depth"] == "deep"
+    assert current["reflective_listening"] is True
+    assert current["disagreement_style"] == "candid"
+    assert current["humour_enabled"] is False
+    assert persisted == {
+        "discussion_depth": "deep",
+        "deliberate_pauses": True,
+        "reflective_listening": True,
+        "disagreement_style": "candid",
+        "humour_enabled": False,
+        "storytelling_enabled": True,
+    }

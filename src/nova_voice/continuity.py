@@ -35,6 +35,65 @@ _STOPWORDS = {
     "this",
     "from",
 }
+_DISCUSSION_CUES = (
+    (
+        "discussion_depth",
+        "deep",
+        re.compile(r"\b(?:go deeper|more depth|explore that)\b", re.I),
+    ),
+    (
+        "discussion_depth",
+        "brief",
+        re.compile(r"\b(?:keep it brief|short answer)\b", re.I),
+    ),
+    (
+        "discussion_depth",
+        "normal",
+        re.compile(r"\b(?:normal detail|regular depth)\b", re.I),
+    ),
+    (
+        "deliberate_pauses",
+        True,
+        re.compile(r"\b(?:take your time|pause deliberately)\b", re.I),
+    ),
+    (
+        "deliberate_pauses",
+        False,
+        re.compile(r"\b(?:no long pauses|speak continuously)\b", re.I),
+    ),
+    (
+        "reflective_listening",
+        True,
+        re.compile(r"\b(?:reflect (?:that|this) back|listen reflectively)\b", re.I),
+    ),
+    (
+        "reflective_listening",
+        False,
+        re.compile(r"\b(?:stop reflecting|no reflection)\b", re.I),
+    ),
+    (
+        "disagreement_style",
+        "candid",
+        re.compile(r"\b(?:challenge me|disagree candidly|push back)\b", re.I),
+    ),
+    (
+        "disagreement_style",
+        "supportive",
+        re.compile(r"\b(?:be supportive|gentle disagreement)\b", re.I),
+    ),
+    ("humour_enabled", False, re.compile(r"\b(?:no jokes|no humo(?:u)?r)\b", re.I)),
+    ("humour_enabled", True, re.compile(r"\b(?:use humo(?:u)?r|joke with me)\b", re.I)),
+    (
+        "storytelling_enabled",
+        True,
+        re.compile(r"\b(?:tell it as a story|story mode)\b", re.I),
+    ),
+    (
+        "storytelling_enabled",
+        False,
+        re.compile(r"\b(?:no story|stop story mode)\b", re.I),
+    ),
+)
 
 
 def _append_unique(values: tuple[str, ...], value: str | None, *, limit: int) -> tuple[str, ...]:
@@ -44,6 +103,21 @@ def _append_unique(values: tuple[str, ...], value: str | None, *, limit: int) ->
     if not normalized or normalized in values:
         return values
     return (*values, normalized)[-limit:]
+
+
+def _discussion_update(record: ConversationTopicRecord, user_text: str) -> dict:
+    update = {
+        "discussion_depth": record.discussion_depth,
+        "deliberate_pauses": record.deliberate_pauses,
+        "reflective_listening": record.reflective_listening,
+        "disagreement_style": record.disagreement_style,
+        "humour_enabled": record.humour_enabled,
+        "storytelling_enabled": record.storytelling_enabled,
+    }
+    for field, value, pattern in _DISCUSSION_CUES:
+        if pattern.search(user_text):
+            update[field] = value
+    return update
 
 
 class ConversationContinuityManager:
@@ -82,6 +156,7 @@ class ConversationContinuityManager:
                 linked_goal_ids=tuple(dict.fromkeys(linked_goal_ids))[-12:],
                 last_turn_at=current,
             )
+            record = record.model_copy(update=_discussion_update(record, user_text))
             try:
                 stored = await self.store.create(record, actor_id=participant_id or "conversation")
                 result = cast(ConversationTopicRecord, stored.record)
@@ -109,6 +184,7 @@ class ConversationContinuityManager:
                 )[-12:],
                 "last_turn_at": current,
                 "updated_at": current,
+                **_discussion_update(record, user_text),
             }
         )
         try:
@@ -215,6 +291,19 @@ class ConversationContinuityManager:
             cast(RelationshipContinuityRecord, item.record)
             for item in await self.store.list(RelationshipContinuityRecord)
         )
+
+    async def discussion_mode_for(self, conversation_id: str, user_text: str) -> dict:
+        stored = await self.store.get(ConversationTopicRecord, conversation_id)
+        record = (
+            cast(ConversationTopicRecord, stored.record)
+            if stored is not None
+            else ConversationTopicRecord(
+                id=conversation_id,
+                room_id="pending",
+                last_turn_at=utc_now(),
+            )
+        )
+        return _discussion_update(record, user_text)
 
     async def list(self) -> tuple[ConversationTopicRecord, ...]:
         return tuple(

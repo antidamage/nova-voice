@@ -152,6 +152,12 @@ class ConversationTopicRecord(DurableModel):
     unresolved_references: tuple[str, ...] = ()
     open_questions: tuple[str, ...] = ()
     linked_goal_ids: tuple[str, ...] = ()
+    discussion_depth: Literal["brief", "normal", "deep"] = "normal"
+    deliberate_pauses: bool = False
+    reflective_listening: bool = False
+    disagreement_style: Literal["supportive", "candid"] = "supportive"
+    humour_enabled: bool = True
+    storytelling_enabled: bool = False
     last_turn_at: datetime
 
     @model_validator(mode="after")
