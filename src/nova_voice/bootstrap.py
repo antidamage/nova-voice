@@ -14,6 +14,7 @@ from nova_voice.communications import (
 from nova_voice.config import Settings
 from nova_voice.continuity import ConversationContinuityManager
 from nova_voice.dialogue import MultiPartyDialogueManager
+from nova_voice.digital_twin import DigitalTwinProvider
 from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
@@ -95,9 +96,15 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "research",
             "briefings",
             "dialogue",
+            "household_digital_twin",
         }
     )
     registry.register(nova_provider)
+
+    async def digital_twin_state() -> dict:
+        return await nova_provider.prompt_context("household")
+
+    registry.register(DigitalTwinProvider(digital_twin_state))
     registry.register(web_provider)
     personal_store = PersonalDataStore(settings.personal_data_path)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
