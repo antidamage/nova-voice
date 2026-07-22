@@ -272,8 +272,9 @@
   - [x] **T1-15 — Implement automation authoring and proactive intervention.** Deliver draft → simulate → explain → approve → activate
     → monitor → rollback plus deduplicated voice/notification decisions, quiet-hour policy, and feedback tracking (`T1-06`, `T1-08`,
     `T1-14`).
-  - [ ] **T1-16 — Pass the Tier 1 gate.** Prove restart-safe exactly-once behavior, permission correctness, pre-activation simulation,
-    auditable proactive reasons, MemPalace recovery, and zero unapproved high-impact mutations (`T1-01` through `T1-15`).
+  - [~] **T1-16 — Pass the Tier 1 gate.** The fail-closed structural evidence harness is implemented; final owner acceptance remains
+    deferred to the consolidated acceptance pass. Prove restart-safe exactly-once behavior, permission correctness, pre-activation
+    simulation, auditable proactive reasons, MemPalace recovery, and zero unapproved high-impact mutations (`T1-01` through `T1-15`).
 
   ### Tier 2 task queue — personal digital assistant
 
