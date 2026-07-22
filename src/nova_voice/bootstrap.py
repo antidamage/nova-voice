@@ -69,7 +69,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
     authority = HouseholdAuthority(durable_store, settings.household_tzinfo)
     automations = AutomationManager(durable_store)
-    proactive = ProactiveInterventionEngine(durable_store)
+    proactive = ProactiveInterventionEngine(durable_store, automations=automations)
     memory = MemPalaceClient(
         settings.mempalace_url,
         settings.mempalace_token if settings.mempalace_enabled else None,
