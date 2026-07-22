@@ -37,6 +37,7 @@ def action_capability(action: PlannedAction) -> str:
         "transactions",
         "commitments",
         "research",
+        "briefings",
     }:
         return (
             call.tool

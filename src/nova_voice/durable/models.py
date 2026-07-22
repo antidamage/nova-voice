@@ -367,6 +367,46 @@ class ResearchRecord(DurableModel):
         return self
 
 
+class BriefingScheduleRecord(DurableModel):
+    owner_id: str
+    period: Literal["morning", "evening"]
+    local_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    timezone: str = Field(min_length=1, max_length=100)
+    channels: tuple[Literal["voice", "dashboard", "notification"], ...] = ("dashboard",)
+    enabled: bool = True
+    last_local_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class BriefingRecord(DurableModel):
+    schedule_id: str
+    owner_id: str
+    period: Literal["morning", "evening"]
+    local_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    summary: str = Field(min_length=1, max_length=3000)
+    agenda: tuple[dict[str, Any], ...] = ()
+    conflicts: tuple[dict[str, Any], ...] = ()
+    preparation_prompts: tuple[str, ...] = ()
+
+
+class EventSubscriptionRecord(DurableModel):
+    owner_id: str
+    summary: str = Field(min_length=1, max_length=1000)
+    event_kind: str = Field(min_length=1, max_length=120)
+    match: dict[str, Any] = Field(default_factory=dict)
+    channels: tuple[Literal["voice", "dashboard", "notification"], ...] = ("dashboard",)
+    one_shot: bool = True
+    active: bool = True
+    trigger_count: int = Field(default=0, ge=0)
+    last_event_id: str | None = None
+    triggered_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_subscription(self) -> EventSubscriptionRecord:
+        if self.triggered_at is not None and self.triggered_at.utcoffset() is None:
+            raise ValueError("subscription trigger time must be timezone-aware")
+        return self
+
+
 class MemoryReferenceRecord(DurableModel):
     memory_id: str
     memory_type: str

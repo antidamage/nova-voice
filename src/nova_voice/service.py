@@ -17,6 +17,7 @@ from nova_voice.audio.conversation import ConversationSnapshot, ConversationTrac
 from nova_voice.audio.prefetch import ForegroundPrefetch, likely_tools
 from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
+from nova_voice.briefings import BriefingManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import CommunicationManager
@@ -343,6 +344,7 @@ class NovaVoiceService:
         transactions: TransactionManager | None = None,
         commitments: CommitmentManager | None = None,
         research: ResearchManager | None = None,
+        briefings: BriefingManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -360,6 +362,7 @@ class NovaVoiceService:
         self.transactions = transactions
         self.commitments = commitments
         self.research = research
+        self.briefings = briefings
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -639,6 +642,9 @@ class NovaVoiceService:
             self.commitments.start()
         if self.research is not None:
             await self.research.start()
+        if self.briefings is not None:
+            await self.briefings.poll()
+            self.briefings.start()
         if self.event_consumer is not None:
             await self.event_consumer.initialize()
             self.event_consumer.start()
@@ -1803,5 +1809,7 @@ class NovaVoiceService:
             await self.commitments.close()
         if self.research is not None:
             await self.research.close()
+        if self.briefings is not None:
+            await self.briefings.close()
         await self.registry.close()
         await self.interpreter.close()
