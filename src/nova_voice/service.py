@@ -16,6 +16,7 @@ from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.conversation import ConversationSnapshot, ConversationTracker
 from nova_voice.audio.prefetch import ForegroundPrefetch, likely_tools
 from nova_voice.authority import HouseholdAuthority
+from nova_voice.automation import AutomationManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.domain import (
@@ -324,6 +325,7 @@ class NovaVoiceService:
         durable_store: DurableAgentStore | None = None,
         event_consumer: HouseholdEventConsumer | None = None,
         authority: HouseholdAuthority | None = None,
+        automations: AutomationManager | None = None,
         memory: MemPalaceClient | None = None,
     ) -> None:
         self.settings = settings
@@ -335,6 +337,7 @@ class NovaVoiceService:
         self.durable_store = durable_store
         self.event_consumer = event_consumer
         self.authority = authority
+        self.automations = automations
         self.memory = memory
         self.speaker_profiles = speaker_profiles
         self.persona = persona
