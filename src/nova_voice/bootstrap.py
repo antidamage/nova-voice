@@ -3,6 +3,7 @@ from __future__ import annotations
 from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
+from nova_voice.briefings import BriefingManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import (
@@ -19,6 +20,7 @@ from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
+from nova_voice.providers.briefings.provider import BriefingsProvider
 from nova_voice.providers.commitments.provider import CommitmentsProvider
 from nova_voice.providers.communications.provider import CommunicationsProvider
 from nova_voice.providers.icloud.client import ICloudCalDAVClient
@@ -88,6 +90,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "transactions",
             "commitments",
             "research",
+            "briefings",
         }
     )
     registry.register(nova_provider)
@@ -126,18 +129,18 @@ def build_service(settings: Settings) -> NovaVoiceService:
     registry.register(CommitmentsProvider(commitments))
     research = ResearchManager(durable_store, web_provider)
     registry.register(ResearchProvider(research))
+    calendar_client = None
     if settings.icloud_configured:
-        registry.register(
-            ICloudProvider(
-                ICloudCalDAVClient(
-                    username=settings.icloud_username or "",
-                    app_password=settings.icloud_app_password or "",
-                    calendar_url=settings.icloud_calendar_url or "",
-                    reminders_url=settings.icloud_reminders_url or "",
-                    timeout_seconds=settings.icloud_timeout_seconds,
-                )
-            )
+        calendar_client = ICloudCalDAVClient(
+            username=settings.icloud_username or "",
+            app_password=settings.icloud_app_password or "",
+            calendar_url=settings.icloud_calendar_url or "",
+            reminders_url=settings.icloud_reminders_url or "",
+            timeout_seconds=settings.icloud_timeout_seconds,
         )
+        registry.register(ICloudProvider(calendar_client))
+    briefings = BriefingManager(durable_store, calendar=calendar_client)
+    registry.register(BriefingsProvider(briefings))
     interpreter = LlamaCppInterpreter(
         settings.llm_base_url,
         settings.llm_model,
@@ -159,6 +162,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
         await commitments.satisfy_event(
             str(event.payload.get("eventKey") or event.kind), now=event.created_at
         )
+        await briefings.handle_event(event)
 
     event_consumer = HouseholdEventConsumer(
         nova_client,
@@ -201,4 +205,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         transactions=transactions,
         commitments=commitments,
         research=research,
+        briefings=briefings,
     )

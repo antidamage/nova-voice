@@ -14,11 +14,14 @@ from uuid import uuid4
 from nova_voice.durable.models import (
     AuditRecord,
     AutomationRecord,
+    BriefingRecord,
+    BriefingScheduleRecord,
     CommitmentRecord,
     ConversationRecord,
     DelegationGrantRecord,
     DurableModel,
     EventRecord,
+    EventSubscriptionRecord,
     ExecutionRecord,
     ExecutionState,
     GoalRecord,
@@ -37,10 +40,13 @@ from nova_voice.durable.models import (
 Record = (
     AuditRecord
     | AutomationRecord
+    | BriefingRecord
+    | BriefingScheduleRecord
     | ConversationRecord
     | CommitmentRecord
     | DelegationGrantRecord
     | EventRecord
+    | EventSubscriptionRecord
     | ExecutionRecord
     | GoalRecord
     | IdentityPolicyRecord
@@ -57,10 +63,13 @@ _RECORD_TYPES: dict[str, type[Record]] = {
     for model in (
         AuditRecord,
         AutomationRecord,
+        BriefingRecord,
+        BriefingScheduleRecord,
         ConversationRecord,
         CommitmentRecord,
         DelegationGrantRecord,
         EventRecord,
+        EventSubscriptionRecord,
         ExecutionRecord,
         GoalRecord,
         IdentityPolicyRecord,

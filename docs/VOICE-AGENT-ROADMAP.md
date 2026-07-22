@@ -292,7 +292,7 @@
     recovery, and cross-device continuation (`T1-04`, `T2-01`).
   - [x] **T2-07 — Implement asynchronous cited research.** Gather sources, preserve citations and uncertainty, and return concise spoken
     results plus Dashboard detail (`T1-04`, `T2-03`).
-  - [ ] **T2-08 — Implement briefings and subscriptions.** Add morning/evening briefings, schedule conflicts, preparation prompts, and
+  - [x] **T2-08 — Implement briefings and subscriptions.** Add morning/evening briefings, schedule conflicts, preparation prompts, and
     “tell me when…” event subscriptions (`T1-06`, `T2-06`).
   - [ ] **T2-09 — Pass the Tier 2 gate.** Complete multi-day restart scenarios, timezone tests, recipient/amount verification,
     external-effect audits, and visible cancellation/undo (`T2-01` through `T2-08`).

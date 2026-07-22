@@ -133,3 +133,18 @@ three-sentence spoken summary, and an explicit low/medium/high uncertainty
 assessment. A deterministic proactive intervention announces completion once.
 The authenticated Voice API and Dashboard administration page expose the full
 evidence and citations, while voice receives only the concise summary.
+
+## Briefings and event subscriptions
+
+The `briefings` provider schedules one timezone-aware morning or evening
+briefing per local date. Each generated briefing combines commitments with
+optional iCloud calendar events, detects overlapping intervals, creates
+near-term preparation prompts, and stores the complete agenda for Dashboard
+review. Deterministic IDs prevent duplicate briefings and announcements after a
+restart.
+
+“Tell me when” requests become durable event subscriptions over Nova’s existing
+cursor-backed household event feed. Matching uses an explicit event kind and
+payload fields, creates one deterministic intervention per source event, and
+supports one-shot or recurring subscriptions. Subscriptions remain visible and
+cancellable after triggering.

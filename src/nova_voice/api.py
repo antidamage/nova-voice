@@ -31,8 +31,11 @@ from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
 from nova_voice.durable.models import (
     AutomationRecord,
+    BriefingRecord,
+    BriefingScheduleRecord,
     CommitmentRecord,
     DelegationGrantRecord,
+    EventSubscriptionRecord,
     ExecutionRecord,
     GoalRecord,
     GoalState,
@@ -553,12 +556,46 @@ def create_app(
         if manager is None:
             raise HTTPException(status_code=503, detail="Research is unavailable")
         try:
-            record = await manager.cancel(research_id, actor_id=request.actor_id)
+            record = await manager.cancel(research_id, actor_id=request.actor)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Unknown research job") from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"research": record.model_dump(mode="json")}
+
+    @app.get("/v1/briefings")
+    async def list_briefings() -> dict:
+        manager = selected_service.briefings
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Briefings are unavailable")
+        return {
+            "schedules": [item.model_dump(mode="json") for item in await manager.schedules()],
+            "briefings": [item.model_dump(mode="json") for item in await manager.briefings()],
+        }
+
+    @app.get("/v1/subscriptions")
+    async def list_event_subscriptions() -> dict:
+        manager = selected_service.briefings
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Subscriptions are unavailable")
+        return {
+            "subscriptions": [
+                item.model_dump(mode="json") for item in await manager.subscriptions()
+            ]
+        }
+
+    @app.post("/v1/subscriptions/{subscription_id:path}/cancel")
+    async def cancel_event_subscription(
+        subscription_id: str, request: CommunicationActorRequest
+    ) -> dict:
+        manager = selected_service.briefings
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Subscriptions are unavailable")
+        try:
+            record = await manager.cancel_subscription(subscription_id, actor_id=request.actor)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown subscription") from error
+        return {"subscription": record.model_dump(mode="json")}
 
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
@@ -623,6 +660,9 @@ def create_app(
             identities,
             commitments,
             research,
+            briefing_schedules,
+            briefings,
+            subscriptions,
             audit,
         ) = await asyncio.gather(
             durable.list(GoalRecord),
@@ -632,6 +672,9 @@ def create_app(
             durable.list(IdentityPolicyRecord),
             durable.list(CommitmentRecord),
             durable.list(ResearchRecord),
+            durable.list(BriefingScheduleRecord),
+            durable.list(BriefingRecord),
+            durable.list(EventSubscriptionRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -643,6 +686,9 @@ def create_app(
             "identities": [row.record.model_dump(mode="json") for row in identities],
             "commitments": [row.record.model_dump(mode="json") for row in commitments],
             "research": [row.record.model_dump(mode="json") for row in research],
+            "briefingSchedules": [row.record.model_dump(mode="json") for row in briefing_schedules],
+            "briefings": [row.record.model_dump(mode="json") for row in briefings],
+            "subscriptions": [row.record.model_dump(mode="json") for row in subscriptions],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }
