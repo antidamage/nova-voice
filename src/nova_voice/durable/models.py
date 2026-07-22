@@ -95,6 +95,12 @@ class ExecutionState(StrEnum):
     EXPIRED = "expired"
 
 
+class HouseholdRole(StrEnum):
+    OWNER = "owner"
+    RECOGNIZED_HOUSEHOLD = "recognized_household"
+    GUEST = "guest"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -187,13 +193,62 @@ class ExecutionRecord(DurableModel):
         return self
 
 
+class IdentityPolicyRecord(DurableModel):
+    person_id: str = Field(min_length=1, max_length=160)
+    role: HouseholdRole
+    active: bool = True
+
+
+class GrantSchedule(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    weekdays: tuple[int, ...] = Field(default=(), max_length=7)
+    start_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+    @model_validator(mode="after")
+    def validate_window(self) -> GrantSchedule:
+        if any(day < 0 or day > 6 for day in self.weekdays):
+            raise ValueError("grant weekdays must be between 0 and 6")
+        if len(set(self.weekdays)) != len(self.weekdays):
+            raise ValueError("grant weekdays must be unique")
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError("grant schedule requires both start_time and end_time")
+        return self
+
+
 class DelegationGrantRecord(DurableModel):
     grantor_id: str
     grantee_id: str
     capability: str
     target_scope: tuple[str, ...] = ()
+    recipients: tuple[str, ...] = ()
+    locations: tuple[str, ...] = ()
+    schedule: GrantSchedule | None = None
+    max_uses: int | None = Field(default=None, ge=1)
+    uses: int = Field(default=0, ge=0)
+    max_amount: float | None = Field(default=None, ge=0)
+    spent_amount: float = Field(default=0, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    notify_on_use: bool = True
     active: bool = True
     revoked_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_grant(self) -> DelegationGrantRecord:
+        if self.revoked_at is not None and self.revoked_at.utcoffset() is None:
+            raise ValueError("revoked_at must be timezone-aware")
+        if self.uses and self.max_uses is not None and self.uses > self.max_uses:
+            raise ValueError("grant uses cannot exceed max_uses")
+        if (
+            self.spent_amount
+            and self.max_amount is not None
+            and self.spent_amount > self.max_amount
+        ):
+            raise ValueError("grant spend cannot exceed max_amount")
+        if self.currency is not None and self.max_amount is None:
+            raise ValueError("grant currency requires max_amount")
+        return self
 
 
 class ProactiveInterventionRecord(DurableModel):

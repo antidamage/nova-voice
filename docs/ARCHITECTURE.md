@@ -292,8 +292,12 @@ Longer work uses the independent restart-safe engine described in
 [DURABLE-AGENT.md](DURABLE-AGENT.md). Its versioned records, transactional
 SQLite store, execution leases, stable idempotency keys, pause/resume step
 types, resource locks, and partial-failure recovery are initialized with the
-production service. Household authority, MemPalace, and proactive plan creation
-build on that engine in later milestones.
+production service. Household authority now builds on that engine as described
+in [HOUSEHOLD-AUTHORITY.md](HOUSEHOLD-AUTHORITY.md): deterministic identity
+classes and scoped standing grants are checked before execution, while owner
+administration and immutable audit replay are available through mTLS APIs and
+the Dashboard. MemPalace and proactive plan creation build on the same engine
+in later milestones.
 
 The first integration is the authenticated resumable household event feed in
 [HOUSEHOLD-EVENTS.md](HOUSEHOLD-EVENTS.md). Dashboard normalizes its HA and

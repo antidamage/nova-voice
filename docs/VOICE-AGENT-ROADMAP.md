@@ -6,7 +6,8 @@
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
   routing, short-lived context, diagnostics, a restart-safe durable goal/plan
-  engine, an authenticated resumable household event feed, and 460 passing tests.
+  engine, an authenticated resumable household event feed, enforced household
+  authority/delegation administration, and 464 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -18,8 +19,9 @@
 
   - Only Nova home control/tasks and web search are available.
   - The durable engine now consumes normalized Dashboard household events, but
-    there is no durable personal memory, commitment tracking, delegation
-    system, or proactive decision engine.
+    there is no durable personal memory, commitment tracking, or proactive
+    decision engine. Household identity classes, scoped delegation, revocation,
+    administration, and audit replay are now implemented.
 
   - Turn-taking now layers bounded audio-native semantic endpointing, adaptive
     interruption recovery, and stable read-only prefetch on the authoritative
@@ -160,7 +162,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 23 of 58 tasks complete. Next task: **T0-15**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 26 of 58 tasks complete. Next task: **T0-15**.
 
   ### Milestone decision map
 
@@ -169,8 +171,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 8 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-03 Household
-  authority and administration** and **M1-04 Selective durable conversational memory**.
+  Milestone progress: 9 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-04 Selective
+  durable conversational memory** and **M1-05 Proactive home autonomy**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -182,9 +184,9 @@
   | In progress | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
   | **Complete** | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | **Complete** | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
-  | Ready | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
+  | **Complete** | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
   | Ready | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
-  | Blocked | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
+  | Ready | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
   | Blocked | **M1-06 — Home-autonomy harness accepted** | Tier 1 passes restart, exactly-once, permission, simulation, audit, memory recovery, and high-impact safety gates. | `T1-16` | `M0-06`, `M1-01`–`M1-05` |
   | Blocked | **M2-01 — Personal information providers** | Calendar, reminders, notes, lists, contacts, weather, media, recipes, documents, and household knowledge are safely available. | `T2-01`–`T2-03` | `M1-06` |
   | Blocked | **M2-02 — Safe communications and transactions** | Messages, invitations, travel, shopping, bookings, finance, and purchases use preview, validation, grants, budgets, verification, and undo. | `T2-04`–`T2-05` | `M1-03`, `M2-01` |
@@ -250,11 +252,11 @@
     work, and retry or compensate only failed steps (`T1-04`).
   - [x] **T1-06 — Add the authenticated resumable dashboard event stream.** Normalize HA, occupancy, device-health, weather, energy,
     reminder, calendar, and agent-task events with cursors and deduplication (`T1-01`; Voice + Dashboard).
-  - [ ] **T1-07 — Implement household identity policy classes.** Enforce owner, recognized-household, and unknown/guest capabilities in
+  - [x] **T1-07 — Implement household identity policy classes.** Enforce owner, recognized-household, and unknown/guest capabilities in
     deterministic policy tests (`T1-01`).
-  - [ ] **T1-08 — Implement standing delegation grants.** Support scoped capabilities, targets, budgets, recipients, locations,
+  - [x] **T1-08 — Implement standing delegation grants.** Support scoped capabilities, targets, budgets, recipients, locations,
     schedules, expiry, notification, and immediate revocation (`T1-07`).
-  - [ ] **T1-09 — Add goal/execution/grant/audit administration.** Provide authenticated Voice APIs and Dashboard screens for inspect,
+  - [x] **T1-09 — Add goal/execution/grant/audit administration.** Provide authenticated Voice APIs and Dashboard screens for inspect,
     cancel, revoke, and trace replay (`T1-02`, `T1-08`; Voice + Dashboard).
   - [ ] **T1-10 — Install and operate MemPalace on Iridium.** Provision a private authenticated service with health checks, backups,
     restore verification, and graceful Nova Voice degradation when memory is unavailable.

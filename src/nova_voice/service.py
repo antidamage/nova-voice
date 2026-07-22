@@ -15,6 +15,7 @@ from nova_voice.affectations import apply_affectations
 from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.conversation import ConversationSnapshot, ConversationTracker
 from nova_voice.audio.prefetch import ForegroundPrefetch, likely_tools
+from nova_voice.authority import HouseholdAuthority
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.domain import (
@@ -326,6 +327,7 @@ class NovaVoiceService:
         web_provider: WebProvider | None = None,
         durable_store: DurableAgentStore | None = None,
         event_consumer: HouseholdEventConsumer | None = None,
+        authority: HouseholdAuthority | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -335,6 +337,7 @@ class NovaVoiceService:
         self.store = store
         self.durable_store = durable_store
         self.event_consumer = event_consumer
+        self.authority = authority
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -356,7 +359,7 @@ class NovaVoiceService:
         self._scope_key = scope_key if scope_key is not None else lambda room_id: room_id
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._active_task_cancellations: dict[str, TurnCancellationController] = {}
-        self.policy = ExecutionPolicy(settings)
+        self.policy = ExecutionPolicy(settings, authority)
         self.voice_settings: VoiceSettings | None = None
         self.agent_settings = AgentSettings()
         # Conversation scopes whose spoken replies are pinned to temperature 0
@@ -612,6 +615,8 @@ class NovaVoiceService:
         if self.durable_store is not None:
             await self.durable_store.initialize()
             await self.durable_store.prune_expired()
+        if self.authority is not None:
+            await self.authority.initialize()
         if self.event_consumer is not None:
             await self.event_consumer.initialize()
             self.event_consumer.start()
@@ -1031,6 +1036,17 @@ class NovaVoiceService:
                     interpretation.actions,
                     cancellation=cancellation,
                 )
+        if (
+            outcome.execute
+            and outcome.grant_ids
+            and any(result.ok for result in results)
+            and self.authority is not None
+        ):
+            await self.authority.record_use(
+                outcome.grant_ids,
+                interpretation.actions,
+                actor_id=utterance.speaker.person_id or "recognized-speaker",
+            )
         timings_ms["execution"] = round((time.perf_counter() - execution_started) * 1000, 3)
 
         # A failed dashboard command opens a conversation (if one is not already

@@ -21,6 +21,7 @@ from nova_voice.durable.models import (
     ExecutionState,
     GoalRecord,
     GoalState,
+    IdentityPolicyRecord,
     MemoryReferenceRecord,
     PlanRecord,
     PlanState,
@@ -37,6 +38,7 @@ Record = (
     | EventRecord
     | ExecutionRecord
     | GoalRecord
+    | IdentityPolicyRecord
     | MemoryReferenceRecord
     | PlanRecord
     | PlanStepRecord
@@ -53,6 +55,7 @@ _RECORD_TYPES: dict[str, type[Record]] = {
         EventRecord,
         ExecutionRecord,
         GoalRecord,
+        IdentityPolicyRecord,
         MemoryReferenceRecord,
         PlanRecord,
         PlanStepRecord,
