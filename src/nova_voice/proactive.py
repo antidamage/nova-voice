@@ -60,6 +60,20 @@ class ProactiveInterventionEngine:
     def __init__(self, store: DurableAgentStore, policy: ProactivePolicy | None = None) -> None:
         self.store = store
         self.policy = policy or ProactivePolicy()
+        self.occupied_rooms: set[str] = set()
+
+    async def handle_event(self, event: EventRecord) -> None:
+        """Update local occupancy and persist a proposal without blocking ingestion."""
+
+        if event.kind == "occupancy":
+            room = str(event.payload.get("room") or event.payload.get("area") or "")
+            person = str(event.payload.get("person") or event.payload.get("person_id") or "")
+            if room and str(event.payload.get("state") or "present").casefold() not in {"away", "absent"}:
+                self.occupied_rooms.add(room)
+            elif person:
+                self.occupied_rooms.discard(room)
+            return
+        await self.consider(event, occupied_rooms=self.occupied_rooms)
 
     async def consider(self, event: EventRecord, *, occupied_rooms: set[str], now: datetime | None = None) -> ProactiveInterventionRecord | None:
         current = now or utc_now()

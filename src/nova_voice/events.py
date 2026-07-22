@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 
@@ -89,6 +90,7 @@ class HouseholdEventConsumer:
         poll_seconds: float = 1,
         batch_size: int = 200,
         retention_days: float = 30,
+        on_event: Callable[[EventRecord], Awaitable[None]] | None = None,
     ) -> None:
         if poll_seconds <= 0 or not 1 <= batch_size <= 1_000 or retention_days <= 0:
             raise ValueError("household event polling settings must be positive and bounded")
@@ -97,6 +99,7 @@ class HouseholdEventConsumer:
         self.poll_seconds = poll_seconds
         self.batch_size = batch_size
         self.retention = timedelta(days=retention_days)
+        self.on_event = on_event
         self.cursor = 0
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -200,7 +203,7 @@ class HouseholdEventConsumer:
             record_id = f"dashboard-household-event:{event.id}"
             if await self.store.get(EventRecord, record_id) is None:
                 occurred_at = event.occurred_at.astimezone(UTC)
-                await self.store.create(
+                stored = await self.store.create(
                     EventRecord(
                         id=record_id,
                         created_at=occurred_at,
@@ -214,6 +217,13 @@ class HouseholdEventConsumer:
                     ),
                     actor_id="dashboard-event-consumer",
                 )
+                if self.on_event is not None:
+                    try:
+                        await self.on_event(cast(EventRecord, stored.record))
+                    except Exception as error:  # event durability is authoritative
+                        logger.warning(
+                            "household event reactive callback failed: %s", type(error).__name__
+                        )
                 accepted += 1
             await self._checkpoint(event.cursor)
             expected = event.cursor + 1
