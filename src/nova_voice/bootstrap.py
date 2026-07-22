@@ -21,6 +21,7 @@ from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 from nova_voice.interpretation.skills import load_skills
 from nova_voice.memory import MemPalaceClient
 from nova_voice.multimodal_inputs import LocalMultimodalInputProvider
+from nova_voice.offline_optimizers import OfflineOptimizerPool
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
@@ -121,6 +122,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
     )
     continuity = ConversationContinuityManager(durable_store)
     dialogue = MultiPartyDialogueManager(durable_store)
+    optimizers = OfflineOptimizerPool()
     registry.register(DialogueProvider(dialogue))
     registry.register(PersonalDataProvider(personal_store))
     registry.register(HouseholdLibraryProvider(personal_store))
@@ -233,4 +235,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         briefings=briefings,
         continuity=continuity,
         dialogue=dialogue,
+        optimizers=optimizers,
     )
