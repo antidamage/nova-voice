@@ -494,6 +494,26 @@ class MemoryReferenceRecord(DurableModel):
     sensitivity: Literal["normal", "sensitive", "restricted"] = "normal"
 
 
+class VisualContextRecord(DurableModel):
+    owner_id: str = Field(min_length=1, max_length=160)
+    audience: tuple[str, ...] = ()
+    asset_id: str = Field(min_length=1, max_length=160)
+    source_revision: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    kind: Literal["object_location", "walkthrough", "cross_device"]
+    label: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1, max_length=4000)
+    location: str | None = Field(default=None, max_length=240)
+    device_id: str | None = Field(default=None, max_length=160)
+    sensitivity: Literal["normal", "sensitive", "restricted"] = "normal"
+    explicit_save: bool = False
+
+    @model_validator(mode="after")
+    def require_explicit_object_location(self) -> VisualContextRecord:
+        if self.kind == "object_location" and not self.explicit_save:
+            raise ValueError("object locations require an explicit save")
+        return self
+
+
 class AuditRecord(DurableModel):
     actor_id: str
     action: str

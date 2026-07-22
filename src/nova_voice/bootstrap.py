@@ -20,6 +20,7 @@ from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 from nova_voice.interpretation.skills import load_skills
 from nova_voice.memory import MemPalaceClient
+from nova_voice.multimodal_inputs import LocalMultimodalInputProvider
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
@@ -46,6 +47,7 @@ from nova_voice.transactions import (
     TransactionManager,
     WebhookTransactionTransport,
 )
+from nova_voice.visual_assistance import VisualAssistanceManager, VisualAssistanceProvider
 
 
 def build_service(settings: Settings) -> NovaVoiceService:
@@ -97,6 +99,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "briefings",
             "dialogue",
             "household_digital_twin",
+            "visual_assistance",
         }
     )
     registry.register(nova_provider)
@@ -108,6 +111,14 @@ def build_service(settings: Settings) -> NovaVoiceService:
     registry.register(web_provider)
     personal_store = PersonalDataStore(settings.personal_data_path)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
+    visual_inputs = LocalMultimodalInputProvider(
+        settings.multimodal_data_path,
+        dashboard_base_url=settings.nova_base_url,
+        timeout_seconds=settings.multimodal_timeout_seconds,
+    )
+    registry.register(
+        VisualAssistanceProvider(VisualAssistanceManager(durable_store, visual_inputs))
+    )
     continuity = ConversationContinuityManager(durable_store)
     dialogue = MultiPartyDialogueManager(durable_store)
     registry.register(DialogueProvider(dialogue))
