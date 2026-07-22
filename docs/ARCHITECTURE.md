@@ -292,8 +292,14 @@ Longer work uses the independent restart-safe engine described in
 [DURABLE-AGENT.md](DURABLE-AGENT.md). Its versioned records, transactional
 SQLite store, execution leases, stable idempotency keys, pause/resume step
 types, resource locks, and partial-failure recovery are initialized with the
-production service. Event ingestion, household authority, MemPalace, and
-proactive plan creation build on that engine in later milestones.
+production service. Household authority, MemPalace, and proactive plan creation
+build on that engine in later milestones.
+
+The first integration is the authenticated resumable household event feed in
+[HOUSEHOLD-EVENTS.md](HOUSEHOLD-EVENTS.md). Dashboard normalizes its HA and
+task sources behind a persistent cursor; Voice validates, deduplicates, and
+checkpoints those events in the durable store without depending on a browser
+connection.
 
 ## Iridium process topology
 

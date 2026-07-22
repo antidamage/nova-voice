@@ -112,6 +112,17 @@ class NovaDashboardClient:
     async def list_tasks(self) -> dict:
         return await self._json("GET", "/api/tasks?command=list")
 
+    async def household_events(self, after: int, limit: int = 200) -> dict:
+        headers = {}
+        if self.mcp_token:
+            headers["Authorization"] = f"Bearer {self.mcp_token}"
+        return await self._json(
+            "GET",
+            "/api/agent/events",
+            params={"after": after, "limit": limit},
+            headers=headers,
+        )
+
     async def mcp_call(self, name: str, arguments: dict | None = None) -> dict:
         headers = {"Content-Type": "application/json"}
         if self.mcp_token:

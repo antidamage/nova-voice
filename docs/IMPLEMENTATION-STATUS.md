@@ -18,6 +18,10 @@ Implemented in this increment:
   records, transactional migrations and revisions, verified backup/restore,
   stable execution idempotency keys and leases, every wait/approval/event/tool
   step type, provider resource locks, and restart/partial-failure recovery;
+- an authenticated Dashboard-to-Voice household event feed with a persistent
+  monotonic cursor, normalized HA/occupancy/device-health/weather/energy/task
+  classes, durable Voice checkpoints, duplicate suppression, cursor-gap
+  records, restart recovery, and structural health reporting;
 - a self-contained, responsive development diagnostics page at `/diagnostics`
   for explicit browser microphone capture, real STT/LLM/emotion/policy/TTS
   inspection, timing display, and returned-audio playback;
