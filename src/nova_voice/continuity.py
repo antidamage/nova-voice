@@ -2,12 +2,39 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from hashlib import sha256
 from typing import cast
 
-from nova_voice.durable.models import ConversationTopicRecord, utc_now
+from nova_voice.durable.models import (
+    ConversationTopicRecord,
+    RelationshipContinuityRecord,
+    utc_now,
+)
 from nova_voice.durable.store import ConcurrentRecordUpdate, DurableAgentStore
 
 _REFERENCE = re.compile(r"\b(this|that|it|they|them|there|the earlier one)\b", re.I)
+_PREFERENCE = re.compile(r"\b(?:i prefer|i like it when|please always)\s+([^\n.!?]{3,160})", re.I)
+_STYLE_PATTERNS = (
+    (re.compile(r"\b(?:keep it|be) brief\b", re.I), "brief"),
+    (re.compile(r"\b(?:more detail|be detailed)\b", re.I), "detailed"),
+    (re.compile(r"\b(?:speak|talk) (?:more )?slowly\b", re.I), "slow"),
+    (re.compile(r"\b(?:be direct|straight to the point)\b", re.I), "direct"),
+)
+_STOPWORDS = {
+    "about",
+    "should",
+    "could",
+    "would",
+    "there",
+    "their",
+    "what",
+    "when",
+    "where",
+    "with",
+    "that",
+    "this",
+    "from",
+}
 
 
 def _append_unique(values: tuple[str, ...], value: str | None, *, limit: int) -> tuple[str, ...]:
@@ -57,7 +84,12 @@ class ConversationContinuityManager:
             )
             try:
                 stored = await self.store.create(record, actor_id=participant_id or "conversation")
-                return cast(ConversationTopicRecord, stored.record)
+                result = cast(ConversationTopicRecord, stored.record)
+                if participant_id:
+                    await self._update_relationship(
+                        participant_id, result, topic_summary, user_text
+                    )
+                return result
             except sqlite3.IntegrityError:
                 existing = await self.store.get(ConversationTopicRecord, conversation_id)
                 if existing is None:
@@ -90,7 +122,99 @@ class ConversationContinuityManager:
             if latest is None:
                 raise
             return cast(ConversationTopicRecord, latest.record)
-        return cast(ConversationTopicRecord, stored.record)
+        result = cast(ConversationTopicRecord, stored.record)
+        if participant_id:
+            await self._update_relationship(participant_id, result, topic_summary, user_text)
+        return result
+
+    async def _update_relationship(
+        self,
+        person_id: str,
+        topic: ConversationTopicRecord,
+        topic_summary: str | None,
+        user_text: str,
+    ) -> RelationshipContinuityRecord:
+        record_id = f"relationship:{person_id}"
+        stored = await self.store.get(RelationshipContinuityRecord, record_id)
+        record = (
+            cast(RelationshipContinuityRecord, stored.record)
+            if stored is not None
+            else RelationshipContinuityRecord(id=record_id, person_id=person_id)
+        )
+        preferences = dict(record.explicit_preferences)
+        preference = _PREFERENCE.search(user_text)
+        if preference:
+            value = preference.group(1).strip(" .")
+            key = f"explicit_{sha256(value.casefold().encode()).hexdigest()[:10]}"
+            preferences[key] = value
+        style = record.speaking_style
+        for pattern, candidate in _STYLE_PATTERNS:
+            if pattern.search(user_text):
+                style = candidate
+                break
+        narrative = record.narrative_summary
+        if topic_summary and topic_summary.strip():
+            parts = [item.strip() for item in narrative.split(" → ") if item.strip()]
+            if topic_summary.strip() not in parts:
+                parts.append(topic_summary.strip())
+            narrative = " → ".join(parts[-8:])[-3000:]
+        updated = record.model_copy(
+            update={
+                "narrative_summary": narrative,
+                "explicit_preferences": preferences,
+                "speaking_style": style,
+                "callback_topic_ids": _append_unique(record.callback_topic_ids, topic.id, limit=12),
+                "provenance_conversation_ids": _append_unique(
+                    record.provenance_conversation_ids, topic.id, limit=20
+                ),
+                "updated_at": utc_now(),
+            }
+        )
+        if stored is None:
+            created = await self.store.create(updated, actor_id=person_id)
+            return cast(RelationshipContinuityRecord, created.record)
+        saved = await self.store.save(
+            updated, expected_revision=stored.revision, actor_id=person_id
+        )
+        return cast(RelationshipContinuityRecord, saved.record)
+
+    async def context_for(self, person_id: str, user_text: str) -> dict:
+        stored = await self.store.get(RelationshipContinuityRecord, f"relationship:{person_id}")
+        if stored is None:
+            return {}
+        relationship = cast(RelationshipContinuityRecord, stored.record)
+        words = {
+            word.casefold()
+            for word in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", user_text)
+            if word.casefold() not in _STOPWORDS
+        }
+        callbacks = []
+        open_threads = []
+        for topic_id in reversed(relationship.callback_topic_ids):
+            topic_stored = await self.store.get(ConversationTopicRecord, topic_id)
+            if topic_stored is None:
+                continue
+            topic = cast(ConversationTopicRecord, topic_stored.record)
+            topic_words = set(re.findall(r"[a-z][a-z'-]{3,}", topic.summary.casefold()))
+            if words and words & topic_words and len(callbacks) < 3:
+                callbacks.append({"summary": topic.summary, "sourceConversationId": topic.id})
+            for question in topic.open_questions:
+                if len(open_threads) < 5:
+                    open_threads.append({"question": question, "sourceConversationId": topic.id})
+        return {
+            "narrativeSummary": relationship.narrative_summary,
+            "explicitPreferences": relationship.explicit_preferences,
+            "speakingStyle": relationship.speaking_style,
+            "callbacks": callbacks,
+            "openThreads": open_threads,
+            "provenanceConversationIds": relationship.provenance_conversation_ids,
+        }
+
+    async def relationships(self) -> tuple[RelationshipContinuityRecord, ...]:
+        return tuple(
+            cast(RelationshipContinuityRecord, item.record)
+            for item in await self.store.list(RelationshipContinuityRecord)
+        )
 
     async def list(self) -> tuple[ConversationTopicRecord, ...]:
         return tuple(

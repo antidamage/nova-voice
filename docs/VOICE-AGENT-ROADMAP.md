@@ -302,7 +302,7 @@
 
   - [x] **T3-01 — Add durable conversation/topic records.** Persist participants, topic stack, summaries, unresolved references, open
     questions, and linked goals independently of the acoustic window (`T1-02`, `T1-11`).
-  - [ ] **T3-02 — Add relationship continuity.** Implement narrative summaries, relevant callbacks, preference learning, open-thread
+  - [x] **T3-02 — Add relationship continuity.** Implement narrative summaries, relevant callbacks, preference learning, open-thread
     resurfacing, and conversation-specific speaking style without fabricated recollection (`T3-01`).
   - [ ] **T3-03 — Add long-form discussion mode.** Support user-controlled depth, deliberate pauses, clarification, reflective
     listening, disagreement, humour, and storytelling (`T0-05`, `T3-01`).

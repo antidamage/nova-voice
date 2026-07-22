@@ -88,3 +88,59 @@ async def test_continuity_api_lists_and_resolves_open_questions(tmp_path) -> Non
 
     assert listed.json()["conversations"][0]["topic_stack"] == ["Dinner"]
     assert resolved.json()["conversation"]["open_questions"] == []
+
+
+async def test_relationship_continuity_uses_only_explicit_preferences_and_provenance(
+    tmp_path,
+) -> None:
+    manager = await _manager(tmp_path)
+    await manager.observe(
+        conversation_id="conversation-garden",
+        room_id="lounge",
+        participant_id="addie",
+        topic_summary="Planning the garden renovation",
+        user_text="I prefer native plants, and please keep it brief. Which nursery should we use?",
+    )
+    await manager.observe(
+        conversation_id="conversation-unrelated",
+        room_id="study",
+        participant_id="addie",
+        topic_summary="Choosing a new laptop",
+        user_text="Maybe that one.",
+    )
+
+    context = await manager.context_for("addie", "What was our garden plan?")
+    relationship = (await manager.relationships())[0]
+
+    assert relationship.speaking_style == "brief"
+    assert list(relationship.explicit_preferences.values()) == [
+        "native plants, and please keep it brief"
+    ]
+    assert context["callbacks"] == [
+        {
+            "summary": "Planning the garden renovation",
+            "sourceConversationId": "conversation-garden",
+        }
+    ]
+    assert context["openThreads"][0]["sourceConversationId"] == "conversation-garden"
+    assert "laptop" not in str(context["callbacks"])
+
+
+async def test_relationship_api_exposes_provenance_bound_records(tmp_path) -> None:
+    manager = await _manager(tmp_path)
+    await manager.observe(
+        conversation_id="conversation-relationship-api",
+        room_id="lounge",
+        participant_id="addie",
+        topic_summary="Book discussion",
+        user_text="I prefer short chapters.",
+    )
+    app = create_app(Settings(), service=SimpleNamespace(continuity=manager))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://voice.test"
+    ) as client:
+        response = await client.get("/v1/relationship-continuity")
+
+    record = response.json()["relationships"][0]
+    assert record["person_id"] == "addie"
+    assert record["provenance_conversation_ids"] == ["conversation-relationship-api"]
