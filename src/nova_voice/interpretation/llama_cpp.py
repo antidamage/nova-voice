@@ -165,6 +165,8 @@ Critical distinctions:
   that they can tell you directly, for example "call me Addie" or "I use she/her pronouns".
   The separate identity extractor handles any correction; keep selfProfileUpdate null here.
 - Never invent provider names, tool names, entity IDs, services, rooms, or success.
+- Preserve phone numbers as digit strings in plans and replies. Never reinterpret a
+  phone number as a cardinal quantity or rewrite its groups as hundreds or thousands.
 - In each action, copy call.tool exactly from semanticTools.function.name, including namespace,
   and set call.provider to the part of that name before the first dot (e.g. tool "nova.query"
   has provider "nova"; tool "web.ask" has provider "web").
@@ -624,8 +626,15 @@ class LlamaCppInterpreter(Interpreter):
             "actions": [action.model_dump(mode="json") for action in interpretation.actions],
             "results": [result.model_dump(mode="json") for result in results],
             "environment": environment if conversation is None else conversation_environment,
+            "selectedMemory": (relevant_state or {}).get("selectedMemory", []),
             "relevantState": (
-                relevant_state if household_state_is_relevant(utterance.transcript) else None
+                {
+                    key: value
+                    for key, value in (relevant_state or {}).items()
+                    if key != "selectedMemory"
+                }
+                if household_state_is_relevant(utterance.transcript)
+                else None
             ),
             "responseInstruction": response_instruction,
         }
@@ -668,6 +677,9 @@ cranking, or adjusting anything, even one mentioned earlier in this conversation
 device change was requested and facts.results is empty, say you didn't catch the request
 or ask them to repeat it rather than inventing that it happened.
 facts.relevantState is either null or the current authoritative smart-home state.
+facts.selectedMemory contains only private MemPalace results selected for this recognized
+speaker. When the speaker asks what was remembered or saved, answer from those results and
+preserve phone numbers exactly as digit strings; never turn their groups into quantities.
 Its indoorRooms are inside, climateControls offer only on/off plus target temperature, and
 outdoor weather is separate. Use measured room temperature only for that named indoor room.
 facts.environment is either null or a vetted conversation-start time/weather
