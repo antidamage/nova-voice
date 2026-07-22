@@ -168,14 +168,14 @@ class SatellitePlaybackStream:
                 await self.connection.websocket.send_text(
                     json.dumps({"type": "playback_cancel", "playbackId": self.playback_id})
                 )
-                # Protocol-v1 clients predate an explicit cancellation
-                # capability. Closing after the control frame preserves the
-                # existing fail-safe: old players flush on reconnect, while
-                # current clients flush immediately on the control message.
-                await self.connection.websocket.close(
-                    code=1012,
-                    reason="playback interrupted",
-                )
+                # Protocol-v1 clients predate explicit playback events and may
+                # not flush their output queue. Current clients acknowledge
+                # cancellation and remain connected.
+                if not self.connection.playback_events_capable:
+                    await self.connection.websocket.close(
+                        code=1012,
+                        reason="playback interrupted",
+                    )
 
     def abandon(self) -> None:
         self._cancelled = True
@@ -252,6 +252,7 @@ class RoomPlaybackRouter:
         self.buffer_ms = buffer_ms
         self.frame_ms = frame_ms
         self._rooms: dict[str, dict[str, SatellitePlaybackConnection]] = {}
+        self._connections_by_id: dict[str, SatellitePlaybackConnection] = {}
 
     def set_buffer_ms(self, buffer_ms: int) -> None:
         """Live-tune the client jitter-buffer preroll (dashboard-hot-reloaded)."""
@@ -282,16 +283,35 @@ class RoomPlaybackRouter:
 
         await asyncio.gather(*(send(connection) for connection in connections))
 
-    def register(self, connection: SatellitePlaybackConnection) -> None:
+    def register(
+        self, connection: SatellitePlaybackConnection
+    ) -> SatellitePlaybackConnection | None:
+        previous = self._connections_by_id.get(connection.satellite_id)
+        if previous is not None and previous is not connection:
+            previous_room = self._rooms.get(previous.room_id)
+            if previous_room is not None and previous_room.get(previous.satellite_id) is previous:
+                previous_room.pop(previous.satellite_id, None)
+                if not previous_room:
+                    self._rooms.pop(previous.room_id, None)
+        self._connections_by_id[connection.satellite_id] = connection
         self._rooms.setdefault(connection.room_id, {})[connection.satellite_id] = connection
+        return previous
 
     def unregister(self, connection: SatellitePlaybackConnection) -> None:
+        if self._connections_by_id.get(connection.satellite_id) is not connection:
+            return
+        self._connections_by_id.pop(connection.satellite_id, None)
         room = self._rooms.get(connection.room_id)
         if room is None or room.get(connection.satellite_id) is not connection:
             return
         room.pop(connection.satellite_id, None)
         if not room:
             self._rooms.pop(connection.room_id, None)
+
+    def is_current(self, connection: SatellitePlaybackConnection) -> bool:
+        """Return whether this socket still owns its advertised satellite ID."""
+
+        return self._connections_by_id.get(connection.satellite_id) is connection
 
     def speakers(self, room_id: str) -> tuple[str, ...]:
         return tuple(self._rooms.get(room_id, ()))

@@ -1122,7 +1122,24 @@ def create_app(
                 websocket=websocket,
                 playback_events_capable=hello.capabilities.playback_events,
             )
-            room_playback.register(playback_connection)
+            previous_connection = room_playback.register(playback_connection)
+            if previous_connection is not None:
+                monitor.record(
+                    "satellite_superseded",
+                    satelliteId=hello.satellite_id,
+                    previousRoomId=previous_connection.room_id,
+                    roomId=room_id,
+                )
+                try:
+                    await previous_connection.websocket.close(
+                        code=4001,
+                        reason="superseded by a newer connection",
+                    )
+                except Exception:
+                    logger.debug(
+                        "superseded satellite socket was already closed id=%s",
+                        hello.satellite_id,
+                    )
             stage = "streaming audio"
             queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=750)
             last_sequence = -1
@@ -1231,6 +1248,8 @@ def create_app(
                     while True:
                         frame = await queue.get()
                         try:
+                            if not room_playback.is_current(playback_connection):
+                                return
                             pending = await selected_audio.ingest(
                                 satellite_id=hello.satellite_id,
                                 room_id=room_id,
@@ -1296,6 +1315,8 @@ def create_app(
                         playback_events.started.set()
                     elif control.get("type") == "playback_finished":
                         playback_events.finished.set()
+                    elif control.get("type") == "playback_cancelled":
+                        playback_events.cancelled.set()
                     continue
                 value = message.get("bytes")
                 if value is None:
@@ -1303,6 +1324,11 @@ def create_app(
                 frame = AudioFrame.unpack(value)
                 if frame.kind != FrameKind.AUDIO_INPUT:
                     continue
+                if playback_connection is None or not room_playback.is_current(
+                    playback_connection
+                ):
+                    await websocket.close(code=4001, reason="satellite connection superseded")
+                    return
                 if frame.sequence <= last_sequence:
                     # CoreAudio hands frames to an async sender. A late frame
                     # contains no new audio once a newer sequence has arrived,
@@ -1369,6 +1395,10 @@ def create_app(
             )
             return
         finally:
+            connection_was_current = bool(
+                playback_connection is not None
+                and room_playback.is_current(playback_connection)
+            )
             if hello is not None:
                 structural_telemetry.record_queue(
                     "audioDisconnect",
@@ -1377,7 +1407,7 @@ def create_app(
                 )
             if playback_connection is not None:
                 room_playback.unregister(playback_connection)
-            if hello is not None:
+            if hello is not None and connection_was_current:
                 monitor.satellite_disconnected(
                     satellite_id=hello.satellite_id,
                     stage=stage,

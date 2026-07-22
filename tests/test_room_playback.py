@@ -150,11 +150,45 @@ async def test_room_playback_cancellation_only_reaches_the_source_satellite() ->
         "playback",
         "playback_cancel",
     ]
-    assert indium_socket.closed == [(1012, "playback interrupted")]
+    assert indium_socket.closed == []
     assert nocturnium_socket.text == []
     assert nocturnium_socket.closed == []
     assert stream.playback_events is not None
     assert stream.playback_events.cancelled.is_set()
+
+
+async def test_new_connection_supersedes_same_satellite_id_across_rooms() -> None:
+    router = RoomPlaybackRouter()
+    first, first_socket = connection(router, "web-ipad", "lounge")
+    second_socket = FakeWebSocket()
+    second = SatellitePlaybackConnection(
+        satellite_id="web-ipad",
+        room_id="bedroom",
+        websocket=second_socket,
+        playback_events_capable=True,
+    )
+
+    replaced = router.register(second)
+
+    assert replaced is first
+    assert not router.is_current(first)
+    assert router.is_current(second)
+    assert router.speakers("lounge") == ()
+    assert router.speakers("bedroom") == ("web-ipad",)
+    # Cleanup from the old socket must not unregister the replacement.
+    router.unregister(first)
+    assert router.is_current(second)
+
+
+async def test_legacy_playback_cancel_still_closes_socket() -> None:
+    router = RoomPlaybackRouter()
+    _, legacy_socket = connection(router, "legacy", "office", playback_events=False)
+    stream = router.open_stream("office", "legacy")
+
+    await stream.emit(b"\x01\x00" * 100, 16_000)
+    await stream.cancel()
+
+    assert legacy_socket.closed == [(1012, "playback interrupted")]
 
 
 async def test_open_stream_is_inert_when_the_source_satellite_is_unregistered() -> None:
