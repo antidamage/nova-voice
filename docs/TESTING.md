@@ -219,6 +219,19 @@ scenario-driven runs. `config/tier0-acceptance.json` is the required eleven-case
 far-field, echo/barge-in, false-activation, and spoken-number corpus. The Tier 0
 gate is fail-closed for missing corpus evidence or a short endurance duration.
 
+## Tier 1 acceptance gate
+
+`evaluate_tier1_gate` requires one unique, content-addressed evidence artifact
+for each of restart-safe exactly-once execution, permission correctness,
+pre-activation automation simulation, proactive-reason auditing, MemPalace
+outage/recovery, and high-impact safety. Missing, duplicated, or failed evidence
+fails closed. Duplicate mutations and unapproved high-impact mutations have an
+explicit zero-tolerance invariant regardless of the individual evidence result.
+
+Automated suites may produce the structural evidence, but owner acceptance is
+recorded separately at the final consolidated acceptance pass. Deferring that
+manual pass never changes a failed result into a pass.
+
 ## Wake, duplicate, and echo gates
 
 - tune Beemo on real rooms; target false accepts <=0.2/hour and false reject <=5%
