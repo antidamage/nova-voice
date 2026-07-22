@@ -70,6 +70,7 @@ from nova_voice.speaker_profiles import (
     SpeakerProfileStore,
     validated_self_profile_update,
 )
+from nova_voice.transactions import TransactionManager
 from nova_voice.turns import (
     ForegroundTurnStateMachine,
     TaskCancellationDecision,
@@ -337,6 +338,7 @@ class NovaVoiceService:
         proactive: ProactiveInterventionEngine | None = None,
         memory: MemPalaceClient | None = None,
         communications: CommunicationManager | None = None,
+        transactions: TransactionManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -351,6 +353,7 @@ class NovaVoiceService:
         self.proactive = proactive
         self.memory = memory
         self.communications = communications
+        self.transactions = transactions
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a

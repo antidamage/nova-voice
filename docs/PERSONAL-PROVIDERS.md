@@ -86,3 +86,21 @@ delivery, failure, and cancellation transitions are append-only audited.
 
 With no bridge configured, drafting remains available and health reports
 `configured: false`; external delivery fails closed.
+
+## Governed transactions and bookings
+
+Travel, shopping, bookings, finance, and purchases use `transactions` proposals.
+Voice can create or preview a canonical proposal containing category,
+counterparty, amount, three-letter currency, summary, and structured details;
+the immediate executor cannot commit it. Commitment requires either a
+revision-bound one-time owner approval token returned by the authenticated API,
+or an active standing budget matching category, currency, optional
+counterparty, and sufficient remaining amount.
+
+Budget value is reserved before the external call and restored if the bridge
+fails. A proposal becomes committed only when the owner-operated bridge returns
+a receipt. Committed work can be cancelled only when the bridge verifies the
+compensating cancellation. Proposal, preview, authorization, receipt, failure,
+budget, and cancellation state is durable and audited without placing payment
+credentials in prompts or traces. With no bridge configured, proposals remain
+useful but all real transactions fail closed.
