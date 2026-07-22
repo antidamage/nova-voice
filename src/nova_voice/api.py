@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -38,12 +39,14 @@ from nova_voice.durable.models import (
     IdentityPolicyRecord,
     PlanRecord,
     PlanState,
+    ProactiveInterventionRecord,
     utc_now,
 )
 from nova_voice.interpretation.llama_cpp import InterpretationError
 from nova_voice.memory import MemPalaceClient
 from nova_voice.monitor import VoiceMonitor
 from nova_voice.monitor import page_html as monitor_page_html
+from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.satellites.playback import (
     RoomPlaybackRouter,
@@ -125,6 +128,10 @@ class AutomationDraftRequest(BaseModel):
 
 class AutomationOwnerRequest(BaseModel):
     owner_id: str
+
+
+class ProactiveFeedbackRequest(AutomationOwnerRequest):
+    outcome: Literal["accepted", "dismissed", "redundant", "annoying"]
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -574,6 +581,19 @@ def create_app(
             raise HTTPException(status_code=503, detail="Automation management is disabled")
         return selected_service.automations
 
+    def require_household_owner(owner_id: str) -> None:
+        _, authority = require_agent_administration()
+        if not authority.is_owner(owner_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Automation administration requires an assigned household owner",
+            )
+
+    def require_proactive() -> ProactiveInterventionEngine:
+        if selected_service.proactive is None:
+            raise HTTPException(status_code=503, detail="Proactive intervention is disabled")
+        return selected_service.proactive
+
     @app.get("/v1/agent/automations")
     async def agent_automations() -> dict:
         durable, _ = require_agent_administration()
@@ -583,6 +603,7 @@ def create_app(
     @app.post("/v1/agent/automations", status_code=201)
     async def draft_automation(request: AutomationDraftRequest, owner_id: str) -> dict:
         try:
+            require_household_owner(owner_id)
             record = await require_automations().draft(
                 automation_id=request.id, owner_id=owner_id, summary=request.summary,
                 trigger=request.trigger, actions=request.proposed_actions,
@@ -605,6 +626,7 @@ def create_app(
     @app.post("/v1/agent/automations/{automation_id}/approve")
     async def approve_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
         try:
+            require_household_owner(request.owner_id)
             record = await require_automations().approve(automation_id, actor_id=request.owner_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Unknown automation") from error
@@ -617,6 +639,7 @@ def create_app(
     @app.post("/v1/agent/automations/{automation_id}/activate")
     async def activate_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
         try:
+            require_household_owner(request.owner_id)
             record = await require_automations().activate(automation_id, actor_id=request.owner_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Unknown automation") from error
@@ -627,12 +650,34 @@ def create_app(
     @app.post("/v1/agent/automations/{automation_id}/rollback")
     async def rollback_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
         try:
+            require_household_owner(request.owner_id)
             record = await require_automations().rollback(automation_id, actor_id=request.owner_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Unknown automation") from error
         except AutomationLifecycleError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"automation": record.model_dump(mode="json")}
+
+    @app.get("/v1/agent/proactive-interventions")
+    async def proactive_interventions() -> dict:
+        durable, _ = require_agent_administration()
+        records = await durable.list(ProactiveInterventionRecord)
+        return {"interventions": [row.record.model_dump(mode="json") for row in records]}
+
+    @app.post("/v1/agent/proactive-interventions/{intervention_id}/feedback")
+    async def feedback_proactive_intervention(
+        intervention_id: str, request: ProactiveFeedbackRequest
+    ) -> dict:
+        require_household_owner(request.owner_id)
+        try:
+            record = await require_proactive().feedback(
+                intervention_id,
+                outcome=request.outcome,
+                actor_id=request.owner_id,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown proactive intervention") from error
+        return {"intervention": record.model_dump(mode="json")}
 
     @app.get("/v1/speaker-profiles")
     async def speaker_profiles() -> dict:

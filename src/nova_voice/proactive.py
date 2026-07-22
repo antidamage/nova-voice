@@ -90,3 +90,40 @@ class ProactiveInterventionEngine:
         )
         await self.store.create(record, actor_id="proactive-policy")
         return record
+
+    async def feedback(
+        self,
+        intervention_id: str,
+        *,
+        outcome: Literal["accepted", "dismissed", "redundant", "annoying"],
+        actor_id: str,
+        now: datetime | None = None,
+    ) -> ProactiveInterventionRecord:
+        """Persist household feedback used to tune, rather than bypass, policy."""
+
+        stored = await self.store.get(ProactiveInterventionRecord, intervention_id)
+        if stored is None:
+            raise KeyError(intervention_id)
+        record = stored.record
+        current = now or utc_now()
+        status = (
+            ProactiveInterventionState.DELIVERED
+            if outcome == "accepted"
+            else ProactiveInterventionState.DISMISSED
+        )
+        updated = record.model_copy(
+            update={
+                "status": status,
+                "feedback": outcome,
+                "feedback_at": current,
+                "delivered_at": current if outcome == "accepted" else record.delivered_at,
+                "updated_at": current,
+            }
+        )
+        return (
+            await self.store.save(
+                updated,
+                expected_revision=stored.revision,
+                actor_id=actor_id,
+            )
+        ).record
