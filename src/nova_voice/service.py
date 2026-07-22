@@ -36,6 +36,7 @@ from nova_voice.domain import (
     VerificationVerdict,
 )
 from nova_voice.durable.store import DurableAgentStore
+from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
     command_acknowledgement,
@@ -324,6 +325,7 @@ class NovaVoiceService:
         conversations: ConversationTracker | None = None,
         web_provider: WebProvider | None = None,
         durable_store: DurableAgentStore | None = None,
+        event_consumer: HouseholdEventConsumer | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -332,6 +334,7 @@ class NovaVoiceService:
         self.web_provider = web_provider
         self.store = store
         self.durable_store = durable_store
+        self.event_consumer = event_consumer
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -609,6 +612,9 @@ class NovaVoiceService:
         if self.durable_store is not None:
             await self.durable_store.initialize()
             await self.durable_store.prune_expired()
+        if self.event_consumer is not None:
+            await self.event_consumer.initialize()
+            self.event_consumer.start()
         if self.speaker_profiles is not None:
             await self.speaker_profiles.initialize()
         # Nova is an optional capability from the core service's point of view.
@@ -1613,6 +1619,11 @@ class NovaVoiceService:
                 if self.durable_store is not None
                 else {"ok": True, "enabled": False}
             ),
+            "householdEvents": (
+                self.event_consumer.health()
+                if self.event_consumer is not None
+                else {"ok": True, "enabled": False}
+            ),
             "speakerProfiles": (
                 await self.speaker_profiles.health()
                 if self.speaker_profiles is not None
@@ -1628,5 +1639,7 @@ class NovaVoiceService:
 
     async def close(self) -> None:
         self.store.stop()
+        if self.event_consumer is not None:
+            await self.event_consumer.close()
         await self.interpreter.close()
         await self.registry.close()

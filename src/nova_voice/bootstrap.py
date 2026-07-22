@@ -4,6 +4,7 @@ from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.durable.store import DurableAgentStore
+from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 from nova_voice.interpretation.skills import load_skills
 from nova_voice.persistence import TranscriptStore
@@ -62,6 +63,13 @@ def build_service(settings: Settings) -> NovaVoiceService:
     )
     store = TranscriptStore(settings.database_path, settings.retention_hours)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
+    event_consumer = HouseholdEventConsumer(
+        nova_client,
+        durable_store,
+        poll_seconds=settings.household_event_poll_seconds,
+        batch_size=settings.household_event_batch_size,
+        retention_days=settings.household_event_retention_days,
+    )
     speaker_profiles = SpeakerProfileStore(
         settings.database_path,
         retention_days=settings.speaker_candidate_retention_days,
@@ -86,4 +94,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         conversations=conversations,
         web_provider=web_provider,
         durable_store=durable_store,
+        event_consumer=event_consumer,
     )

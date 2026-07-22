@@ -6,7 +6,7 @@
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
   routing, short-lived context, diagnostics, a restart-safe durable goal/plan
-  engine, and 455 passing tests.
+  engine, an authenticated resumable household event feed, and 460 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -17,8 +17,9 @@
     automatically.
 
   - Only Nova home control/tasks and web search are available.
-  - There is no durable personal memory, commitment tracking, delegation system, proactive decision engine, or agent-owned event
-    subscription.
+  - The durable engine now consumes normalized Dashboard household events, but
+    there is no durable personal memory, commitment tracking, delegation
+    system, or proactive decision engine.
 
   - Turn-taking now layers bounded audio-native semantic endpointing, adaptive
     interruption recovery, and stable read-only prefetch on the authoritative
@@ -159,7 +160,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 22 of 58 tasks complete. Next task: **T0-15**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 23 of 58 tasks complete. Next task: **T0-15**.
 
   ### Milestone decision map
 
@@ -168,8 +169,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 7 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-02 Resumable
-  household event backbone**, **M1-03 Household authority and administration**, and **M1-04 Selective durable conversational memory**.
+  Milestone progress: 8 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-03 Household
+  authority and administration** and **M1-04 Selective durable conversational memory**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -180,7 +181,7 @@
   | **Complete** | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
   | In progress | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
   | **Complete** | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
-  | Ready | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
+  | **Complete** | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
   | Ready | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
   | Ready | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
   | Blocked | **M1-05 — Proactive home autonomy** | Extended home providers, simulated automation authoring, proactive intervention, quiet-hour policy, and feedback operate under grants. | `T1-14`–`T1-15` | `M1-01`, `M1-02`, `M1-03` |
@@ -247,7 +248,7 @@
     compensation steps through satisfied/paused/blocked/cancelled/expired/failed states (`T1-03`).
   - [x] **T1-05 — Add safe plan concurrency and partial-failure recovery.** Use provider resource declarations, preserve successful
     work, and retry or compensate only failed steps (`T1-04`).
-  - [ ] **T1-06 — Add the authenticated resumable dashboard event stream.** Normalize HA, occupancy, device-health, weather, energy,
+  - [x] **T1-06 — Add the authenticated resumable dashboard event stream.** Normalize HA, occupancy, device-health, weather, energy,
     reminder, calendar, and agent-task events with cursors and deduplication (`T1-01`; Voice + Dashboard).
   - [ ] **T1-07 — Implement household identity policy classes.** Enforce owner, recognized-household, and unknown/guest capabilities in
     deterministic policy tests (`T1-01`).

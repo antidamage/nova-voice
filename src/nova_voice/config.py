@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     port: int = Field(default=8766, ge=1, le=65535)
     database_path: Path = Path("data/transcripts.sqlite3")
     durable_database_path: Path | None = None
+    household_event_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    household_event_batch_size: int = Field(default=200, ge=1, le=1_000)
+    household_event_retention_days: float = Field(default=30, gt=0, le=365)
     structural_telemetry_path: Path | None = None
     retention_hours: float = Field(default=24.0, gt=0, le=24)
     shadow_mode: bool = True
