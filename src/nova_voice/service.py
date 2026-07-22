@@ -769,6 +769,21 @@ class NovaVoiceService:
             self._zero_render_temperature_scopes.discard(scope)
         goal = self.sessions.active_goal(utterance.room_id, utterance.ended_at)
         memory_control_reply: str | None = None
+
+        async def mutate_memory(
+            method: str,
+            path: str,
+            payload: dict[str, Any] | None = None,
+        ) -> dict[str, Any] | None:
+            memory = self.memory
+            if memory is None:
+                return None
+            cancellation.begin_non_cancellable_side_effect("memory")
+            try:
+                return await memory.request(method, path, payload)
+            finally:
+                cancellation.non_cancellable_side_effect_finished()
+
         context_started = time.perf_counter()
         if prefetch is not None and prefetch.compatible_with(utterance.transcript):
             relevant_state = copy.deepcopy(prefetch.context)
@@ -821,7 +836,7 @@ class NovaVoiceService:
                     correction.group(1), owner_id=utterance.speaker.person_id
                 )
                 if len(selected_memories) == 1:
-                    result = await self.memory.request(
+                    result = await mutate_memory(
                         "PATCH",
                         f"/v1/memories/{selected_memories[0].id}",
                         {"text": correction.group(2).strip()},
@@ -833,7 +848,7 @@ class NovaVoiceService:
                 )
                 if len(selected_memories) == 1:
                     expires_at = datetime.now(UTC) + timedelta(days=int(expiry.group(2)))
-                    result = await self.memory.request(
+                    result = await mutate_memory(
                         "PATCH",
                         f"/v1/memories/{selected_memories[0].id}",
                         {"expires_at": expires_at.isoformat()},
@@ -843,12 +858,12 @@ class NovaVoiceService:
                 action, _ = memory_control.groups()
                 memory_id = selected_memories[0].id
                 if action.casefold() == "forget":
-                    result = await self.memory.request("DELETE", f"/v1/memories/{memory_id}")
+                    result = await mutate_memory("DELETE", f"/v1/memories/{memory_id}")
                     if result is not None:
                         selected_memories = []
                         memory_control_reply = "Forgot it."
                 else:
-                    result = await self.memory.request(
+                    result = await mutate_memory(
                         "PATCH", f"/v1/memories/{memory_id}", {"pinned": True}
                     )
                     memory_control_reply = "Pinned." if result is not None else None
@@ -978,11 +993,15 @@ class NovaVoiceService:
         # any value it emitted with the independent current-turn result.
         interpretation = interpretation.model_copy(update={"self_profile_update": profile_update})
         if addressed_identity_turn and profile_update is not None:
-            updated_speaker = await self.speaker_profiles.apply_disclosure(
-                utterance.speaker,
-                profile_update,
-                utterance.transcript,
-            )
+            cancellation.begin_non_cancellable_side_effect("speaker_profile")
+            try:
+                updated_speaker = await self.speaker_profiles.apply_disclosure(
+                    utterance.speaker,
+                    profile_update,
+                    utterance.transcript,
+                )
+            finally:
+                cancellation.non_cancellable_side_effect_finished()
             utterance = utterance.model_copy(update={"speaker": updated_speaker})
         speaker_recognition_active = (
             self.settings.speaker_recognition_enabled
@@ -1273,20 +1292,24 @@ class NovaVoiceService:
         if self.memory is not None and utterance.speaker.status == "recognized":
             candidate = salient_memory_candidate(utterance.transcript)
             if candidate is not None:
-                await self.memory.create(
-                    MemoryRecord(
-                        text=candidate.text,
-                        memory_type=candidate.memory_type,
-                        sensitivity=candidate.sensitivity,
-                        needs_confirmation=candidate.needs_confirmation,
-                        owner_id=utterance.speaker.person_id,
-                        audience=[utterance.speaker.person_id]
-                        if utterance.speaker.person_id
-                        else [],
-                        provenance="voice conversation salience rule",
-                        source_turn_id=utterance.id,
+                cancellation.begin_non_cancellable_side_effect("memory_create")
+                try:
+                    await self.memory.create(
+                        MemoryRecord(
+                            text=candidate.text,
+                            memory_type=candidate.memory_type,
+                            sensitivity=candidate.sensitivity,
+                            needs_confirmation=candidate.needs_confirmation,
+                            owner_id=utterance.speaker.person_id,
+                            audience=[utterance.speaker.person_id]
+                            if utterance.speaker.person_id
+                            else [],
+                            provenance="voice conversation salience rule",
+                            source_turn_id=utterance.id,
+                        )
                     )
-                )
+                finally:
+                    cancellation.non_cancellable_side_effect_finished()
         turn_machine.set_policy(
             execute=outcome.execute,
             shadowed=outcome.shadowed,

@@ -51,7 +51,7 @@ from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService
 from nova_voice.speech_normalization import normalize_spoken_numbers
-from nova_voice.turns import ForegroundTurnStateMachine
+from nova_voice.turns import ForegroundTurnStateMachine, TaskCancellationDecision
 from nova_voice.voice_settings import VoiceSettings
 
 logger = logging.getLogger(__name__)
@@ -387,6 +387,8 @@ class SatelliteAudioRuntime:
         self._first_audible_turns = 0
         self._first_audible_sum_ms = 0.0
         self._first_audible_last_ms: float | None = None
+        self._processing_phases: dict[str, str] = {}
+        self._processing_owners: dict[str, asyncio.Task[Any]] = {}
 
     def _scope_id(self, room_id: str) -> str:
         """Arbitration/AEC scope for a room: the whole household by default.
@@ -411,6 +413,71 @@ class SatelliteAudioRuntime:
         """Release a satellite's turn claim; safe to call repeatedly."""
 
         self._arbiter.release(claim)
+
+    def request_turn_continuation(self, room_id: str) -> TaskCancellationDecision:
+        """Ask whether the active turn can be replaced by appended speech."""
+
+        scope_id = self._scope_id(room_id)
+        phase = self._processing_phases.get(scope_id, "idle")
+        if phase == "before_side_effects":
+            service_decision = self.service.request_task_cancellation(room_id)
+            if service_decision.active:
+                return service_decision
+            return TaskCancellationDecision(
+                active=True,
+                accepted=True,
+                phase=phase,
+                reason="turn is still in read-only audio or interpretation work",
+            )
+        return TaskCancellationDecision(
+            active=phase != "idle",
+            accepted=False,
+            phase=phase,
+            reason=(
+                "side effects may have completed; resumed speech must be a follow-up"
+                if phase != "idle"
+                else "no foreground turn is active"
+            ),
+        )
+
+    @staticmethod
+    def merge_pending_turns(
+        first: PendingAudioTurn,
+        continuation: PendingAudioTurn,
+    ) -> PendingAudioTurn:
+        """Append resumed audio and retain the newest transport/claim handles."""
+
+        if first.prefetch_task is not None and not first.prefetch_task.done():
+            first.prefetch_task.cancel()
+        if continuation.prefetch_task is not None and not continuation.prefetch_task.done():
+            continuation.prefetch_task.cancel()
+        pcm16 = first.segment.pcm16 + continuation.segment.pcm16
+        segment = SpeechSegment(
+            pcm16=pcm16,
+            acoustic=extract_acoustic_features(pcm16),
+            endpoint_decision=continuation.endpoint_decision,
+            endpoint_wait_ms=continuation.endpoint_wait_ms,
+            endpoint_probability=continuation.endpoint_probability,
+        )
+        return PendingAudioTurn(
+            satellite_id=continuation.satellite_id,
+            room_id=continuation.room_id,
+            segment=segment,
+            wake_detected=first.wake_detected or continuation.wake_detected,
+            dashboard_foreground=(
+                continuation.dashboard_foreground
+                if continuation.dashboard_foreground is not None
+                else first.dashboard_foreground
+            ),
+            response_audio_sink=continuation.response_audio_sink,
+            response_cancel_sink=continuation.response_cancel_sink,
+            response_playback_events=continuation.response_playback_events,
+            arbiter_claim=continuation.arbiter_claim,
+            endpoint_decision=continuation.endpoint_decision,
+            endpoint_wait_ms=continuation.endpoint_wait_ms,
+            endpoint_probability=continuation.endpoint_probability,
+            prefetch_task=None,
+        )
 
     def speaking_satellite(self, room_id: str) -> str | None:
         """Return the microphone satellite currently driving a response."""
@@ -900,6 +967,9 @@ class SatelliteAudioRuntime:
                 StableInterimTracker(),
             )
             stable_text = tracker.observe(partial)
+            set_interim_transcript = getattr(segmenter, "set_interim_transcript", None)
+            if partial and callable(set_interim_transcript):
+                set_interim_transcript(partial)
             prefetch_foreground = getattr(self.service, "prefetch_foreground", None)
             if stable_text and callable(prefetch_foreground):
                 previous = self._prefetch_tasks.get(satellite_id)
@@ -1052,28 +1122,38 @@ class SatelliteAudioRuntime:
         )
 
     async def process_pending(self, pending: PendingAudioTurn) -> ProcessedAudioTurn | None:
-        prefetch: ForegroundPrefetch | None = None
-        if pending.prefetch_task is not None:
-            try:
-                prefetch = await pending.prefetch_task
-            except (asyncio.CancelledError, Exception):
-                prefetch = None
-        return await self.process_pcm(
-            satellite_id=pending.satellite_id,
-            room_id=pending.room_id,
-            pcm16=pending.segment.pcm16,
-            acoustic=pending.segment.acoustic,
-            wake_detected=pending.wake_detected,
-            dashboard_foreground=pending.dashboard_foreground,
-            response_audio_sink=pending.response_audio_sink,
-            response_cancel_sink=pending.response_cancel_sink,
-            response_playback_events=pending.response_playback_events,
-            arbiter_claim=pending.arbiter_claim,
-            endpoint_decision=pending.endpoint_decision,
-            endpoint_wait_ms=pending.endpoint_wait_ms,
-            endpoint_probability=pending.endpoint_probability,
-            prefetch=prefetch,
-        )
+        scope_id = self._scope_id(pending.room_id)
+        owner = asyncio.current_task()
+        if owner is not None:
+            self._processing_owners[scope_id] = owner
+        self._processing_phases[scope_id] = "before_side_effects"
+        try:
+            prefetch: ForegroundPrefetch | None = None
+            if pending.prefetch_task is not None:
+                try:
+                    prefetch = await pending.prefetch_task
+                except (asyncio.CancelledError, Exception):
+                    prefetch = None
+            return await self.process_pcm(
+                satellite_id=pending.satellite_id,
+                room_id=pending.room_id,
+                pcm16=pending.segment.pcm16,
+                acoustic=pending.segment.acoustic,
+                wake_detected=pending.wake_detected,
+                dashboard_foreground=pending.dashboard_foreground,
+                response_audio_sink=pending.response_audio_sink,
+                response_cancel_sink=pending.response_cancel_sink,
+                response_playback_events=pending.response_playback_events,
+                arbiter_claim=pending.arbiter_claim,
+                endpoint_decision=pending.endpoint_decision,
+                endpoint_wait_ms=pending.endpoint_wait_ms,
+                endpoint_probability=pending.endpoint_probability,
+                prefetch=prefetch,
+            )
+        finally:
+            if owner is not None and self._processing_owners.get(scope_id) is owner:
+                self._processing_owners.pop(scope_id, None)
+                self._processing_phases.pop(scope_id, None)
 
     async def process_pcm(
         self,
@@ -1494,6 +1574,8 @@ class SatelliteAudioRuntime:
                     else None
                 ),
             )
+            if self._processing_owners.get(scope_id) is asyncio.current_task():
+                self._processing_phases[scope_id] = "after_side_effects"
         except Exception as error:
             await self._record_monitor(
                 "processing_error",

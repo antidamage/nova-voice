@@ -240,3 +240,17 @@ async def test_mutation_finishes_and_verifies_after_in_flight_cancel_request() -
     assert results[0].ok
     assert not after.accepted
     assert after.phase == "after_side_effects"
+
+
+def test_non_provider_memory_or_profile_mutation_blocks_replay() -> None:
+    cancellation = TurnCancellationController()
+
+    cancellation.begin_non_cancellable_side_effect("memory_create")
+    during = cancellation.request()
+    cancellation.non_cancellable_side_effect_finished()
+    after = cancellation.request()
+
+    assert not during.accepted
+    assert during.phase == "provider_call"
+    assert not after.accepted
+    assert after.phase == "after_side_effects"
