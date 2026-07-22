@@ -318,7 +318,7 @@
 
   ### Tier 4 task queue — frontier capabilities
 
-  - [ ] **T4-01 — Define replaceable multimodal provider contracts.** Cover Dashboard screens, user-shared images, camera snapshots,
+  - [x] **T4-01 — Define replaceable multimodal provider contracts.** Cover Dashboard screens, user-shared images, camera snapshots,
     documents, and device diagrams with provenance and permission metadata (`T2-09`).
   - [ ] **T4-02 — Implement visual/document inputs.** Add explicit user sharing plus doorbell/camera snapshot access under household
     privacy and retention policy (`T4-01`).
