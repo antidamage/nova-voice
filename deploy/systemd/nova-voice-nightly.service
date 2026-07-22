@@ -1,0 +1,24 @@
+[Unit]
+Description=Nova Voice pinned nightly regression and memory maintenance
+After=network-online.target nova-voice-mempalace.service
+Wants=network-online.target nova-voice-mempalace.service
+
+[Service]
+Type=oneshot
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+EnvironmentFile=/etc/nova-voice/nova-voice.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nova-voice/venv/bin/python -m nova_voice.nightly_maintenance --source-root /opt/nova-voice/current --output-dir /var/lib/nova-voice/evaluation/nightly
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova-voice/evaluation
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+

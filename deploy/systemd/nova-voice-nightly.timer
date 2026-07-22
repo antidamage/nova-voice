@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Nova Voice offline validation and memory maintenance nightly
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 Pacific/Auckland
+RandomizedDelaySec=20m
+Persistent=true
+Unit=nova-voice-nightly.service
+
+[Install]
+WantedBy=timers.target

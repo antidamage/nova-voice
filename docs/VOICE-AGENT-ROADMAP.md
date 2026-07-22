@@ -339,7 +339,7 @@
     versions before deployment (`T0-12`, `OPS-01`).
   - [x] **OPS-03 — Build the evaluation registry and graders.** Track scenario results and implement deterministic outcome, policy,
     trace, and selective model graders with task/policy/latency/memory/proactivity metrics (`T0-13`, `OPS-01`).
-  - [ ] **OPS-04 — Add nightly offline regression and consolidation.** Run pinned evaluation and memory maintenance without autonomous
+  - [x] **OPS-04 — Add nightly offline regression and consolidation.** Run pinned evaluation and memory maintenance without autonomous
     code, prompt, permission, or policy changes (`T1-13`, `OPS-02`, `OPS-03`).
   - [ ] **OPS-05 — Implement staged rollout controls.** Automate fixture → replay → shadow → owner canary → household → standing
     autonomy promotion with instant revocation and rollback (`OPS-02`, `OPS-03`).
