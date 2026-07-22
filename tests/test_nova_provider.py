@@ -827,3 +827,38 @@ async def test_dashboard_http_error_preserves_safe_json_detail() -> None:
     with pytest.raises(RuntimeError, match=r"HTTP 503\): MCP token missing"):
         await client.mcp_call("nova.dashboard.health")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_health_does_not_force_a_full_state_refetch_each_poll() -> None:
+    state_calls = 0
+    version_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal state_calls, version_calls
+        if request.url.path == "/api/state":
+            state_calls += 1
+            return httpx.Response(200, json=STATE)
+        if request.url.path == "/api/version":
+            version_calls += 1
+            return httpx.Response(200, json={"buildId": "build-xyz"})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    client = NovaDashboardClient(
+        "http://nova.test", transport=httpx.MockTransport(handler)
+    )
+    provider = NovaProvider(client, alias_refresh_seconds=30)
+
+    first = await provider.health()
+    second = await provider.health()
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["dashboardBuildId"] == "build-xyz"
+    assert first["stateGeneratedAt"] == STATE["generatedAt"]
+    # /health is polled every few seconds by the status strip: it must probe
+    # reachability (version) without re-pulling the entire HA snapshot each
+    # time. With the old force=True this fetched /api/state on every call.
+    assert version_calls == 2
+    assert state_calls == 1  # only the initial cold-cache fetch
+    await client.close()

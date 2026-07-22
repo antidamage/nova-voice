@@ -395,6 +395,10 @@ def test_agent_settings_apply_live_to_provider_without_changing_voice() -> None:
         "max_iterations": 6,
         "sleep_seconds": 0.3,
         "failure_seconds": 5,
+        "thinking_threshold_seconds": 2.5,
+        "llm_verify_enabled": True,
+        "llm_verify_min_interval_seconds": 1.5,
+        "llm_confirm_timeout_seconds": 3.0,
     }
     assert service.voice_settings is None
 

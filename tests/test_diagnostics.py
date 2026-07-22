@@ -281,13 +281,13 @@ class FakeService:
     def __init__(self) -> None:
         self.utterance = None
 
-    async def handle(self, utterance):
+    async def handle(self, utterance, **_kwargs):
         self.utterance = utterance
         return handle_result()
 
 
 class ProfilePromotingService(FakeService):
-    async def handle(self, utterance):
+    async def handle(self, utterance, **_kwargs):
         self.utterance = utterance
         return handle_result(
             speaker=SpeakerIdentity(

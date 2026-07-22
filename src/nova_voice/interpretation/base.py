@@ -10,6 +10,7 @@ from nova_voice.domain import (
     SelfProfileUpdate,
     ToolResult,
     Utterance,
+    VerificationVerdict,
 )
 
 
@@ -22,6 +23,24 @@ class Interpreter(ABC):
         Backends may implement this as a small independent model pass. Keeping
         the default empty lets deterministic/test interpreters opt out without
         coupling identity persistence to the general interpretation schema.
+        """
+
+        return None
+
+    async def confirm_objective(
+        self,
+        utterance: Utterance,
+        pending: list[dict[str, Any]],
+    ) -> VerificationVerdict | None:
+        """Judge whether observed device state now satisfies each objective.
+
+        Called from inside the bounded device-verification loop, never as a
+        front-facing turn: it must return only the structured verdict, never
+        speech. ``pending`` holds one entry per still-unconfirmed target:
+        ``{"target": str, "objective": str, "observed": dict | None,
+        "attempts": int}``. Backends may implement this as a small independent
+        JSON-only pass. The default returns None so the loop falls back to
+        purely deterministic verification.
         """
 
         return None

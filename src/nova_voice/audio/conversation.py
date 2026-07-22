@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate (no tokenizer round-trip) for a soft context budget."""
+
+    return max(1, len(text) // _CHARS_PER_TOKEN_ESTIMATE)
+
 
 @dataclass(frozen=True)
 class ConversationMessage:
@@ -124,6 +132,15 @@ class ConversationTracker:
     # long time must not accrete unbounded "old, old" history; only the most
     # recent turns are retained (older ones age out of context).
     MESSAGE_HISTORY_LIMIT = 16
+    # Soft, token-aware cap layered on top of the count cap above. The message
+    # COUNT cap alone is not enough: a handful of unusually verbose replies can
+    # still balloon the prompt well past the interpretation model's context
+    # window (a small on-device model with a modest context size), crowding
+    # out the room the model needs to finish its own structured JSON response
+    # and producing truncated, invalid completions. Estimated with a
+    # conservative chars-per-token heuristic, deliberately tight so there is
+    # always headroom left for the system prompt, tool schemas, and output.
+    MESSAGE_HISTORY_TOKEN_BUDGET = 700
 
     def append_turn(
         self,
@@ -146,6 +163,23 @@ class ConversationTracker:
             session.messages.append(ConversationMessage("assistant", assistant))
         if len(session.messages) > self.MESSAGE_HISTORY_LIMIT:
             del session.messages[: -self.MESSAGE_HISTORY_LIMIT]
+        self._compact_to_token_budget(session)
+
+    def _compact_to_token_budget(self, session: _RoomConversation) -> None:
+        """Drop the oldest messages while the estimated total exceeds budget.
+
+        Always keeps at least the most recent exchange, however large, so a
+        single verbose reply can never erase all context for its own
+        follow-up turn.
+        """
+
+        messages = session.messages
+        if not messages:
+            return
+        total = sum(_estimate_tokens(message.content) for message in messages)
+        while total > self.MESSAGE_HISTORY_TOKEN_BUDGET and len(messages) > 2:
+            removed = messages.pop(0)
+            total -= _estimate_tokens(removed.content)
 
     def record_observations(
         self, room_id: str, entries: list[str], *, limit: int = 8

@@ -10,12 +10,17 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Private" }
 dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "ddgs>=9,<10",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "jsonschema>=4.23,<5",
   # NeMo's current Numba dependency rejects NumPy 2.5+.
   "numpy>=2.1,<2.5",
   "orjson>=3.10,<4",
+  # Drives the Brave Search browser-scrape sidecar (ops/websearch_server.py).
+  # The chromium binary is a one-time host artifact under PLAYWRIGHT_BROWSERS_PATH.
+  "playwright>=1.48,<2",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
   "PyYAML>=6,<7",

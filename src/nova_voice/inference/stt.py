@@ -232,6 +232,30 @@ class NemoSpeechToText(SpeechToText):
         async with self._lock:
             return await asyncio.to_thread(self._transcribe, pcm16)
 
+    async def warmup(self) -> bool:
+        """Run one throwaway transcription so the first real turn is fast.
+
+        Restoring the checkpoint (in ``__init__``) makes the weights resident,
+        but the RNNT decoder's CUDA graph capture and NeMo's autocast/decode
+        kernels are only built on the first forward pass. Paying that on the
+        first addressed utterance adds a visible chunk to that turn's latency.
+        Running it here — at startup, in the quiescent single-threaded window,
+        now that the 24 GiB host absorbs the extra transient allocations without
+        contending with the resident TTS — moves the cost off the hot path.
+
+        Uses half a second of silence: it exercises the exact ``transcribe``
+        path without needing captured audio. Best-effort and non-fatal, mirroring
+        the speaker-model warmup, so a transient failure never blocks boot.
+        """
+        silence = b"\x00" * (16_000)  # 0.5 s of 16 kHz PCM16 (8000 samples)
+        try:
+            async with self._lock:
+                await asyncio.to_thread(self._transcribe, silence)
+        except Exception as error:  # noqa: BLE001 - warmup must never be fatal
+            logger.warning("STT warmup failed; first turn will pay JIT: %s", error)
+            return False
+        return True
+
     async def set_boosted_phrases(self, phrases: list[str]) -> None:
         """Rebuild the GPU phrase-boosting tree for the configured names.
 

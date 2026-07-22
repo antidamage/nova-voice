@@ -17,7 +17,17 @@ Environment=MPLCONFIGDIR=/opt/nova-voice/cache/matplotlib
 Environment=NUMBA_CACHE_DIR=/opt/nova-voice/cache/numba
 Environment=TRITON_CACHE_DIR=/opt/nova-voice/cache/triton
 Environment=PYTHONUNBUFFERED=1
+# Prefetch the STT and speaker-identity checkpoints into page cache before the
+# orchestrator restores them. NeMo's restore reads the whole archive, so warm
+# cache keeps a restart's ~5 GiB of model reads off disk. Best-effort ('-').
+ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/nemotron-speech-streaming-en-0.6b/nemotron-speech-streaming-en-0.6b.nemo /opt/nova-voice/models/speakerverification-en-titanet-large/speakerverification_en_titanet_large.nemo
 ExecStart=/opt/nova-voice/venv/bin/nova-voice serve
+# Soft memory ceiling (see nova-voice-llm.service). Sits above steady RSS plus
+# the transient ~4 GiB CPU copy NeMo holds while restoring the FP32 STT archive
+# before the CUDA transfer, so startup never throttles; it only reclaims a leak
+# before the system-wide earlyoom backstop can SIGTERM a model service.
+MemoryAccounting=yes
+MemoryHigh=12G
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=180
@@ -29,9 +39,15 @@ ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-IPAddressDeny=any
-IPAddressAllow=localhost
-IPAddressAllow=192.168.8.0/24
+# The optional web-access feature makes the orchestrator reach the public
+# internet (Gemini grounded answers, or the keyless DuckDuckGo fallback), so this
+# one unit is granted general egress. It is the ONLY nova-voice unit that is:
+# the LLM/TTS/DFN model units keep IPAddressDeny=any and stay locked to
+# localhost. IPAddressAllow=any allows all outbound connections from this process
+# only. To disable web access at the network layer, comment the line below and
+# restore: IPAddressDeny=any / IPAddressAllow=localhost / IPAddressAllow=192.168.8.0/24.
+# Tighter egress (a host allow-list or proxy) is possible future hardening.
+IPAddressAllow=any
 
 [Install]
 WantedBy=multi-user.target

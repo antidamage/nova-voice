@@ -16,6 +16,7 @@ from nova_voice.domain import (
     SelfProfileUpdate,
     ToolResult,
     Utterance,
+    VerificationVerdict,
 )
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
@@ -45,6 +46,25 @@ def environment_context_is_relevant(transcript: str) -> bool:
     """Gate time/weather facts to requests they can materially help answer."""
 
     return bool(_TIME_RELEVANCE.search(transcript) or _WEATHER_RELEVANCE.search(transcript))
+
+
+# Explicit "go and look this up" phrasing. This is one of the two web triggers:
+# it surfaces a deterministic cue that tells the planner the user is directly
+# asking for a lookup (the other trigger is the model's own judgment). It is a
+# hint, not a forced action — a false positive on a household command would be
+# corrected by the planner, which is told to prefer control tools.
+_WEB_LOOKUP_RELEVANCE = re.compile(
+    r"\b(?:look\s+(?:it|that|this|them)?\s*up|look\s+up|search(?:\s+(?:for|the\s+web|online))?|"
+    r"google|web\s+search|find\s+out|look\s+online|on\s+the\s+(?:web|internet)|"
+    r"what'?s\s+the\s+latest|latest\s+news|any\s+news|the\s+news\s+on)\b",
+    re.IGNORECASE,
+)
+
+
+def web_lookup_is_relevant(transcript: str) -> bool:
+    """Detect an explicit request to look something up on the web."""
+
+    return bool(_WEB_LOOKUP_RELEVANCE.search(transcript))
 
 
 # Retained dashboard data is only injected when the current utterance plausibly
@@ -127,6 +147,13 @@ Critical distinctions:
   when no wake word was heard; use the speech-act and confidence fields to reject ambiguity.
 - When utterance.conversationActive is true, the speech is addressed to the assistant even
   without another wake word. Do not ignore it merely because the wake word is absent.
+- A follow-up utterance in an open conversation that uses a pronoun, ellipsis, or implicit
+  reference to a device or zone from an earlier turn in this same conversation (for example
+  "turn them back on" after "turn off all of the lights", or "try that again") is a directive
+  on that same target. Resolve the referent from the conversation messages above, not from
+  activeGoal alone — activeGoal is cleared the instant a request is satisfied, so a prior
+  command that already succeeded leaves no goal to lean on. Plan the matching tool action;
+  do not downgrade to reply merely because the target was not restated by name.
 - Persona/tone never changes the requested action.
 - utterance.speaker describes only the current acoustic turn. A recognized profile may
   personalize the reply; an unknown speaker must never inherit identity from conversation history.
@@ -137,7 +164,9 @@ Critical distinctions:
   that they can tell you directly, for example "call me Addie" or "I use she/her pronouns".
   The separate identity extractor handles any correction; keep selfProfileUpdate null here.
 - Never invent provider names, tool names, entity IDs, services, rooms, or success.
-- In each action, copy call.tool exactly from semanticTools.function.name, including namespace.
+- In each action, copy call.tool exactly from semanticTools.function.name, including namespace,
+  and set call.provider to the part of that name before the first dot (e.g. tool "nova.query"
+  has provider "nova"; tool "web.ask" has provider "web").
 - Return zero to four actions. Dependencies refer only to earlier action IDs.
 - Non-execute decisions have no actions.
 - The response plan must not claim an action worked; execution happens later.
@@ -146,6 +175,16 @@ Decision mapping:
 - execute only when one or more semantic tool actions are required and returned.
 - reply to an addressed question, greeting, social/conversational turn, general-knowledge
   request, or request such as "tell me a joke" that needs no semantic tool.
+- If, and only if, a web.ask tool is present in semanticTools, you may look
+  information up online. Use it when the request needs current, real-world, or
+  external facts you do not reliably know (news, live results, prices, today's
+  events, an unfamiliar topic), or when deterministicCues.webLookupRequested is
+  true. Plan exactly one web.ask action whose query is a self-contained search
+  string rewritten from the request (include the who/what/where so it stands
+  alone). Retrieving information is a directive: set speechAct to directive,
+  decision to execute, and addressedProbability to 1.0. Never use web.ask for
+  household device control, and never when your own knowledge or the provided
+  context already answers the request. At most one web.ask per turn.
 - The conversation-start system context may carry a local date/time and outdoor-weather
   snapshot. A question about those facts is a reply, never a tool call. Mention them in
   other replies only when they are a meaningful addition.
@@ -165,6 +204,23 @@ Decision mapping:
 
 Return only the JSON object described by the response schema.
 """
+
+CONFIRM_OBJECTIVE_PROMPT = """You are a narrow home-control verification pass, not a
+conversational assistant. You judge whether each supplied objective is now met by the
+supplied observed device state. This output is never spoken aloud and the household never
+sees it directly.
+
+Rules:
+- Judge only from each item's observed state; never invent a value it does not contain.
+- Household smart-home integrations are commonly slow to report a change, not lossy: only
+  set confirmed=false when the observed state clearly contradicts the objective or is still
+  missing/stale (for example null, or a value unrelated to what was requested). A device that
+  has simply not reported yet is not evidence of failure by itself unless attempts is already
+  high.
+- reason must be one short clause (about 12 words or fewer) grounded in the observed state,
+  for example "brightness reads 40, objective needs 80" or "state is on as requested".
+- allConfirmed must be true only when every item's confirmed is true.
+Return only the JSON object described by the response schema."""
 
 IDENTITY_DISCLOSURE_PROMPT = """You are a narrow identity-disclosure extractor.
 Inspect only the supplied current-turn transcript. Decide whether the current speaker
@@ -234,6 +290,11 @@ class LlamaCppInterpreter(Interpreter):
         # Chance (0-1) that a single conversational reply is rendered
         # long-form (two to four sentences); rolled fresh for each response.
         self.long_response_probability: float = 0.0
+        # Web access (dashboard-tunable). When enabled, the planner is told it
+        # may use the web.ask tool; the sentence budget bounds the spoken web
+        # answer. Both are applied live from VoiceSettings.
+        self.web_access_enabled: bool = False
+        self.web_answer_max_sentences: int = 2
         self.agent_name: str = "Nova"
         self.wake_words: list[str] = ["beemo", "bimo", "bemo", "beamo", "bmo"]
         self.personality: str = "You are a bright, bubbly helper!"
@@ -288,6 +349,56 @@ class LlamaCppInterpreter(Interpreter):
             logger.warning("identity disclosure extraction unavailable: %s", error)
             return None
 
+    async def confirm_objective(
+        self,
+        utterance: Utterance,
+        pending: list[dict[str, Any]],
+    ) -> VerificationVerdict | None:
+        """Small JSON-only pass: does the observed state satisfy each objective?
+
+        Runs inside the bounded device-verification loop, not as a turn. It
+        never produces spoken text, only the structured verdict; a missing or
+        malformed response falls back to the loop's deterministic checks.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": CONFIRM_OBJECTIVE_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"utterance": utterance.transcript, "pending": pending},
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 300,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_verification_verdict",
+                    "strict": True,
+                    "schema": VerificationVerdict.model_json_schema(),
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            return VerificationVerdict.model_validate_json(content)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Objective confirmation is best-effort; the loop's own deterministic
+            # checks remain authoritative if this pass is ever unavailable.
+            logger.warning("objective confirmation unavailable: %s", error)
+            return None
+
     async def interpret(
         self,
         utterance: Utterance,
@@ -310,7 +421,12 @@ class LlamaCppInterpreter(Interpreter):
             },
             "activeGoal": active_goal.model_dump(mode="json") if active_goal else None,
             "deterministicCues": {
-                "explicitSelfIntention": has_explicit_self_intention(utterance.transcript)
+                "explicitSelfIntention": has_explicit_self_intention(utterance.transcript),
+                # Only surfaced when web access is on; when it is off the tool is
+                # not in semanticTools and the planner cannot act on the cue.
+                "webLookupRequested": (
+                    self.web_access_enabled and web_lookup_is_relevant(utterance.transcript)
+                ),
             },
             "relevantState": relevant_state,
             "semanticTools": tools,
@@ -380,7 +496,16 @@ class LlamaCppInterpreter(Interpreter):
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 1000,
+            # The deployed interpretation model runs a small, fixed context
+            # window (llama.cpp --ctx-size), shared by input and output alike:
+            # raising this alone cannot create more room if the prompt (system
+            # prompt + tool schemas + conversation history) is already large,
+            # since generation is capped at whatever remains of the context
+            # regardless of what is requested here. The real defence against
+            # truncated/invalid JSON is bounding prompt size (see
+            # ConversationTracker.MESSAGE_HISTORY_TOKEN_BUDGET); this is a
+            # modest safety margin on top of that, not the primary fix.
+            "max_tokens": 1200,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "nova_interpretation", "strict": True, "schema": schema},
@@ -422,7 +547,28 @@ class LlamaCppInterpreter(Interpreter):
         command_max_words: int | None = None,
     ) -> str | None:
         all_succeeded = bool(results) and all(result.ok for result in results)
-        if all_succeeded:
+        web_action_ids = {
+            action.id for action in interpretation.actions if action.call.provider == "web"
+        }
+        web_answered = any(
+            result.ok and result.action_id in web_action_ids for result in results
+        )
+        if web_answered:
+            # A web lookup returned material in facts.results[].observed (either a
+            # ready-made "answer" from the grounded backend, or search results
+            # plus an "excerpt" to summarize). Relay it in Nova's own voice; never
+            # go beyond what the material supports.
+            budget = max(1, int(self.web_answer_max_sentences))
+            plural = "s" if budget != 1 else ""
+            response_instruction = (
+                "A web lookup answered the user's request; its material is in "
+                "facts.results[].observed (an 'answer' to relay, or 'results'/"
+                "'excerpt' to summarize). Give the user that information in your "
+                f"own voice in at most {budget} spoken sentence{plural}. State only "
+                "what the material supports; if it names a clear source you may "
+                "mention the site briefly; never invent beyond it."
+            )
+        elif all_succeeded:
             word_budget = 1 if command_max_words is None else command_max_words
             plural = "s" if word_budget != 1 else ""
             response_instruction = (
@@ -436,7 +582,14 @@ class LlamaCppInterpreter(Interpreter):
                 "for any result whose ok value is false."
             )
         else:
-            response_instruction = "Answer the user's conversational request directly."
+            response_instruction = (
+                "Answer the user's conversational request directly. facts.results is empty: "
+                "you took no device action this turn. Never claim, imply, or narrate turning "
+                "on, off, up, or changing any light, switch, zone, or device, even one named "
+                "earlier in this conversation. If the request needed a device change, say so "
+                "honestly (for example ask them to repeat it or name the target) instead of "
+                "inventing that it happened."
+            )
         conversation_environment = (
             select_environment_context(
                 utterance.transcript,
@@ -477,13 +630,22 @@ class LlamaCppInterpreter(Interpreter):
         long_form = (
             conversational_reply and random.random() < self.long_response_probability
         )
-        length_instruction = (
-            "This conversational reply may use up to three substantial sentences. Relate "
-            "or create a story that is relevant to the user's subject and shaped by your "
-            "personality, then guide the final sentence back to the user's topic."
-            if long_form
-            else "Conversational replies must be one sentence and at most 10 spoken words."
-        )
+        web_budget = max(1, int(self.web_answer_max_sentences))
+        if web_answered:
+            length_instruction = (
+                f"Relay the web answer as at most {web_budget} natural spoken "
+                f"sentence{'s' if web_budget != 1 else ''}; be informative, not padded."
+            )
+        elif long_form:
+            length_instruction = (
+                "This conversational reply may use up to three substantial sentences. Relate "
+                "or create a story that is relevant to the user's subject and shaped by your "
+                "personality, then guide the final sentence back to the user's topic."
+            )
+        else:
+            length_instruction = (
+                "Conversational replies must be one sentence and at most 10 spoken words."
+            )
         system = f"""You are {self.agent_name}, and you are speaking your own reply out loud
 right now. Speak in the first person: call yourself "I", "me", and "my". Never refer to
 yourself by name or in the third person — never "{self.agent_name} will", "she can", or
@@ -494,7 +656,12 @@ still help. Never change a requested target or value. Never claim an action succ
 unless its supplied result has ok=true. If a result failed, say so plainly. If the
 decision is clarify, ask one concrete question. When decision=reply and there are no tool
 results, answer the conversational request directly, but never imply that household state
-changed. facts.relevantState is either null or the current authoritative smart-home state.
+changed. You took no device action this turn: never name a light, switch, zone, or other
+device as something you just turned on, off, up, or changed, and never describe flipping,
+cranking, or adjusting anything, even one mentioned earlier in this conversation. If a
+device change was requested and facts.results is empty, say you didn't catch the request
+or ask them to repeat it rather than inventing that it happened.
+facts.relevantState is either null or the current authoritative smart-home state.
 Its indoorRooms are inside, climateControls offer only on/off plus target temperature, and
 outdoor weather is separate. Use measured room temperature only for that named indoor room.
 facts.environment is either null or a vetted conversation-start time/weather
@@ -553,7 +720,7 @@ greet briefly and offer help. Return only the response JSON schema."""
             "temperature": (
                 temperature if temperature is not None else self.render_temperature
             ),
-            "max_tokens": 240 if long_form else 80,
+            "max_tokens": (50 * web_budget + 60) if web_answered else (240 if long_form else 80),
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
