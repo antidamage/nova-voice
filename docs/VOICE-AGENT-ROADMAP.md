@@ -162,7 +162,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 26 of 58 tasks complete. Next task: **T0-15**.
+  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 26 of 58 tasks complete. Next task: **T1-10**.
 
   ### Milestone decision map
 
@@ -171,8 +171,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 9 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**. Also ready: **M1-04 Selective
-  durable conversational memory** and **M1-05 Proactive home autonomy**.
+  Milestone progress: 9 of 26 complete. In progress: **M0-06 Dependable real-time core accepted** and **M1-04 Selective durable
+  conversational memory**. Also ready: **M1-05 Proactive home autonomy**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |

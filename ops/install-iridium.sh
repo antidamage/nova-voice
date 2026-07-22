@@ -27,7 +27,7 @@ usermod -a -G video,render nova-voice
 install -d -o nova-voice -g nova-voice \
   "$ROOT" "$ROOT/cache" "$ROOT/models" "$ROOT/runtime" "$ROOT/browsers" \
   /var/lib/nova-voice /var/lib/nova-voice/evaluation \
-  /var/lib/nova-voice/websearch /etc/nova-voice/tls
+  /var/lib/nova-voice/websearch /var/lib/nova-voice/mempalace /etc/nova-voice/tls
 chown -R nova-voice:nova-voice "$SOURCE_DIR"
 
 sudo -u nova-voice env UV_PROJECT_ENVIRONMENT="$ROOT/venv" \
@@ -48,6 +48,7 @@ install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tts.service" /etc/systemd
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tier0-endurance.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-dfn.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-websearch.service" /etc/systemd/system/
+install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-mempalace.service" /etc/systemd/system/
 install -d -m 0755 /etc/systemd/system/nova-voice.service.d
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tts-stream.conf" \
   /etc/systemd/system/nova-voice.service.d/tts-stream.conf
@@ -61,5 +62,5 @@ if [[ ! -f /etc/nova-voice/persona.yaml ]]; then
 fi
 
 systemctl daemon-reload
-systemctl enable nova-voice-llm.service nova-voice-tts.service nova-voice-dfn.service nova-voice-websearch.service nova-voice.service
+systemctl enable nova-voice-llm.service nova-voice-tts.service nova-voice-dfn.service nova-voice-websearch.service nova-voice-mempalace.service nova-voice.service
 echo "Installed but not started. Provision TLS/model files and the isolated streaming TTS runtime, then run the preflight first."

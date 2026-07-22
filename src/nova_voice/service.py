@@ -48,6 +48,7 @@ from nova_voice.interpretation.speech_cues import (
     enforce_speech_cues,
     has_abandonment,
 )
+from nova_voice.memory import MemoryRecord, MemPalaceClient, salient_memory_candidate
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.policy import ExecutionPolicy, PolicyOutcome
@@ -122,9 +123,7 @@ _OPERATIONAL_REQUEST_RE = re.compile(
     r"send|message|email|buy|book|order|call)\b",
     re.IGNORECASE,
 )
-_CAPABILITY_REQUEST_RE = re.compile(
-    r"\b(?:can|could|will|would)\s+you\b", re.IGNORECASE
-)
+_CAPABILITY_REQUEST_RE = re.compile(r"\b(?:can|could|will|would)\s+you\b", re.IGNORECASE)
 _LOCAL_KNOWLEDGE_RE = re.compile(
     r"\b(?:in\s+here|this\s+room|at\s+home|my\s+(?:light|lights|switch|device|thermostat)|"
     r"what(?:'s|\s+is)\s+the\s+(?:temperature|status|state)|"
@@ -188,8 +187,7 @@ def knowledge_web_fallback_relevant(
     if _CAPABILITY_REQUEST_RE.search(transcript) and not _KNOWLEDGE_REQUEST_RE.search(transcript):
         return False
     return bool(
-        interpretation.speech_act == SpeechAct.QUESTION
-        or _KNOWLEDGE_REQUEST_RE.search(transcript)
+        interpretation.speech_act == SpeechAct.QUESTION or _KNOWLEDGE_REQUEST_RE.search(transcript)
     )
 
 
@@ -283,9 +281,7 @@ def current_clock_context(
     }
 
 
-def _dashboard_observations(
-    interpretation: Interpretation, results: list[ToolResult]
-) -> list[str]:
+def _dashboard_observations(interpretation: Interpretation, results: list[ToolResult]) -> list[str]:
     """Compact one-line summaries of this turn's dashboard API responses.
 
     Only Nova (dashboard) results carrying observed state or a message are
@@ -328,6 +324,7 @@ class NovaVoiceService:
         durable_store: DurableAgentStore | None = None,
         event_consumer: HouseholdEventConsumer | None = None,
         authority: HouseholdAuthority | None = None,
+        memory: MemPalaceClient | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -338,14 +335,13 @@ class NovaVoiceService:
         self.durable_store = durable_store
         self.event_consumer = event_consumer
         self.authority = authority
+        self.memory = memory
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
         # follow-up elected on another microphone continues the same exchange.
         scope_key = (
-            (lambda room_id: "household")
-            if settings.arbitration_scope == "household"
-            else None
+            (lambda room_id: "household") if settings.arbitration_scope == "household" else None
         )
         self.sessions = sessions or SessionManager(
             follow_up_seconds=settings.conversation_idle_seconds,
@@ -417,8 +413,7 @@ class NovaVoiceService:
             failure_seconds=settings.ralph_loop_failure_seconds,
             thinking_threshold_seconds=settings.ralph_loop_thinking_threshold_ms / 1000,
             llm_verify_enabled=settings.ralph_loop_llm_verify_enabled,
-            llm_verify_min_interval_seconds=settings.ralph_loop_llm_verify_min_interval_ms
-            / 1000,
+            llm_verify_min_interval_seconds=settings.ralph_loop_llm_verify_min_interval_ms / 1000,
             llm_confirm_timeout_seconds=settings.ralph_loop_llm_confirm_timeout_seconds,
         )
 
@@ -588,9 +583,7 @@ class NovaVoiceService:
         prompt = (question or random.choice(self._PREVIEW_QUESTIONS)).strip()
         if not prompt:
             return None
-        utterance = Utterance.text(
-            prompt, room_id="preview", satellite_id="dashboard-preview"
-        )
+        utterance = Utterance.text(prompt, room_id="preview", satellite_id="dashboard-preview")
         interpretation = Interpretation(
             emotion=Emotion(confidence=1.0, intensity=0.0),
             speech_act=SpeechAct.QUESTION,
@@ -782,6 +775,42 @@ class NovaVoiceService:
                     "zones": [],
                     "nearbyTargets": [],
                 }
+        # Memory is a best-effort private service.  Retrieval is scoped to an
+        # enrolled household member; unknown/provisional voices never receive
+        # personal context, and a service fault can never delay a normal turn.
+        if self.memory is not None and utterance.speaker.status == "recognized":
+            memory_text = utterance.transcript.strip()
+            asking_for_memory = bool(
+                re.search(r"\bwhat (?:do|did) you remember\b", memory_text, re.I)
+            )
+            selected_memories = (
+                await self.memory.list(owner_id=utterance.speaker.person_id)
+                if asking_for_memory
+                else await self.memory.search(memory_text, owner_id=utterance.speaker.person_id)
+            )
+            # Direct spoken pin/forget requests act only on one unambiguous
+            # personal match. Ambiguity is left to the dashboard review screen.
+            memory_control = re.match(r"^(?:please )?(pin|forget)\s+(.+)$", memory_text, re.I)
+            if memory_control and len(selected_memories) == 1:
+                action, _ = memory_control.groups()
+                memory_id = selected_memories[0].id
+                if action.casefold() == "forget":
+                    await self.memory.request("DELETE", f"/v1/memories/{memory_id}")
+                    selected_memories = []
+                else:
+                    await self.memory.request(
+                        "PATCH", f"/v1/memories/{memory_id}", {"pinned": True}
+                    )
+            if selected_memories:
+                relevant_state["selectedMemory"] = [
+                    {
+                        "id": memory.id,
+                        "type": memory.memory_type.value,
+                        "text": memory.text,
+                        "confidence": memory.confidence,
+                    }
+                    for memory in selected_memories
+                ]
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.
@@ -891,13 +920,8 @@ class NovaVoiceService:
             )
         # The general interpretation model no longer owns this field. Replace
         # any value it emitted with the independent current-turn result.
-        interpretation = interpretation.model_copy(
-            update={"self_profile_update": profile_update}
-        )
-        if (
-            addressed_identity_turn
-            and profile_update is not None
-        ):
+        interpretation = interpretation.model_copy(update={"self_profile_update": profile_update})
+        if addressed_identity_turn and profile_update is not None:
             updated_speaker = await self.speaker_profiles.apply_disclosure(
                 utterance.speaker,
                 profile_update,
@@ -907,10 +931,7 @@ class NovaVoiceService:
         speaker_recognition_active = (
             self.settings.speaker_recognition_enabled
             and self.speaker_profiles is not None
-            and (
-                self.voice_settings is None
-                or self.voice_settings.speaker_recognition_enabled
-            )
+            and (self.voice_settings is None or self.voice_settings.speaker_recognition_enabled)
         )
         if (
             interpretation.decision == Decision.EXECUTE
@@ -1187,6 +1208,26 @@ class NovaVoiceService:
                 3,
             )
             turn_machine.record_response("knowledge_fallback", response_text)
+        # Persist only explicit/salient non-routine memories for a recognized
+        # speaker. Sensitive material is intentionally not auto-filed: the
+        # owner must use the dashboard confirmation workflow once exposed.
+        if self.memory is not None and utterance.speaker.status == "recognized":
+            candidate = salient_memory_candidate(utterance.transcript)
+            if candidate is not None:
+                await self.memory.create(
+                    MemoryRecord(
+                        text=candidate.text,
+                        memory_type=candidate.memory_type,
+                        sensitivity=candidate.sensitivity,
+                        needs_confirmation=candidate.needs_confirmation,
+                        owner_id=utterance.speaker.person_id,
+                        audience=[utterance.speaker.person_id]
+                        if utterance.speaker.person_id
+                        else [],
+                        provenance="voice conversation salience rule",
+                        source_turn_id=utterance.id,
+                    )
+                )
         turn_machine.set_policy(
             execute=outcome.execute,
             shadowed=outcome.shadowed,
@@ -1230,9 +1271,7 @@ class NovaVoiceService:
             response_text = command_acknowledgement(command_max_words)
             turn_machine.record_response("final", response_text)
         turn_machine.record_response("final", response_text, force=True)
-        engaged = (
-            utterance.wake_detected or interpretation.speech_act not in _AMBIENT_SPEECH_ACTS
-        )
+        engaged = utterance.wake_detected or interpretation.speech_act not in _AMBIENT_SPEECH_ACTS
         if conversation is not None:
             if has_abandonment(utterance.transcript, self._address_words()):
                 # The user ended the conversation: clear every scrap of its
@@ -1397,9 +1436,7 @@ class NovaVoiceService:
 
         while pending:
             if cancellation is not None and cancellation.requested.is_set():
-                for action in sorted(
-                    pending.values(), key=lambda candidate: candidate.order
-                ):
+                for action in sorted(pending.values(), key=lambda candidate: candidate.order):
                     append_result(
                         action,
                         ToolResult(
@@ -1645,6 +1682,11 @@ class NovaVoiceService:
                 if self.speaker_profiles is not None
                 else {"ok": True, "enabled": False}
             ),
+            "memory": (
+                await self.memory.health()
+                if self.memory is not None
+                else {"ok": True, "enabled": False}
+            ),
             "agentSettings": self.agent_settings.model_dump(mode="json", by_alias=True),
             "voiceSettings": (
                 self.voice_settings.model_dump(mode="json", by_alias=True)
@@ -1657,5 +1699,7 @@ class NovaVoiceService:
         self.store.stop()
         if self.event_consumer is not None:
             await self.event_consumer.close()
+        if self.memory is not None:
+            await self.memory.close()
         await self.interpreter.close()
         await self.registry.close()

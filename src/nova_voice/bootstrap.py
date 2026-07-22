@@ -8,6 +8,7 @@ from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 from nova_voice.interpretation.skills import load_skills
+from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.providers.nova.client import NovaDashboardClient
@@ -65,6 +66,11 @@ def build_service(settings: Settings) -> NovaVoiceService:
     store = TranscriptStore(settings.database_path, settings.retention_hours)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
     authority = HouseholdAuthority(durable_store, settings.household_tzinfo)
+    memory = MemPalaceClient(
+        settings.mempalace_url,
+        settings.mempalace_token if settings.mempalace_enabled else None,
+        timeout_seconds=settings.mempalace_timeout_seconds,
+    )
     event_consumer = HouseholdEventConsumer(
         nova_client,
         durable_store,
@@ -98,4 +104,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         durable_store=durable_store,
         event_consumer=event_consumer,
         authority=authority,
+        memory=memory,
     )
