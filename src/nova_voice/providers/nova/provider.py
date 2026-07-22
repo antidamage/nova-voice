@@ -217,7 +217,23 @@ NOVA_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope": {"enum": ["home", "room", "target", "tasks", "health"]},
+                    "scope": {
+                        "enum": [
+                            "home",
+                            "room",
+                            "target",
+                            "tasks",
+                            "health",
+                            "energy",
+                            "occupancy",
+                            "device_health",
+                            "maintenance",
+                            "media",
+                            "timers",
+                            "schedules",
+                            "diagnostics",
+                        ]
+                    },
                     "query": {"type": "string"},
                     "room": {"type": "string"},
                 },
@@ -949,6 +965,24 @@ class NovaProvider(CapabilityProvider):
             )
 
         state = await self.refresh()
+        if scope in {
+            "energy",
+            "occupancy",
+            "device_health",
+            "maintenance",
+            "media",
+            "timers",
+            "schedules",
+            "diagnostics",
+        }:
+            observed = self._extended_household_observed(state, scope)
+            return self._result(
+                action,
+                True,
+                "ok",
+                f"{scope.replace('_', ' ').capitalize()} read",
+                observed=observed,
+            )
         query = str(args.get("query") or args.get("room") or "")
         if not query or scope == "home":
             observed = {
@@ -970,6 +1004,96 @@ class NovaProvider(CapabilityProvider):
         return self._result(
             action, True, "ok", "Target state read", target=target.name, observed=observed
         )
+
+    @staticmethod
+    def _extended_household_observed(state: dict[str, Any], scope: str) -> dict[str, Any]:
+        """Return bounded, read-only extended household operational context.
+
+        The dashboard state contract is intentionally the sole source here.
+        New device domains become available only when present in that contract;
+        Nova never fabricates a scene, schedule, or diagnostic target.
+        """
+
+        entities = [item for item in state.get("entities", []) if isinstance(item, dict)]
+        unavailable = {"unavailable", "unknown"}
+
+        def brief(item: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": item.get("entity_id"),
+                "name": item.get("name"),
+                "room": logical_entity_room(item),
+                "domain": item.get("domain"),
+                "state": item.get("state"),
+                "attributes": item.get("attributes", {}),
+            }
+
+        if scope == "energy":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "entities": [
+                    brief(item)
+                    for item in entities
+                    if str(item.get("attributes", {}).get("device_class", "")).casefold()
+                    in {"energy", "power"}
+                    or str(item.get("attributes", {}).get("unit_of_measurement", ""))
+                    in {"W", "kW", "Wh", "kWh"}
+                ],
+            }
+        if scope == "occupancy":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "entities": [
+                    brief(item)
+                    for item in entities
+                    if str(item.get("domain", "")) == "person"
+                    or str(item.get("attributes", {}).get("device_class", "")).casefold()
+                    in {"occupancy", "motion", "presence"}
+                ],
+            }
+        if scope == "device_health":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "unavailable": [
+                    brief(item)
+                    for item in entities
+                    if str(item.get("state", "")).casefold() in unavailable
+                ],
+            }
+        if scope == "maintenance":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "attention": [
+                    brief(item)
+                    for item in entities
+                    if str(item.get("attributes", {}).get("device_class", "")).casefold()
+                    in {"battery", "problem", "update"}
+                    or str(item.get("state", "")).casefold() in unavailable
+                ],
+            }
+        if scope == "media":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "players": [
+                    brief(item) for item in entities if item.get("domain") == "media_player"
+                ],
+            }
+        if scope in {"timers", "schedules"}:
+            keys = ("timers", "schedules") if scope == "schedules" else ("timers",)
+            return {
+                "generatedAt": state.get("generatedAt"),
+                **{key: state.get(key, []) for key in keys},
+                "preferences": state.get("preferences", {}),
+            }
+        return {
+            "generatedAt": state.get("generatedAt"),
+            "totals": state.get("totals", {}),
+            "unavailable": [
+                brief(item)
+                for item in entities
+                if str(item.get("state", "")).casefold() in unavailable
+            ],
+            "entities": len(entities),
+        }
 
     async def _control(self, action: PlannedAction) -> ToolResult:
         args = action.call.arguments

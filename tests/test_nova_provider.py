@@ -70,6 +70,73 @@ async def test_dashboard_client_collects_voice_settings_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extended_operational_queries_are_read_only_and_state_bound() -> None:
+    state = {
+        "generatedAt": "2026-07-22T00:00:00Z",
+        "preferences": {"aircon": {"offTimerEndsAt": "2026-07-22T03:00:00Z"}},
+        "entities": [
+            {
+                "entity_id": "sensor.house_power",
+                "domain": "sensor",
+                "name": "House power",
+                "state": "420",
+                "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            },
+            {
+                "entity_id": "binary_sensor.office_motion",
+                "domain": "binary_sensor",
+                "name": "Office motion",
+                "state": "on",
+                "attributes": {"device_class": "motion"},
+            },
+            {
+                "entity_id": "media_player.lounge_tv",
+                "domain": "media_player",
+                "name": "Lounge TV",
+                "state": "playing",
+                "attributes": {},
+            },
+            {
+                "entity_id": "sensor.dead_battery",
+                "domain": "sensor",
+                "name": "Dead battery",
+                "state": "unavailable",
+                "attributes": {"device_class": "battery"},
+            },
+        ],
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/state"
+        return httpx.Response(200, json=state)
+
+    provider = NovaProvider(
+        NovaDashboardClient("http://nova.test", transport=httpx.MockTransport(handler))
+    )
+    for scope, key, expected in (
+        ("energy", "entities", "sensor.house_power"),
+        ("occupancy", "entities", "binary_sensor.office_motion"),
+        ("device_health", "unavailable", "sensor.dead_battery"),
+        ("maintenance", "attention", "sensor.dead_battery"),
+        ("media", "players", "media_player.lounge_tv"),
+    ):
+        result = await provider.execute(
+            PlannedAction(
+                id=f"query:{scope}",
+                order=0,
+                call=CapabilityToolCall(
+                    provider="nova", tool="nova.query", arguments={"scope": scope}
+                ),
+            )
+        )
+        assert result.ok
+        assert result.observed is not None
+        assert result.observed[key][0]["id"] == expected
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_device_action_admission_uses_the_full_dashboard_tree() -> None:
     state = {
         "zones": [
