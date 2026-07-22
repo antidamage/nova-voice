@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from nova_voice.automation import AutomationManager
 from nova_voice.durable.models import (
     EventRecord,
     ProactiveInterventionRecord,
@@ -57,9 +58,15 @@ class ProactivePolicy:
 
 
 class ProactiveInterventionEngine:
-    def __init__(self, store: DurableAgentStore, policy: ProactivePolicy | None = None) -> None:
+    def __init__(
+        self,
+        store: DurableAgentStore,
+        policy: ProactivePolicy | None = None,
+        automations: AutomationManager | None = None,
+    ) -> None:
         self.store = store
         self.policy = policy or ProactivePolicy()
+        self.automations = automations
         self.occupied_rooms: set[str] = set()
 
     async def handle_event(self, event: EventRecord) -> None:
@@ -74,6 +81,42 @@ class ProactiveInterventionEngine:
                 self.occupied_rooms.discard(room)
             return
         await self.consider(event, occupied_rooms=self.occupied_rooms)
+        await self._consider_active_automations(event)
+
+    async def _consider_active_automations(self, event: EventRecord) -> None:
+        """Create reviewable output proposals for activated owner automations."""
+
+        if self.automations is None:
+            return
+        for automation in await self.automations.active_for_event(event):
+            try:
+                for index, action in enumerate(automation.proposed_actions):
+                    channel = action["channel"]
+                    if channel == "voice" and self.policy.quiet_hours(utc_now()):
+                        channel = "dashboard"
+                    key = f"automation:{automation.id}:{event.id}:{index}"
+                    record_id = f"proactive:{key}"
+                    if await self.store.get(ProactiveInterventionRecord, record_id) is not None:
+                        continue
+                    current = utc_now()
+                    record = ProactiveInterventionRecord(
+                        id=record_id,
+                        created_at=current,
+                        updated_at=current,
+                        event_id=event.id,
+                        reason_code="approved_automation",
+                        reason_detail=str(action.get("message") or automation.summary),
+                        channel=channel,
+                        status=ProactiveInterventionState.PROPOSED,
+                        deduplication_key=key,
+                    )
+                    await self.store.create(
+                        record, actor_id=f"automation-monitor:{automation.id}"
+                    )
+            except Exception as error:
+                await self.automations.record_monitor_failure(
+                    automation.id, detail=type(error).__name__
+                )
 
     async def consider(self, event: EventRecord, *, occupied_rooms: set[str], now: datetime | None = None) -> ProactiveInterventionRecord | None:
         current = now or utc_now()

@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from nova_voice.durable.models import AutomationRecord, AutomationState, utc_now
+from nova_voice.durable.models import AutomationRecord, AutomationState, EventRecord, utc_now
 from nova_voice.durable.store import DurableAgentStore, StoredRecord
 
 
@@ -19,14 +19,38 @@ class AutomationManager:
         self.store = store
 
     async def draft(
-        self, *, automation_id: str, owner_id: str, summary: str, trigger: dict[str, Any], actions: list[dict[str, Any]]
+        self,
+        *,
+        automation_id: str,
+        owner_id: str,
+        summary: str,
+        trigger: dict[str, Any],
+        actions: list[dict[str, Any]],
     ) -> AutomationRecord:
         if not summary.strip() or not trigger or not actions:
             raise AutomationLifecycleError("a draft requires summary, trigger, and proposed actions")
+        if not isinstance(trigger.get("kind"), str) or not trigger["kind"].strip():
+            raise AutomationLifecycleError("an automation trigger requires an event kind")
+        for action in actions:
+            channel = action.get("channel")
+            if channel not in {"voice", "dashboard", "notification"}:
+                raise AutomationLifecycleError(
+                    "proposed actions must select voice, dashboard, or notification"
+                )
+            message = action.get("message")
+            if message is not None and (
+                not isinstance(message, str) or len(message) > 300
+            ):
+                raise AutomationLifecycleError("automation messages must be text under 300 characters")
         now = utc_now()
         record = AutomationRecord(
-            id=automation_id, owner_id=owner_id, summary=summary.strip(), trigger=trigger,
-            proposed_actions=tuple(actions), created_at=now, updated_at=now,
+            id=automation_id,
+            owner_id=owner_id,
+            summary=summary.strip(),
+            trigger=trigger,
+            proposed_actions=tuple(actions),
+            created_at=now,
+            updated_at=now,
         )
         await self.store.create(record, actor_id=owner_id)
         return record
@@ -56,6 +80,47 @@ class AutomationManager:
         )
         return (await self.store.save(updated, expected_revision=stored.revision, actor_id="automation-simulator")).record
 
+    @staticmethod
+    def trigger_matches(trigger: dict[str, Any], event: EventRecord) -> bool:
+        """Match a deliberately small, deterministic event trigger contract."""
+
+        if trigger.get("kind") != event.kind:
+            return False
+        source = trigger.get("source")
+        if source is not None and source != event.source:
+            return False
+        required_payload = trigger.get("payload", {})
+        if not isinstance(required_payload, dict):
+            return False
+        return all(event.payload.get(key) == value for key, value in required_payload.items())
+
+    async def active_for_event(self, event: EventRecord) -> tuple[AutomationRecord, ...]:
+        records = await self.store.list(AutomationRecord)
+        return tuple(
+            item.record
+            for item in records
+            if item.record.state == AutomationState.ACTIVE
+            and self.trigger_matches(item.record.trigger, event)
+        )
+
+    async def record_monitor_failure(self, automation_id: str, *, detail: str) -> AutomationRecord:
+        stored = await self._load(automation_id)
+        record = stored.record
+        updated = record.model_copy(
+            update={
+                "monitor_failures": record.monitor_failures + 1,
+                "state": AutomationState.FAILED,
+                "updated_at": utc_now(),
+            }
+        )
+        return (
+            await self.store.save(
+                updated,
+                expected_revision=stored.revision,
+                actor_id=f"automation-monitor:{detail[:80]}",
+            )
+        ).record
+
     async def approve(self, automation_id: str, *, actor_id: str) -> AutomationRecord:
         stored = await self._load(automation_id)
         record = stored.record
@@ -79,7 +144,9 @@ class AutomationManager:
         )
         return (await self.store.save(updated, expected_revision=stored.revision, actor_id=actor_id)).record
 
-    async def rollback(self, automation_id: str, *, actor_id: str, now: datetime | None = None) -> AutomationRecord:
+    async def rollback(
+        self, automation_id: str, *, actor_id: str, now: datetime | None = None
+    ) -> AutomationRecord:
         stored = await self._load(automation_id)
         record = stored.record
         if record.owner_id != actor_id or record.state not in {AutomationState.ACTIVE, AutomationState.PAUSED, AutomationState.FAILED}:
