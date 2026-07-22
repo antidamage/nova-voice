@@ -148,3 +148,16 @@ cursor-backed household event feed. Matching uses an explicit event kind and
 payload fields, creates one deterministic intervention per source event, and
 supports one-shot or recurring subscriptions. Subscriptions remain visible and
 cancellable after triggering.
+
+## Durable conversation continuity
+
+An acoustic conversation keeps bounded recent turn text only while its follow-up
+window is open. In parallel, `ConversationContinuityManager` stores a separate
+durable structural record: recognized participants, compact model-produced topic
+and goal summaries, topic stack, open user questions, unresolved-reference
+markers, and linked durable goal IDs. It never copies assistant replies or the
+full rolling transcript into durable storage.
+
+These records survive the microphone window and service restarts. Authenticated
+APIs can list them and explicitly resolve an open question; every change uses
+the durable store’s revision and audit semantics.
