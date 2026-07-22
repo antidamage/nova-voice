@@ -62,3 +62,15 @@ def test_iridium_voice_restart_brings_noise_suppression_back() -> None:
 
     assert "Wants=network-online.target nova-voice-dfn.service" in service
     assert "After=" in service and "nova-voice-dfn.service" in service
+
+
+def test_tier0_endurance_service_creates_its_writable_state_directory() -> None:
+    service = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "nova-voice-tier0-endurance.service"
+    ).read_text()
+
+    assert "StateDirectory=nova-voice/evaluation" in service
+    assert "ReadWritePaths=/var/lib/nova-voice/evaluation" in service
