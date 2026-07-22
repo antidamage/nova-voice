@@ -36,6 +36,7 @@ from nova_voice.durable.models import (
     CommitmentRecord,
     ConversationTopicRecord,
     DelegationGrantRecord,
+    DialogueMessageRecord,
     EventSubscriptionRecord,
     ExecutionRecord,
     GoalRecord,
@@ -173,6 +174,11 @@ class CommitmentContinuationRequest(BaseModel):
 class ConversationQuestionRequest(BaseModel):
     question: str
     actor: str = "dashboard-admin"
+
+
+class DialogueAcknowledgeRequest(BaseModel):
+    person_id: str
+    display_name: str | None = None
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -637,6 +643,32 @@ def create_app(
             ]
         }
 
+    @app.get("/v1/dialogue/messages")
+    async def list_dialogue_messages() -> dict:
+        manager = selected_service.dialogue
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Multi-party dialogue is unavailable")
+        return {"messages": [item.model_dump(mode="json") for item in await manager.list()]}
+
+    @app.post("/v1/dialogue/messages/{message_id}/acknowledge")
+    async def acknowledge_dialogue_message(
+        message_id: str, request: DialogueAcknowledgeRequest
+    ) -> dict:
+        manager = selected_service.dialogue
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Multi-party dialogue is unavailable")
+        try:
+            record = await manager.acknowledge(
+                message_id,
+                person_id=request.person_id,
+                display_name=request.display_name,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown dialogue message") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"message": record.model_dump(mode="json")}
+
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
         """Authenticated read-only operational trace for the live voice stack."""
@@ -705,6 +737,7 @@ def create_app(
             subscriptions,
             conversation_topics,
             relationships,
+            dialogue_messages,
             audit,
         ) = await asyncio.gather(
             durable.list(GoalRecord),
@@ -719,6 +752,7 @@ def create_app(
             durable.list(EventSubscriptionRecord),
             durable.list(ConversationTopicRecord),
             durable.list(RelationshipContinuityRecord),
+            durable.list(DialogueMessageRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -737,6 +771,7 @@ def create_app(
                 row.record.model_dump(mode="json") for row in conversation_topics
             ],
             "relationships": [row.record.model_dump(mode="json") for row in relationships],
+            "dialogueMessages": [row.record.model_dump(mode="json") for row in dialogue_messages],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }
