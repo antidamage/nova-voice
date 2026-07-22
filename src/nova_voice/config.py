@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8766, ge=1, le=65535)
     database_path: Path = Path("data/transcripts.sqlite3")
+    structural_telemetry_path: Path | None = None
     retention_hours: float = Field(default=24.0, gt=0, le=24)
     shadow_mode: bool = True
     passive_execution_enabled: bool = False

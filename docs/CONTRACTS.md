@@ -373,6 +373,25 @@ barge-in, backchannel, cross-talk, or false interruption. Only true barge-in
 sets the playback cancellation event; the other classes preserve the active
 stream.
 
+## Structural telemetry and evaluation contract
+
+Structural telemetry is a separate schema from the operator transcript monitor.
+It permits trace/input/context revisions, stage statuses, numeric latencies,
+queue depths, provider/tool/result codes, policy reasons, memory-quality
+numbers, proactive outcome codes, interruption classes/confidence, and error
+types. The schema has no audio, transcript, prompt, response, arguments,
+observed state, target, speaker, or free-form explanation field. Optional JSONL
+uses the same strict schema.
+
+Failure artifacts contain an input revision and point to an existing replay
+manifest/case. They pin exact model, prompt, contract, skill, policy, and
+provider versions; replay refuses an unregistered exact environment. Evaluation
+scenarios carry the same pins. Deterministic graders cover task outcome, policy,
+trace, latency, memory precision, and proactivity. A model grader may run only
+when a required structural metric is inconclusive, and its grade/version is
+recorded. A deployment gate fails on missing scenarios, pin mismatches, missing
+runs, failed runs, inconclusive required metrics, or failed pinned replays.
+
 ## Persona contract
 
 Persona configuration may select:

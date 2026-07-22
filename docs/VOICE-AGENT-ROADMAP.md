@@ -5,7 +5,7 @@
   Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
   wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, and 427 passing tests.
+  routing, short-lived context, diagnostics, and 438 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -156,8 +156,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 13 of 58 tasks complete. Next task: **OPS-01** (dependency for
-  `M0-06`).
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 16 of 58 tasks complete. Next task: **T0-14**.
 
   ### Milestone decision map
 
@@ -166,8 +165,8 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 5 of 26 complete. Ready to choose now: **MOPS-01 Reproducible observability and evaluation** or **M1-01 Durable
-  goal and plan engine**.
+  Milestone progress: 6 of 26 complete. Ready to choose now: **M0-06 Dependable real-time core accepted** or **M1-01 Durable goal and
+  plan engine**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -176,7 +175,7 @@
   | **Complete** | **M0-03 — Natural turn-taking** | Nova detects semantic turn completion, handles interruptions/backchannels, prefetches safely, and streams cancellable speech. | `T0-05`–`T0-09` | `M0-02` |
   | **Complete** | **M0-04 — Knowledge and speech reliability** | Knowledge gaps recover through one safe web lookup and numbers are spoken contextually. | `T0-10`–`T0-11` | None |
   | **Complete** | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
-  | Blocked | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
+  | Ready | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
   | Ready | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | Blocked | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
   | Blocked | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
@@ -195,7 +194,7 @@
   | Blocked | **M4-02 — Household digital twin** | Nova simulates household behavior, explains causes, rehearses automation, and evaluates energy scenarios. | `T4-03` | `M1-05` |
   | Blocked | **M4-03 — Visual assistance and continuity** | Visual help, object/location context, maintenance walkthroughs, and cross-device continuity obey memory policy. | `T4-04` | `M1-04`, `M4-01`, `M4-02` |
   | Blocked | **M4-04 — Frontier capabilities accepted** | Offline optimizers pass their safety/evaluation gate while the production speech path remains cascade-based. | `T4-05` | `M4-01`–`M4-03`, `MOPS-01` |
-  | Ready | **MOPS-01 — Reproducible observability and evaluation** | Redacted telemetry, pinned replay, the evaluation registry, and deterministic/model graders support release decisions. | `OPS-01`–`OPS-03` | `M0-02`, `M0-05` |
+  | **Complete** | **MOPS-01 — Reproducible observability and evaluation** | Redacted telemetry, pinned replay, the evaluation registry, and deterministic/model graders support release decisions. | `OPS-01`–`OPS-03` | `M0-02`, `M0-05` |
   | Blocked | **MOPS-02 — Continuous validation and staged rollout** | Nightly regression/consolidation and fixture-to-autonomy promotion run with revocation and rollback. | `OPS-04`–`OPS-05` | `M1-04`, `MOPS-01` |
 
   ### Tier 0 task queue — dependable real-time core
@@ -325,11 +324,11 @@
 
   ### Cross-cutting operations task queue
 
-  - [ ] **OPS-01 — Add redacted structural telemetry.** Record latency, queues, tool/policy outcomes, memory retrieval quality,
+  - [x] **OPS-01 — Add redacted structural telemetry.** Record latency, queues, tool/policy outcomes, memory retrieval quality,
     proactive outcomes, and interruption behavior without retaining excluded audio/transcripts (`T0-02`).
-  - [ ] **OPS-02 — Add pinned failure replay.** Replay failures against exact model, prompt, contract, skill, policy, and provider
+  - [x] **OPS-02 — Add pinned failure replay.** Replay failures against exact model, prompt, contract, skill, policy, and provider
     versions before deployment (`T0-12`, `OPS-01`).
-  - [ ] **OPS-03 — Build the evaluation registry and graders.** Track scenario results and implement deterministic outcome, policy,
+  - [x] **OPS-03 — Build the evaluation registry and graders.** Track scenario results and implement deterministic outcome, policy,
     trace, and selective model graders with task/policy/latency/memory/proactivity metrics (`T0-13`, `OPS-01`).
   - [ ] **OPS-04 — Add nightly offline regression and consolidation.** Run pinned evaluation and memory maintenance without autonomous
     code, prompt, permission, or policy changes (`T1-13`, `OPS-02`, `OPS-03`).
@@ -470,7 +469,7 @@
 
   ## Test and Acceptance Plan
 
-  - Preserve the 427-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
+  - Preserve the 438-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
   - Build a virtual household with fake time, occupancy, HA entities, calendars, communications, failures, delayed state convergence,
     and concurrent speakers.
 

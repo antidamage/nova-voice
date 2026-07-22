@@ -70,7 +70,7 @@ satellite.
 - The deployed vLLM-Omni TTS service streams PCM chunks for one finalized reply
   as sentence/clause synthesis units, and playback can be cancelled within a
   unit or before the next one begins.
-- The 427-test automated suite passes. A manifest-driven PCM16 replay runner
+- The 438-test automated suite passes. A manifest-driven PCM16 replay runner
   and fake-clock household simulator cover deterministic failure reproduction,
   but the complete recorded household corpus, physical-microphone,
   latency, false-activation, concurrent-residency, and endurance gates remain
@@ -93,6 +93,14 @@ fixtures, compares pinned transcript/trace/monitor outcomes, and records replay
 latency. Its simulated household provider supports controlled time, ordered
 events, delayed entity convergence, injected provider failures, occupancy, and
 same-timestamp concurrent speakers.
+
+The live runtime also emits a separate structural telemetry stream containing
+only revisions, timings, queue depths, stage/policy/tool outcomes, memory and
+proactivity metrics, interruption classes, and error types. Version-pinned
+failure artifacts reference replay cases without copying audio or transcripts.
+A SQLite evaluation registry records deterministic outcome/policy/trace/
+latency/memory/proactivity grades, invokes a model grader only for inconclusive
+structural metrics, and produces an explicit deployment-gate decision.
 
 All inference remains local to the household LAN. Raw audio is held only in
 bounded memory; development transcripts expire after 24 hours.
