@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "pinnedArtifacts": {
+    "config/tier0-acceptance.json": "d116f7202d87b76ad207091b507f9c06a5a42292e6da8ff62b4ee0a5d8d7c93c",
+    "ops/versions.env": "29693cb27b99c654616c08be0be0322a1407e4a81b6597988b6c28cc82bcc845"
+  },
+  "cases": [
+    {
+      "id": "temperature-pronunciation",
+      "kind": "spoken_numbers",
+      "input": "It is 9.8C outside.",
+      "expected": "It is nine point eight degrees outside."
+    },
+    {
+      "id": "private-memory-denial",
+      "kind": "memory_audience",
+      "owner": "owner",
+      "actor": "guest",
+      "expected": false
+    },
+    {
+      "id": "digital-twin-read-only",
+      "kind": "digital_twin",
+      "expected": 0
+    }
+  ]
+}

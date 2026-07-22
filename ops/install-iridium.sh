@@ -49,6 +49,8 @@ install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tier0-endurance.service" 
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-dfn.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-websearch.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-mempalace.service" /etc/systemd/system/
+install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-nightly.service" /etc/systemd/system/
+install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-nightly.timer" /etc/systemd/system/
 install -d -m 0755 /etc/systemd/system/nova-voice.service.d
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tts-stream.conf" \
   /etc/systemd/system/nova-voice.service.d/tts-stream.conf
@@ -62,5 +64,5 @@ if [[ ! -f /etc/nova-voice/persona.yaml ]]; then
 fi
 
 systemctl daemon-reload
-systemctl enable nova-voice-llm.service nova-voice-tts.service nova-voice-dfn.service nova-voice-websearch.service nova-voice-mempalace.service nova-voice.service
+systemctl enable nova-voice-llm.service nova-voice-tts.service nova-voice-dfn.service nova-voice-websearch.service nova-voice-mempalace.service nova-voice-nightly.timer nova-voice.service
 echo "Installed but not started. Provision TLS/model files and the isolated streaming TTS runtime, then run the preflight first."
