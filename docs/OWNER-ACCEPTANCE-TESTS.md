@@ -111,3 +111,130 @@ only a non-critical, reversible live condition. Automation remains Not tested un
 1. Refresh the dashboard and confirm Voice Agent administration and memory panels load without an unavailable banner.
 2. Use the browser microphone for one ordinary smart-home command and one factual question. Expected: the normal voice path remains
    responsive; this is a user-run check only, not a speaker-to-microphone loopback test.
+
+## Tier 0 household gate
+
+These are the only remaining unimplemented-as-evidence Tier 0 tasks. They must
+be observed in normal household conditions; do not substitute a synthetic
+speaker-to-microphone loop.
+
+1. From each supported browser microphone location, try quiet, far-field,
+   background-media, and ordinary household-noise requests. Expected: one
+   transcript and one response, with no false activation from media.
+2. During a reply, interrupt with a new addressed request; also use harmless
+   backchannels such as "mm-hm" while Nova speaks. Expected: true barge-in stops
+   the old response, while a backchannel does not destroy the active answer.
+3. Exercise the number corpus: temperatures, years, dates, ordinals, counts,
+   currency, versions, IP addresses, street numbers, and phone numbers.
+   Expected: context-appropriate pronunciation with no phone-number cardinals.
+4. Leave the deployed stack running for 24 hours with normal use. At the end,
+   verify browser reconnection, one ordinary command, one web fallback, and one
+   memory query without reloading services. Expected: no stuck listener,
+   duplicated playback, model eviction, or growing latency.
+5. Record endpoint-to-final-transcript, first-audio, interruption, queue, and
+   service-residency observations from the endurance report. Expected: the Tier
+   0 gate accepts only if every required artifact is present and passing.
+
+## Durable plans, authority, and restart recovery
+
+1. Create a harmless multi-step request containing a question or delayed step,
+   then restart or reload the browser before answering. Expected: the pending
+   goal remains visible and resumes once, without duplicating completed work.
+2. Cancel a pending goal from Voice Agent administration. Expected: it becomes
+   cancelled, no later timer/event executes it, and the audit view identifies
+   the actor and reason.
+3. Give a recognized household test identity a narrow, expiring grant, exercise
+   one permitted action and one out-of-scope action, then revoke it. Expected:
+   only the scoped action succeeds and revocation applies immediately.
+4. Inspect the audit log after create, approve, execute, cancel, and revoke
+   operations. Expected: revisions are ordered and no side effect lacks a
+   before/after lifecycle record.
+
+## Personal assistant and multi-day behavior
+
+1. Create a harmless calendar item and reminder with an explicit timezone,
+   edit one, then delete it. Expected: Nova reads back the exact date/time and
+   verifies each mutation against the provider.
+2. Ask an ambiguous contact or list request. Expected: Nova asks which target
+   you mean rather than guessing; a confirmed edit remains reversible.
+3. Draft (but do not send unless you choose to) a message or invitation.
+   Expected: recipient, channel, and content are previewed, and cancellation
+   leaves no delivered item.
+4. Draft a harmless transaction or booking. Expected: recipient/counterparty,
+   amount, currency, budget/grant, and approval are validated before execution;
+   use cancel/undo instead of a real purchase for this pass.
+5. Ask for cited research on a current topic, continue using voice normally,
+   then return later. Expected: the research completes asynchronously with
+   citations and an honest uncertainty level.
+6. Create a recurring reminder and an event-conditioned commitment, reload the
+   service/browser, and satisfy the condition once. Expected: each occurrence
+   is delivered once, missed/deadline state is visible, and recurrence remains.
+7. Review morning/evening briefing output around a test calendar conflict.
+   Expected: timezone, conflicts, preparation prompts, and subscriptions are
+   correct after a restart.
+
+## Conversation continuity, people, and adaptive speech
+
+1. Hold a longer conversation with two topic changes, an "actually" correction,
+   and an unresolved question; return to it in a later session. Expected: Nova
+   recalls the relevant topic/open thread without replaying unrelated history.
+2. Correct an earlier saved preference, then query it in a later conversation.
+   Expected: the corrected value supersedes the old one and the callback is
+   relevant rather than forced.
+3. With two consenting household participants, alternate addressed and
+   unaddressed turns and ask Nova to relay a harmless message to the other
+   person. Expected: speakers/addressees are attributed correctly and the
+   message is delivered once to the intended person.
+4. Save one private memory and one explicitly shared memory. Query them as the
+   owner, the other recognized participant, and an unknown/guest speaker.
+   Expected: only the declared audiences receive each memory; guests receive no
+   private callback, export, correction, or deletion access.
+5. Test an English sentence containing a name or phrase from another language.
+   Expected: the code-switched phrase is preserved and a per-user pronunciation
+   entry changes only that user's delivery.
+6. Set a slower accessibility pace, then night/whisper delivery, and compare two
+   user profiles. Expected: preferences remain per-user, understandable, and do
+   not leak into another profile.
+
+## Multimodal, digital-twin, and visual continuity
+
+1. Explicitly share a harmless image and a short text/PDF document. Expected:
+   Nova reports source/provenance, limits the audience to the share, and expires
+   the retained asset according to policy.
+2. Attempt a camera snapshot without a matching owner/grant, then with a narrow
+   valid grant. Expected: the first is denied and the second returns only the
+   requested snapshot with no continuous capture.
+3. Ask Nova to simulate a light/energy scenario and explain the cause and
+   projected energy. Expected: the response names the baseline revision and
+   reports zero side effects; no actual device changes.
+4. Rehearse a harmless automation in the digital twin. Expected: trigger match,
+   proposed action count, warnings, and safety result are shown without
+   activation.
+5. Explicitly save a harmless object's location from a shared image, then query
+   it from an authorized second device. Expected: source and audience follow the
+   record; an observation that was not explicitly saved creates no location
+   memory.
+6. Ask for a maintenance walkthrough from a shared document, continue it on a
+   second authorized device, and request the next step. Expected: bounded,
+   numbered, source-derived steps continue without invented instructions.
+
+## Operations and rollout controls
+
+1. After the first overnight run, inspect
+   `/var/lib/nova-voice/evaluation/nightly` on Iridium. Expected: a
+   content-addressed JSON artifact has passing pins/regressions, a
+   restore-verified MemPalace backup, and zero code/prompt/permission/policy
+   mutations.
+2. Confirm `nova-voice-nightly.timer` is enabled and has a future trigger.
+   Expected: a missed run is caught after reboot because the timer is
+   persistent; no foreground voice latency is introduced.
+3. Create a test rollout through the owner control API and supply eligible
+   evidence one stage at a time. Expected: fixture -> replay -> shadow -> owner
+   canary -> household -> standing autonomy cannot skip a stage or reuse
+   mismatched pins.
+4. Try the final promotion without an authority scope. Expected: it is denied;
+   a narrow explicit scope succeeds.
+5. Revoke the rollout and immediately check its effective permission. Expected:
+   access denies without waiting for another evaluator run. Roll it back to an
+   earlier stage and confirm the history retains promotion, revocation, and
+   rollback evidence.

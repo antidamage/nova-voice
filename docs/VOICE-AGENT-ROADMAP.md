@@ -2,38 +2,29 @@
 
   ## Summary
 
-  Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
-  wake/follow-up conversations, speaker
-  recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, a restart-safe durable goal/plan
-  engine, an authenticated resumable household event feed, enforced household
-  authority/delegation administration, and 464 passing tests.
+  Nova now has the planned real-time, durable-agent, personal-assistant,
+  conversational, multimodal, and operational foundations. This includes
+  semantic endpointing and interruption recovery, grounded knowledge fallback,
+  context-aware spoken numbers, durable plans and household events, scoped
+  authority, selective MemPalace memory, commitments, research, briefings,
+  multi-party continuity, adaptive speech, governed visual inputs, a read-only
+  digital twin, recommendation-only offline optimizers, nightly pinned
+  validation, and staged rollout controls. The regression suite contains 602
+  passing tests.
 
-  The main gaps are architectural rather than prompt-level:
+  The remaining work is acceptance evidence rather than another implementation
+  batch:
 
-  - ConversationTracker and SessionManager remain ephemeral turn helpers, while
-    the separate durable goal/plan engine now supplies versioned records,
-    transactional recovery, leases, waits, approvals, events, retries, and
-    compensation. Foreground turns do not yet create durable plans
-    automatically.
+  - Run the owner-controlled household audio corpus and 24-hour production
+    endurance/residency checks for `T0-15` and `T0-16`.
 
-  - Only Nova home control/tasks and web search are available.
-  - The durable engine now consumes normalized Dashboard household events, but
-    there is no durable personal memory, commitment tracking, or proactive
-    decision engine. Household identity classes, scoped delegation, revocation,
-    administration, and audit replay are now implemented.
+  - Complete owner acceptance for the already implemented Tier 1 through Tier 4
+    structural gates. These checks intentionally remain `[~]`; unit tests are
+    not a substitute for household, privacy, naturalness, and physical-device
+    observation.
 
-  - Turn-taking now layers bounded audio-native semantic endpointing, adaptive
-    interruption recovery, and stable read-only prefetch on the authoritative
-    final transcript; live household tuning and acceptance evidence remain.
-
-  - Deterministic recorded-audio replay and fake-clock household simulation are
-    available; the full household corpus, endurance, false-activation shadowing,
-    and long-running-task evaluation remain incomplete.
-
-  - Runtime documentation now matches the deployed 60-second default, supported browser microphone paths, Iridium/Nova topology, and
-    final-buffer STT/incremental-PCM TTS limits. Live latency, replay, physical-audio, residency, and endurance acceptance evidence is
-    still incomplete.
+  - No speaker-to-microphone loopback test is required. Browser microphones are
+    supported and are the normal owner acceptance path.
 
   Target design: retain the cascade architecture and its deterministic safety core, while separating immediate voice interaction from
   durable goals, plans, events, permissions, memory, and background work.
@@ -162,7 +153,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 34 of 58 tasks complete. Next blocked gate: **T0-15/T0-16**, then **T1-16**.
+  Status: `[x]` deployed/accepted, `[~]` implemented and awaiting deployment/acceptance, `[ ]` pending. Current progress: 52 of 58 tasks complete, four implemented gates await owner acceptance, and two live Tier 0 acceptance tasks remain. Next blocked gate: **T0-15/T0-16**, then **T1-16**.
 
   ### Milestone decision map
 
@@ -171,7 +162,7 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 12 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**.
+  Milestone progress: 16 of 26 complete. In progress: **M0-06 Dependable real-time core accepted**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
@@ -191,16 +182,16 @@
   | Blocked | **M2-02 — Safe communications and transactions** | Messages, invitations, travel, shopping, bookings, finance, and purchases use preview, validation, grants, budgets, verification, and undo. | `T2-04`–`T2-05` | `M1-03`, `M2-01` |
   | Blocked | **M2-03 — Commitments, research, and briefings** | Multi-day commitments, cited research, briefings, conflicts, preparation prompts, and event subscriptions survive restarts. | `T2-06`–`T2-08` | `M1-01`, `M1-02`, `M2-01` |
   | Blocked | **M2-04 — Personal digital assistant accepted** | Tier 2 passes multi-day, timezone, recipient, amount, audit, cancellation, and undo gates. | `T2-09` | `M2-01`–`M2-03` |
-  | Blocked | **M3-01 — Durable conversational continuity** | Topics, relationships, narrative summaries, open threads, preferences, and long-form discussion persist appropriately. | `T3-01`–`T3-03` | `M0-03`, `M1-01`, `M1-04` |
-  | Blocked | **M3-02 — Private multi-party dialogue** | Speaker attribution, addressee detection, turn allocation, and private/shared memory boundaries work for household conversations. | `T3-04`–`T3-05` | `M1-03`, `M1-04`, `M3-01` |
-  | Blocked | **M3-03 — Adaptive multilingual speech** | Code-switching, pronunciation, night/whisper delivery, accessibility pacing, and per-user speech preferences are supported. | `T3-06` | `M0-03`, `M3-01` |
+  | **Complete** | **M3-01 — Durable conversational continuity** | Topics, relationships, narrative summaries, open threads, preferences, and long-form discussion persist appropriately. | `T3-01`–`T3-03` | `M0-03`, `M1-01`, `M1-04` |
+  | **Complete** | **M3-02 — Private multi-party dialogue** | Speaker attribution, addressee detection, turn allocation, and private/shared memory boundaries work for household conversations. | `T3-04`–`T3-05` | `M1-03`, `M1-04`, `M3-01` |
+  | **Complete** | **M3-03 — Adaptive multilingual speech** | Code-switching, pronunciation, night/whisper delivery, accessibility pacing, and per-user speech preferences are supported. | `T3-06` | `M0-03`, `M3-01` |
   | Blocked | **M3-04 — Conversational continuity accepted** | Tier 3 passes longitudinal memory, correction, privacy, multi-party, naturalness, and authority-separation gates. | `T3-07` | `M3-01`–`M3-03` |
   | Blocked | **M4-01 — Governed multimodal inputs** | Replaceable visual/document providers accept explicit user shares and permitted camera snapshots with provenance. | `T4-01`–`T4-02` | `M2-04` |
-  | Blocked | **M4-02 — Household digital twin** | Nova simulates household behavior, explains causes, rehearses automation, and evaluates energy scenarios. | `T4-03` | `M1-05` |
+  | **Complete** | **M4-02 — Household digital twin** | Nova simulates household behavior, explains causes, rehearses automation, and evaluates energy scenarios. | `T4-03` | `M1-05` |
   | Blocked | **M4-03 — Visual assistance and continuity** | Visual help, object/location context, maintenance walkthroughs, and cross-device continuity obey memory policy. | `T4-04` | `M1-04`, `M4-01`, `M4-02` |
   | Blocked | **M4-04 — Frontier capabilities accepted** | Offline optimizers pass their safety/evaluation gate while the production speech path remains cascade-based. | `T4-05` | `M4-01`–`M4-03`, `MOPS-01` |
   | **Complete** | **MOPS-01 — Reproducible observability and evaluation** | Redacted telemetry, pinned replay, the evaluation registry, and deterministic/model graders support release decisions. | `OPS-01`–`OPS-03` | `M0-02`, `M0-05` |
-  | Blocked | **MOPS-02 — Continuous validation and staged rollout** | Nightly regression/consolidation and fixture-to-autonomy promotion run with revocation and rollback. | `OPS-04`–`OPS-05` | `M1-04`, `MOPS-01` |
+  | **Complete** | **MOPS-02 — Continuous validation and staged rollout** | Nightly regression/consolidation and fixture-to-autonomy promotion run with revocation and rollback. | `OPS-04`–`OPS-05` | `M1-04`, `MOPS-01` |
 
   ### Tier 0 task queue — dependable real-time core
 
