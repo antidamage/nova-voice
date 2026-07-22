@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     icloud_calendar_url: str | None = None
     icloud_reminders_url: str | None = None
     icloud_timeout_seconds: float = Field(default=10, gt=0, le=30)
+    personal_data_path: Path = Path("/var/lib/nova-voice/personal-data.sqlite3")
 
     @property
     def icloud_configured(self) -> bool:
