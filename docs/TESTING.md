@@ -56,6 +56,22 @@ changes, injected failure counts, and concurrent speaker events. Calling
 scenarios exactly repeatable. The simulator is test-only and is never added to
 the production provider allowlist.
 
+## Structural evaluation and deployment evidence
+
+Live monitor events are projected into `StructuralTelemetry`; tests deliberately
+inject transcript, response, prompt, tool-argument, and observed-state content
+and assert none reaches its strict schema or optional JSONL. Queue, memory,
+proactivity, interruption, TTS pacing, policy/tool, trace, latency, and error
+records have explicit numeric/code fields.
+
+`FailureReplayStore` saves content-free failure pointers and all six version-pin
+classes. `PinnedFailureReplayer` refuses to run without the exact registered
+environment and its multi-failure gate raises on any regression. The SQLite
+`EvaluationRegistry` persists versioned scenarios/runs and deterministic grades.
+Its deployment gate requires the newest exact-pin result for every scenario to
+pass; required inconclusive metrics block unless a selective, versioned model
+grade resolves them.
+
 ## Independence and extensibility gates
 
 - `nova-voice` contains no imports, workspace links, generated types, assets, or

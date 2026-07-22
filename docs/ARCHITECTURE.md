@@ -110,10 +110,15 @@ processors remain outside the core.
     the same resident LLM after execution.
 12. `StreamingTtsService`: sentence/clause output with mid-unit and inter-unit
     barge-in cancellation.
-13. `RetentionObserver`: writes TTL data; regular observers record redacted metrics.
+13. `RetentionObserver`: writes TTL data; `StructuralTelemetry` independently
+    records content-free revision, timing, queue, policy/tool, interruption,
+    memory, proactivity, and error evidence in memory and optional JSONL.
 14. `EvaluationHarness`: manifest-pinned PCM16 replay plus an isolated
     fake-clock household capability provider. It is not registered in the live
     provider registry and cannot reach household services.
+15. `EvaluationRegistry`: stores version-pinned scenarios and structural grader
+    outcomes in SQLite. Deployment eligibility requires a latest passing run for
+    every registered exact-pin scenario plus successful pinned failure replays.
 
 These processors are coordinated by `ForegroundTurnStateMachine`. Its immutable
 snapshots contain hashed input/context revisions rather than transcript text,

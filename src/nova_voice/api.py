@@ -41,6 +41,7 @@ from nova_voice.satellites.protocol import (
 )
 from nova_voice.service import NovaVoiceService
 from nova_voice.speech_normalization import normalize_spoken_numbers
+from nova_voice.telemetry import StructuralTelemetry
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
 
 logger = logging.getLogger(__name__)
@@ -121,13 +122,18 @@ def create_app(
     )
     janitor_task: asyncio.Task | None = None
     monitor = VoiceMonitor()
+    structural_telemetry = StructuralTelemetry(selected_settings.structural_telemetry_path)
 
     def attach_monitor() -> None:
         if selected_audio is None:
             return
         setter = getattr(selected_audio, "set_monitor_sink", None)
         if callable(setter):
-            setter(lambda kind, detail: monitor.record(kind, **detail))
+            def record_pipeline_event(kind: str, detail: dict) -> None:
+                monitor.record(kind, **detail)
+                structural_telemetry.ingest_monitor(kind, detail)
+
+            setter(record_pipeline_event)
 
     attach_monitor()
 
@@ -237,6 +243,7 @@ def create_app(
     app = FastAPI(title="Nova Voice", version="0.1.0", lifespan=lifespan)
     app.state.service = selected_service
     app.state.monitor = monitor
+    app.state.structural_telemetry = structural_telemetry
 
     @app.get("/health")
     async def health() -> dict:
@@ -978,6 +985,11 @@ def create_app(
                 try:
                     queue.put_nowait(frame)
                 except asyncio.QueueFull:
+                    structural_telemetry.record_queue(
+                        "audio",
+                        queue.qsize(),
+                        capacity=queue.maxsize,
+                    )
                     logger.warning(
                         "native satellite audio queue full id=%s received=%s processed=%s "
                         "sequence=%s elapsed_s=%.1f",
@@ -1007,6 +1019,12 @@ def create_app(
             )
             return
         finally:
+            if hello is not None:
+                structural_telemetry.record_queue(
+                    "audioDisconnect",
+                    queue.qsize() if "queue" in locals() else 0,
+                    capacity=queue.maxsize if "queue" in locals() else 0,
+                )
             if playback_connection is not None:
                 room_playback.unregister(playback_connection)
             if hello is not None:
