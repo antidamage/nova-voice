@@ -312,7 +312,8 @@
     correction, export, and forget operation (`T1-07`, `T1-11`, `T3-04`).
   - [x] **T3-06 — Add multilingual and user-specific speech support.** Implement code-switching, pronunciation dictionaries,
     whisper/night mode, accessibility pacing, and per-user speech preferences (`T0-08`, `T3-01`).
-  - [ ] **T3-07 — Pass the Tier 3 gate.** Complete longitudinal precision, contradiction/correction, privacy-boundary, multi-party,
+  - [~] **T3-07 — Pass the Tier 3 gate.** The fail-closed structural evidence harness is implemented; final owner acceptance remains
+    deferred to the consolidated acceptance pass. Complete longitudinal precision, contradiction/correction, privacy-boundary, multi-party,
     naturalness, and action-authority-separation evaluations (`T3-01` through `T3-06`).
 
   ### Tier 4 task queue — frontier capabilities
