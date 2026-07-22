@@ -15,6 +15,7 @@ from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.icloud.client import ICloudCalDAVClient
 from nova_voice.providers.icloud.provider import ICloudProvider
+from nova_voice.providers.library.provider import HouseholdLibraryProvider
 from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.personal.provider import PersonalDataProvider
@@ -60,10 +61,12 @@ def build_service(settings: Settings) -> NovaVoiceService:
         default_backend=settings.web_backend_default,
         search_results=settings.web_search_results,
     )
-    registry = CapabilityRegistry(allowlist={"nova", "web", "icloud", "personal"})
+    registry = CapabilityRegistry(allowlist={"nova", "web", "icloud", "personal", "library"})
     registry.register(nova_provider)
     registry.register(web_provider)
-    registry.register(PersonalDataProvider(PersonalDataStore(settings.personal_data_path)))
+    personal_store = PersonalDataStore(settings.personal_data_path)
+    registry.register(PersonalDataProvider(personal_store))
+    registry.register(HouseholdLibraryProvider(personal_store))
     if settings.icloud_configured:
         registry.register(
             ICloudProvider(
