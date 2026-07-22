@@ -22,6 +22,7 @@ from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import CommunicationManager
 from nova_voice.config import Settings
+from nova_voice.continuity import ConversationContinuityManager
 from nova_voice.domain import (
     ActiveGoal,
     CapabilityToolCall,
@@ -345,6 +346,7 @@ class NovaVoiceService:
         commitments: CommitmentManager | None = None,
         research: ResearchManager | None = None,
         briefings: BriefingManager | None = None,
+        continuity: ConversationContinuityManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -363,6 +365,7 @@ class NovaVoiceService:
         self.commitments = commitments
         self.research = research
         self.briefings = briefings
+        self.continuity = continuity
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a
@@ -1387,6 +1390,25 @@ class NovaVoiceService:
                 # remembered; ambient/third-party/media speech neither extends
                 # the conversation nor pollutes the history seen on later turns.
                 self.conversations.refresh(utterance.room_id)
+                if self.continuity is not None:
+                    try:
+                        await self.continuity.observe(
+                            conversation_id=conversation.id,
+                            room_id=conversation.room_id,
+                            participant_id=(
+                                utterance.speaker.person_id
+                                if utterance.speaker.status == "recognized"
+                                else None
+                            ),
+                            topic_summary=interpretation.active_goal.summary or None,
+                            user_text=utterance.transcript,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "conversation continuity update failed id=%s",
+                            conversation.id,
+                            exc_info=True,
+                        )
                 self.conversations.append_turn(
                     utterance.room_id,
                     utterance.transcript,

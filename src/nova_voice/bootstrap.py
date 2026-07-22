@@ -12,6 +12,7 @@ from nova_voice.communications import (
     WebhookDeliveryTransport,
 )
 from nova_voice.config import Settings
+from nova_voice.continuity import ConversationContinuityManager
 from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
@@ -97,6 +98,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
     registry.register(web_provider)
     personal_store = PersonalDataStore(settings.personal_data_path)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
+    continuity = ConversationContinuityManager(durable_store)
     registry.register(PersonalDataProvider(personal_store))
     registry.register(HouseholdLibraryProvider(personal_store))
     delivery_transport = (
@@ -206,4 +208,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         commitments=commitments,
         research=research,
         briefings=briefings,
+        continuity=continuity,
     )

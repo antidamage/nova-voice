@@ -75,6 +75,7 @@ class CommitmentManager:
         current = (now or utc_now()).astimezone(UTC)
         due: list[CommitmentRecord] = []
         for record in await self.list():
+            transition_time = max(current, record.created_at.astimezone(UTC))
             if record.status != CommitmentState.ACTIVE or record.due_at is None:
                 continue
             if record.due_at.astimezone(UTC) > current:
@@ -82,7 +83,7 @@ class CommitmentManager:
             if record.deadline and record.deadline.astimezone(UTC) < current:
                 update = {
                     "missed_count": record.missed_count + 1,
-                    "updated_at": current,
+                    "updated_at": transition_time,
                 }
                 if record.recurrence:
                     next_due = record.due_at
@@ -115,7 +116,7 @@ class CommitmentManager:
                 await self.store.create(intervention, actor_id="commitment-worker")
                 saved = await self._save(
                     record.model_copy(
-                        update={"status": CommitmentState.DUE, "updated_at": current}
+                        update={"status": CommitmentState.DUE, "updated_at": transition_time}
                     ),
                     actor_id="commitment-worker",
                 )
@@ -129,7 +130,7 @@ class CommitmentManager:
                     raise
                 saved = await self._save(
                     record.model_copy(
-                        update={"status": CommitmentState.DUE, "updated_at": current}
+                        update={"status": CommitmentState.DUE, "updated_at": transition_time}
                     ),
                     actor_id="commitment-worker",
                 )
@@ -143,13 +144,14 @@ class CommitmentManager:
         changed = []
         for record in await self.list():
             if record.status == CommitmentState.ACTIVE and record.wait_event_key == event_key:
+                transition_time = max(current, record.created_at)
                 changed.append(
                     await self._save(
                         record.model_copy(
                             update={
                                 "due_at": current,
                                 "wait_event_key": None,
-                                "updated_at": current,
+                                "updated_at": transition_time,
                             }
                         ),
                         actor_id="household-event",
@@ -165,6 +167,7 @@ class CommitmentManager:
         if stored is None:
             raise KeyError(commitment_id)
         record = cast(CommitmentRecord, stored.record)
+        current = max(current, record.created_at)
         if record.status not in {CommitmentState.DUE, CommitmentState.DELIVERED}:
             raise ValueError("commitment is not awaiting acknowledgement")
         if record.recurrence and record.due_at:

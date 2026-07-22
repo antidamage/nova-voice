@@ -144,6 +144,32 @@ class ConversationRecord(DurableModel):
     last_event_id: str | None = None
 
 
+class ConversationTopicRecord(DurableModel):
+    room_id: str = Field(min_length=1, max_length=120)
+    participant_ids: tuple[str, ...] = ()
+    topic_stack: tuple[str, ...] = ()
+    summary: str = Field(default="", max_length=3000)
+    unresolved_references: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    linked_goal_ids: tuple[str, ...] = ()
+    last_turn_at: datetime
+
+    @model_validator(mode="after")
+    def validate_topic_record(self) -> ConversationTopicRecord:
+        if self.last_turn_at.utcoffset() is None:
+            raise ValueError("last turn time must be timezone-aware")
+        for values in (
+            self.participant_ids,
+            self.topic_stack,
+            self.unresolved_references,
+            self.open_questions,
+            self.linked_goal_ids,
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError("conversation continuity fields must be unique")
+        return self
+
+
 class EventRecord(DurableModel):
     conversation_id: str | None = None
     source: str = Field(min_length=1, max_length=120)

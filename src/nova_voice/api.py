@@ -34,6 +34,7 @@ from nova_voice.durable.models import (
     BriefingRecord,
     BriefingScheduleRecord,
     CommitmentRecord,
+    ConversationTopicRecord,
     DelegationGrantRecord,
     EventSubscriptionRecord,
     ExecutionRecord,
@@ -166,6 +167,11 @@ class TransactionBudgetRequest(BaseModel):
 class CommitmentContinuationRequest(BaseModel):
     device: str
     until: datetime | None = None
+
+
+class ConversationQuestionRequest(BaseModel):
+    question: str
+    actor: str = "dashboard-admin"
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -597,6 +603,28 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown subscription") from error
         return {"subscription": record.model_dump(mode="json")}
 
+    @app.get("/v1/conversation-topics")
+    async def list_conversation_topics() -> dict:
+        manager = selected_service.continuity
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Conversation continuity is unavailable")
+        return {"conversations": [item.model_dump(mode="json") for item in await manager.list()]}
+
+    @app.post("/v1/conversation-topics/{conversation_id}/resolve")
+    async def resolve_conversation_question(
+        conversation_id: str, request: ConversationQuestionRequest
+    ) -> dict:
+        manager = selected_service.continuity
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Conversation continuity is unavailable")
+        try:
+            record = await manager.resolve_question(
+                conversation_id, request.question, actor_id=request.actor
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown conversation") from error
+        return {"conversation": record.model_dump(mode="json")}
+
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
         """Authenticated read-only operational trace for the live voice stack."""
@@ -663,6 +691,7 @@ def create_app(
             briefing_schedules,
             briefings,
             subscriptions,
+            conversation_topics,
             audit,
         ) = await asyncio.gather(
             durable.list(GoalRecord),
@@ -675,6 +704,7 @@ def create_app(
             durable.list(BriefingScheduleRecord),
             durable.list(BriefingRecord),
             durable.list(EventSubscriptionRecord),
+            durable.list(ConversationTopicRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -689,6 +719,9 @@ def create_app(
             "briefingSchedules": [row.record.model_dump(mode="json") for row in briefing_schedules],
             "briefings": [row.record.model_dump(mode="json") for row in briefings],
             "subscriptions": [row.record.model_dump(mode="json") for row in subscriptions],
+            "conversationTopics": [
+                row.record.model_dump(mode="json") for row in conversation_topics
+            ],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }
