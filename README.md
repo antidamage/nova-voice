@@ -70,8 +70,9 @@ satellite.
 - The deployed vLLM-Omni TTS service streams PCM chunks for one finalized reply
   as sentence/clause synthesis units, and playback can be cancelled within a
   unit or before the next one begins.
-- The 421-test automated suite passes, but full recorded-audio replay,
-  physical-microphone,
+- The 427-test automated suite passes. A manifest-driven PCM16 replay runner
+  and fake-clock household simulator cover deterministic failure reproduction,
+  but the complete recorded household corpus, physical-microphone,
   latency, false-activation, concurrent-residency, and endurance gates remain
   acceptance work rather than completed product guarantees.
 - Every handled foreground turn carries an immutable `TurnTrace` through
@@ -86,6 +87,12 @@ satellite.
   triggers; only true barge-in cancels playback. A 70 ms nonverbal listening
   cue may play once during an addressed extended pause and never represents
   task completion.
+
+Evaluation code under `nova_voice.evaluation` loads path-confined mono PCM16
+fixtures, compares pinned transcript/trace/monitor outcomes, and records replay
+latency. Its simulated household provider supports controlled time, ordered
+events, delayed entity convergence, injected provider failures, occupancy, and
+same-timestamp concurrent speakers.
 
 All inference remains local to the household LAN. Raw audio is held only in
 bounded memory; development transcripts expire after 24 hours.

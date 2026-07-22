@@ -38,6 +38,24 @@ during read-only and mutating calls, after side effects, and during response
 playback. A mutating provider must never be abandoned once its side effects may
 have begun.
 
+## Deterministic replay and household simulation
+
+`AudioReplayRunner` loads a versioned JSON manifest beside mono PCM16 WAV
+fixtures. Each case declares one of `far_field`, `echo`, `interruption`,
+`disfluency`, or `false_activation`, a maximum latency, and pinned transcript,
+terminal-state, stage, and monitor-kind expectations. Fixture paths are
+confined to the manifest directory. The runner returns every mismatch instead
+of stopping at the first one, so a failed CI artifact identifies both behavior
+and latency regressions.
+
+`HouseholdSimulator` uses a timezone-aware `SimulatedClock` and a stable
+sequence number for same-time events. Its isolated `sim_household` capability
+provider supports read-only snapshots, delayed entity mutations, occupancy
+changes, injected failure counts, and concurrent speaker events. Calling
+`advance()` is the only way simulated time or delayed state moves, making
+scenarios exactly repeatable. The simulator is test-only and is never added to
+the production provider allowlist.
+
 ## Independence and extensibility gates
 
 - `nova-voice` contains no imports, workspace links, generated types, assets, or

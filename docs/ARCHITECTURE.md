@@ -111,6 +111,9 @@ processors remain outside the core.
 12. `StreamingTtsService`: sentence/clause output with mid-unit and inter-unit
     barge-in cancellation.
 13. `RetentionObserver`: writes TTL data; regular observers record redacted metrics.
+14. `EvaluationHarness`: manifest-pinned PCM16 replay plus an isolated
+    fake-clock household capability provider. It is not registered in the live
+    provider registry and cannot reach household services.
 
 These processors are coordinated by `ForegroundTurnStateMachine`. Its immutable
 snapshots contain hashed input/context revisions rather than transcript text,
