@@ -39,6 +39,7 @@ from nova_voice.durable.models import (
     utc_now,
 )
 from nova_voice.interpretation.llama_cpp import InterpretationError
+from nova_voice.memory import MemPalaceClient
 from nova_voice.monitor import VoiceMonitor
 from nova_voice.monitor import page_html as monitor_page_html
 from nova_voice.providers.nova.client import NovaDashboardError
@@ -104,6 +105,15 @@ class AgentCancellationRequest(BaseModel):
     reason: str = "cancelled by household owner"
 
 
+class MemoryUpdateRequest(BaseModel):
+    text: str | None = None
+    pinned: bool | None = None
+    expires_at: datetime | None = None
+    status: str | None = None
+    supersedes: str | None = None
+    needs_confirmation: bool | None = None
+
+
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
     """Trim preview speech to a sane length at a word boundary."""
 
@@ -164,6 +174,7 @@ def create_app(
             return
         setter = getattr(selected_audio, "set_monitor_sink", None)
         if callable(setter):
+
             def record_pipeline_event(kind: str, detail: dict) -> None:
                 monitor.record(kind, **detail)
                 structural_telemetry.ingest_monitor(kind, detail)
@@ -208,15 +219,9 @@ def create_app(
 
         import websockets
 
-        cert = os.environ.get(
-            "NOVA_VOICE_PROBE_CERT_PATH", "/etc/nova-voice/tls/probe/client.crt"
-        )
-        key = os.environ.get(
-            "NOVA_VOICE_PROBE_KEY_PATH", "/etc/nova-voice/tls/probe/client.key"
-        )
-        if selected_settings.tls_ca_path is None or not await asyncio.to_thread(
-            Path(cert).exists
-        ):
+        cert = os.environ.get("NOVA_VOICE_PROBE_CERT_PATH", "/etc/nova-voice/tls/probe/client.crt")
+        key = os.environ.get("NOVA_VOICE_PROBE_KEY_PATH", "/etc/nova-voice/tls/probe/client.key")
+        if selected_settings.tls_ca_path is None or not await asyncio.to_thread(Path(cert).exists):
             logger.info("ws upgrade probe disabled (no TLS or probe identity)")
             return
         context = ssl.create_default_context(cafile=str(selected_settings.tls_ca_path))
@@ -286,9 +291,7 @@ def create_app(
         # independent, so run them concurrently rather than back to back — the
         # status strip polls this endpoint and the two used to add up.
         audio_probe = (
-            asyncio.ensure_future(selected_audio.health())
-            if selected_audio is not None
-            else None
+            asyncio.ensure_future(selected_audio.health()) if selected_audio is not None else None
         )
         payload = await selected_service.health()
         payload["audio"] = (
@@ -401,8 +404,7 @@ def create_app(
             "after": after,
             "nextCursor": indexed[-1][0] if indexed else after,
             "events": [
-                {"cursor": cursor, **record.model_dump(mode="json")}
-                for cursor, record in indexed
+                {"cursor": cursor, **record.model_dump(mode="json")} for cursor, record in indexed
             ],
         }
 
@@ -462,11 +464,12 @@ def create_app(
             if (
                 plan is not None
                 and isinstance(plan.record, PlanRecord)
-                and plan.record.status not in {
-                PlanState.SATISFIED,
-                PlanState.CANCELLED,
-                PlanState.EXPIRED,
-                PlanState.FAILED,
+                and plan.record.status
+                not in {
+                    PlanState.SATISFIED,
+                    PlanState.CANCELLED,
+                    PlanState.EXPIRED,
+                    PlanState.FAILED,
                 }
             ):
                 await durable.terminate_plan(
@@ -499,6 +502,60 @@ def create_app(
             goal = cancelled
         return {"goal": goal.model_dump(mode="json")}
 
+    def require_memory() -> MemPalaceClient:
+        if selected_service.memory is None or not selected_service.memory.enabled:
+            raise HTTPException(status_code=503, detail="MemPalace memory is disabled")
+        return selected_service.memory
+
+    @app.get("/v1/agent/memories")
+    async def agent_memories(owner_id: str | None = None) -> dict:
+        client = require_memory()
+        memories = await client.list(owner_id=owner_id)
+        return {"memories": [item.model_dump(mode="json") for item in memories]}
+
+    @app.patch("/v1/agent/memories/{memory_id}")
+    async def update_agent_memory(memory_id: str, request: MemoryUpdateRequest) -> dict:
+        client = require_memory()
+        payload = request.model_dump(mode="json", exclude_none=True)
+        result = await client.request("PATCH", f"/v1/memories/{memory_id}", payload)
+        if result is None:
+            raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
+        return result
+
+    @app.delete("/v1/agent/memories/{memory_id}")
+    async def forget_agent_memory(memory_id: str) -> dict:
+        client = require_memory()
+        result = await client.request("DELETE", f"/v1/memories/{memory_id}")
+        if result is None:
+            raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
+        return result
+
+    @app.get("/v1/agent/memories/export")
+    async def export_agent_memories(owner_id: str | None = None) -> dict:
+        client = require_memory()
+        result = await client.request(
+            "GET", "/v1/export", {"owner_id": owner_id} if owner_id else None
+        )
+        if result is None:
+            raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
+        return result
+
+    @app.post("/v1/agent/memories/backup")
+    async def backup_agent_memories() -> dict:
+        client = require_memory()
+        result = await client.request("POST", "/v1/backup")
+        if result is None:
+            raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
+        return result
+
+    @app.post("/v1/agent/memories/consolidate")
+    async def consolidate_agent_memories() -> dict:
+        client = require_memory()
+        result = await client.request("POST", "/v1/consolidate")
+        if result is None:
+            raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
+        return result
+
     @app.get("/v1/speaker-profiles")
     async def speaker_profiles() -> dict:
         store = selected_service.speaker_profiles
@@ -513,9 +570,7 @@ def create_app(
         return {**(await store.list_profiles()), "enabled": enabled}
 
     @app.patch("/v1/speaker-profiles/{person_id}")
-    async def update_speaker_profile(
-        person_id: str, payload: SpeakerProfileUpdateRequest
-    ) -> dict:
+    async def update_speaker_profile(person_id: str, payload: SpeakerProfileUpdateRequest) -> dict:
         store = selected_service.speaker_profiles
         if store is None:
             raise HTTPException(status_code=503, detail="Speaker profiles are unavailable")
@@ -527,11 +582,7 @@ def create_app(
         updated = await store.update_person(
             person_id,
             display_name=display_name,
-            pronouns=(
-                payload.pronouns or ""
-                if "pronouns" in payload.model_fields_set
-                else None
-            ),
+            pronouns=(payload.pronouns or "" if "pronouns" in payload.model_fields_set else None),
         )
         if not updated:
             raise HTTPException(status_code=404, detail="Speaker profile was not found")
@@ -607,9 +658,7 @@ def create_app(
             fallback = f"Hi, I'm {spoken}. This is how I sound right now."
             text = _bounded_preview_text(generated or "") or fallback
         instruction = (
-            voice.style_instruction()
-            if voice is not None
-            else "Natural conversational delivery."
+            voice.style_instruction() if voice is not None else "Natural conversational delivery."
         )
         try:
             pcm16, sample_rate = await runtime.tts.synthesize(
@@ -617,9 +666,7 @@ def create_app(
             )
         except Exception as error:  # noqa: BLE001 - any synth failure is a 503 to the caller
             logger.warning("voice preview synthesis failed: %s", error)
-            raise HTTPException(
-                status_code=503, detail="Voice preview synthesis failed"
-            ) from error
+            raise HTTPException(status_code=503, detail="Voice preview synthesis failed") from error
         # Pitch is applied as DSP on the synthesized PCM, mirroring the live
         # response path, so the preview matches what a satellite would play.
         if voice is not None and voice.pitch:
@@ -1117,9 +1164,7 @@ def create_app(
                     playback_id = control.get("playbackId")
                     playback_events = None
                     if playback_connection is not None and isinstance(playback_id, str):
-                        playback_events = playback_connection.playback_events_by_id.get(
-                            playback_id
-                        )
+                        playback_events = playback_connection.playback_events_by_id.get(playback_id)
                     if playback_events is None:
                         continue
                     if control.get("type") == "playback_started":

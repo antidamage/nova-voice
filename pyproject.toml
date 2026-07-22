@@ -16,6 +16,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "jsonschema>=4.23,<5",
   # NeMo's current Numba dependency rejects NumPy 2.5+.
+  "mempalace>=3.3.2,<4",
   "numpy>=2.1,<2.5",
   "orjson>=3.10,<4",
   # Drives the Brave Search browser-scrape sidecar (ops/websearch_server.py).

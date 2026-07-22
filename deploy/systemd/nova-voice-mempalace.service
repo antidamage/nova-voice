@@ -1,0 +1,33 @@
+[Unit]
+Description=Nova Voice private MemPalace memory service
+After=network-online.target
+Wants=network-online.target
+PartOf=nova-voice.service
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+EnvironmentFile=/etc/nova-voice/nova-voice.env
+Environment=MEMPALACE_PORT=8094
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/install -d -m 0700 -o nova-voice -g nova-voice /var/lib/nova-voice/mempalace
+ExecStart=/opt/nova-voice/venv/bin/python -m nova_voice.memory_server
+Restart=always
+RestartSec=3
+MemoryAccounting=yes
+MemoryMax=2G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova-voice
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

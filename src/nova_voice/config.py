@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     household_event_batch_size: int = Field(default=200, ge=1, le=1_000)
     household_event_retention_days: float = Field(default=30, gt=0, le=365)
     structural_telemetry_path: Path | None = None
+    # Selective durable conversational memory.  MemPalace is a separate,
+    # loopback-only service on Iridium; a missing service is deliberately a
+    # non-fatal degraded mode for ordinary voice turns.
+    mempalace_url: str = "http://127.0.0.1:8094"
+    mempalace_token: str | None = None
+    mempalace_data_path: Path = Path("/var/lib/nova-voice/mempalace")
+    mempalace_timeout_seconds: float = Field(default=0.6, gt=0, le=10)
+    mempalace_enabled: bool = True
     retention_hours: float = Field(default=24.0, gt=0, le=24)
     shadow_mode: bool = True
     passive_execution_enabled: bool = False
