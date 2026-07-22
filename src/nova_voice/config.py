@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     mempalace_data_path: Path = Path("/var/lib/nova-voice/mempalace")
     mempalace_timeout_seconds: float = Field(default=0.6, gt=0, le=10)
     mempalace_enabled: bool = True
+    multimodal_data_path: Path = Path("/var/lib/nova-voice/multimodal")
+    multimodal_timeout_seconds: float = Field(default=10, gt=0, le=60)
     retention_hours: float = Field(default=24.0, gt=0, le=24)
     shadow_mode: bool = True
     passive_execution_enabled: bool = False

@@ -124,6 +124,15 @@ for TTS. This is stable and quality-preserving but does not meet the interactive
 latency target; a future pinned, locally validated streaming runtime for the
 same single model remains a performance acceptance gate, not a hidden fallback.
 
+Multimodal inputs use the governed provider contract. `POST
+/v1/multimodal/shares` accepts an explicit base64-encoded screen, image,
+document, or device diagram and stores only a bounded, content-addressed local
+asset. `POST /v1/multimodal/camera-snapshots` fetches a named dashboard camera
+snapshot only for a household owner or an active `camera.read` grant. Every
+asset retains actor, purpose, audience, source revision, and retention metadata;
+expired assets and their metadata are removed together. Visual observations are
+not memory-eligible by default.
+
 The signed Indium helper is installed as a `RunAtLoad` + `KeepAlive` LaunchAgent,
 connected over mTLS, and reporting successful completed playback. Nocturnium is
 also connected under its kiosk-user systemd service. Its physical PipeWire AEC

@@ -320,7 +320,7 @@
 
   - [x] **T4-01 — Define replaceable multimodal provider contracts.** Cover Dashboard screens, user-shared images, camera snapshots,
     documents, and device diagrams with provenance and permission metadata (`T2-09`).
-  - [ ] **T4-02 — Implement visual/document inputs.** Add explicit user sharing plus doorbell/camera snapshot access under household
+  - [x] **T4-02 — Implement visual/document inputs.** Add explicit user sharing plus doorbell/camera snapshot access under household
     privacy and retention policy (`T4-01`).
   - [ ] **T4-03 — Build the household digital twin.** Support simulation, causal explanations, automation rehearsal, energy
     optimization, and “what would happen if…” queries (`T1-14`, `T1-15`).
