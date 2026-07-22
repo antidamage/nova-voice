@@ -228,6 +228,7 @@ NOVA_TOOLS = [
                             "occupancy",
                             "device_health",
                             "maintenance",
+                            "weather",
                             "media",
                             "timers",
                             "schedules",
@@ -655,9 +656,7 @@ class NovaProvider(CapabilityProvider):
                     else "off"
                 )
             attributes = (
-                entity.get("attributes")
-                if isinstance(entity.get("attributes"), dict)
-                else {}
+                entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
             )
             target = (
                 aircon_preferences.get("temperature")
@@ -708,9 +707,7 @@ class NovaProvider(CapabilityProvider):
             except (TypeError, ValueError):
                 return None
 
-        result: dict[str, float | None] = {
-            room: None for room in NovaProvider._indoor_rooms(state)
-        }
+        result: dict[str, float | None] = {room: None for room in NovaProvider._indoor_rooms(state)}
         for zone in state.get("zones", []):
             if not isinstance(zone, dict):
                 continue
@@ -929,11 +926,7 @@ class NovaProvider(CapabilityProvider):
             # off, but true cannot prove a requested all-on result. The live
             # state contract includes zone entities, so require every available
             # lighting entity for the on case and fail closed if they are absent.
-            verified = (
-                bool(lights) and on_count == len(lights)
-                if action == "on"
-                else not is_on
-            )
+            verified = bool(lights) and on_count == len(lights) if action == "on" else not is_on
             return verified, {
                 "zone": zone_id,
                 "lights": len(lights),
@@ -970,6 +963,7 @@ class NovaProvider(CapabilityProvider):
             "occupancy",
             "device_health",
             "maintenance",
+            "weather",
             "media",
             "timers",
             "schedules",
@@ -1073,9 +1067,16 @@ class NovaProvider(CapabilityProvider):
         if scope == "media":
             return {
                 "generatedAt": state.get("generatedAt"),
+                "citation": f"nova://media@{state.get('generatedAt')}",
                 "players": [
                     brief(item) for item in entities if item.get("domain") == "media_player"
                 ],
+            }
+        if scope == "weather":
+            return {
+                "generatedAt": state.get("generatedAt"),
+                "citation": f"nova://weather@{state.get('generatedAt')}",
+                "weather": NovaProvider._weather_brief(state),
             }
         if scope in {"timers", "schedules"}:
             keys = ("timers", "schedules") if scope == "schedules" else ("timers",)
@@ -1352,10 +1353,9 @@ class NovaProvider(CapabilityProvider):
         if not observed:
             return False
         state = str(observed.get("state", "")).casefold()
-        is_climate = (
-            str(observed.get("domain") or "") == "climate"
-            or str(observed.get("entity_id") or "").startswith("climate.")
-        )
+        is_climate = str(observed.get("domain") or "") == "climate" or str(
+            observed.get("entity_id") or ""
+        ).startswith("climate.")
         if action == "turn_on":
             if "isOn" in observed:
                 return bool(observed.get("isOn"))
@@ -1386,9 +1386,7 @@ class NovaProvider(CapabilityProvider):
         self, action: PlannedAction, candidates: list[AliasTarget]
     ) -> ToolResult:
         if not candidates:
-            return self._result(
-                action, False, "not_found", f"No matching {self.agent_name} target"
-            )
+            return self._result(action, False, "not_found", f"No matching {self.agent_name} target")
         return self._result(
             action,
             False,

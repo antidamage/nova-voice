@@ -282,7 +282,7 @@
     cancellation, and audit under explicit grants (`T1-16`).
   - [x] **T2-02 — Add notes, lists, and contacts.** Provide identity-safe lookup and mutation with ambiguity handling and undo
     (`T2-01`).
-  - [ ] **T2-03 — Add weather, media, recipes, documents, and household knowledge providers.** Keep replaceable contracts, citations,
+  - [x] **T2-03 — Add weather, media, recipes, documents, and household knowledge providers.** Keep replaceable contracts, citations,
     privacy boundaries, and read/write classification (`T2-02`).
   - [ ] **T2-04 — Add email, messages, and invitations.** Require draft/preview, recipient validation, explicit send authority, delivery
     verification, cancellation, and audit (`T1-08`, `T2-02`).

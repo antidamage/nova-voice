@@ -49,3 +49,20 @@ since the token was issued, and refuses to overwrite newer work. Stable IDs
 derived from action IDs make retries idempotent. The database location is set by
 `NOVA_VOICE_PERSONAL_DATA_PATH` and provider health is exposed under
 `capabilityProviders.personal`.
+
+## Weather, media, recipes, documents, and household knowledge
+
+Live weather and media remain replaceable read contracts on the existing Nova
+dashboard provider: `nova.query` accepts `weather` and `media`, returns the
+dashboard generation timestamp, and includes a `nova://` citation. Media writes
+continue through the verified `nova.control` contract, so this milestone does
+not duplicate Home Assistant state or bypass its allowlist.
+
+Recipes, text documents, and household knowledge use the Iridium-local
+`library` provider. Every search result contains a stable citation, content
+SHA-256 revision, bounded excerpt, audience, and update time. Shared search
+never returns owner-private records; private search is a separate capability.
+Recognized household members receive only `library.search_shared` by default,
+while private reads and every write require owner authority or an explicit
+grant. Writes are revisioned, resource-locked, retry-safe, and return the same
+conflict-safe undo tokens as notes, lists, and contacts.

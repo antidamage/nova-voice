@@ -29,7 +29,7 @@ def action_capability(action: PlannedAction) -> str:
     call = action.call
     if call.provider == "web":
         return "knowledge.read"
-    if call.provider in {"icloud", "personal"}:
+    if call.provider in {"icloud", "personal", "library"}:
         return (
             call.tool
             if call.tool.startswith(f"{call.provider}.")
@@ -56,7 +56,14 @@ class HouseholdAuthority:
     _BASE_CAPABILITIES = {
         HouseholdRole.GUEST: frozenset({"knowledge.read"}),
         HouseholdRole.RECOGNIZED_HOUSEHOLD: frozenset(
-            {"knowledge.read", "home.read", "home.control", "tasks.read", "tasks.manage"}
+            {
+                "knowledge.read",
+                "home.read",
+                "home.control",
+                "tasks.read",
+                "tasks.manage",
+                "library.search_shared",
+            }
         ),
         HouseholdRole.OWNER: frozenset({"*"}),
     }

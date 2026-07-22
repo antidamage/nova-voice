@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-RecordKind = Literal["note", "list", "contact"]
+RecordKind = Literal["note", "list", "contact", "recipe", "document", "household"]
 
 
 class PersonalRecord(BaseModel):
