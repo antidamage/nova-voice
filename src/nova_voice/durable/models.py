@@ -119,6 +119,15 @@ class AutomationState(StrEnum):
     FAILED = "failed"
 
 
+class CommitmentState(StrEnum):
+    ACTIVE = "active"
+    DUE = "due"
+    DELIVERED = "delivered"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    MISSED = "missed"
+
+
 class ConversationRecord(DurableModel):
     status: ConversationState = ConversationState.ACTIVE
     room_id: str = Field(min_length=1, max_length=120)
@@ -294,6 +303,37 @@ class AutomationRecord(DurableModel):
     activated_at: datetime | None = None
     rolled_back_at: datetime | None = None
     monitor_failures: int = Field(default=0, ge=0)
+
+
+class CommitmentRecord(DurableModel):
+    owner_id: str
+    summary: str = Field(min_length=1, max_length=1000)
+    status: CommitmentState = CommitmentState.ACTIVE
+    due_at: datetime | None = None
+    deadline: datetime | None = None
+    recurrence: str | None = Field(default=None, max_length=500)
+    wait_event_key: str | None = Field(default=None, max_length=200)
+    channels: tuple[Literal["voice", "dashboard", "notification"], ...] = Field(
+        default=("dashboard",), min_length=1
+    )
+    occurrence: int = Field(default=1, ge=1)
+    missed_count: int = Field(default=0, ge=0)
+    delivered_at: datetime | None = None
+    completed_at: datetime | None = None
+    continuation_device: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_commitment(self) -> CommitmentRecord:
+        if self.due_at is None and self.wait_event_key is None:
+            raise ValueError("commitment requires a due time or wait event")
+        for value in (self.due_at, self.deadline, self.delivered_at, self.completed_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("commitment timestamps must be timezone-aware")
+        if self.deadline and self.due_at and self.deadline < self.due_at:
+            raise ValueError("commitment deadline cannot precede due time")
+        if len(set(self.channels)) != len(self.channels):
+            raise ValueError("commitment channels must be unique")
+        return self
 
 
 class MemoryReferenceRecord(DurableModel):

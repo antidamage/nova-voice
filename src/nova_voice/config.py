@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     transactions_bridge_url: str | None = None
     transactions_bridge_token: str | None = None
     transactions_timeout_seconds: float = Field(default=15, gt=0, le=60)
+    commitment_poll_seconds: float = Field(default=5, ge=1, le=60)
 
     @property
     def icloud_configured(self) -> bool:

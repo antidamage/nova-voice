@@ -288,7 +288,7 @@
     verification, cancellation, and audit (`T1-08`, `T2-02`).
   - [x] **T2-05 — Add travel, shopping, bookings, finance, and purchase providers.** Enforce recipient/amount validation, standing
     budgets, confirmation boundaries, and compensating cancellation (`T2-04`).
-  - [ ] **T2-06 — Implement durable commitments.** Support reminders, recurrence, wait-until conditions, deadlines, missed-commitment
+  - [x] **T2-06 — Implement durable commitments.** Support reminders, recurrence, wait-until conditions, deadlines, missed-commitment
     recovery, and cross-device continuation (`T1-04`, `T2-01`).
   - [ ] **T2-07 — Implement asynchronous cited research.** Gather sources, preserve citations and uncertainty, and return concise spoken
     results plus Dashboard detail (`T1-04`, `T2-03`).

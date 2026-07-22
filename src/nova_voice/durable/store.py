@@ -14,6 +14,7 @@ from uuid import uuid4
 from nova_voice.durable.models import (
     AuditRecord,
     AutomationRecord,
+    CommitmentRecord,
     ConversationRecord,
     DelegationGrantRecord,
     DurableModel,
@@ -36,6 +37,7 @@ Record = (
     AuditRecord
     | AutomationRecord
     | ConversationRecord
+    | CommitmentRecord
     | DelegationGrantRecord
     | EventRecord
     | ExecutionRecord
@@ -54,6 +56,7 @@ _RECORD_TYPES: dict[str, type[Record]] = {
         AuditRecord,
         AutomationRecord,
         ConversationRecord,
+        CommitmentRecord,
         DelegationGrantRecord,
         EventRecord,
         ExecutionRecord,
@@ -917,9 +920,7 @@ class DurableAgentStore:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             if integrity != "ok":
                 raise ValueError(f"database integrity check failed: {integrity}")
-            row = connection.execute(
-                "SELECT MAX(version) FROM schema_migrations"
-            ).fetchone()
+            row = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
             if row is None or int(row[0] or 0) != _SCHEMA_VERSION:
                 raise ValueError("database schema version is not supported")
 
