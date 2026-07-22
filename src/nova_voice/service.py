@@ -18,6 +18,7 @@ from nova_voice.audio.prefetch import ForegroundPrefetch, likely_tools
 from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
 from nova_voice.capabilities.registry import CapabilityRegistry
+from nova_voice.communications import CommunicationManager
 from nova_voice.config import Settings
 from nova_voice.domain import (
     ActiveGoal,
@@ -335,6 +336,7 @@ class NovaVoiceService:
         automations: AutomationManager | None = None,
         proactive: ProactiveInterventionEngine | None = None,
         memory: MemPalaceClient | None = None,
+        communications: CommunicationManager | None = None,
     ) -> None:
         self.settings = settings
         self.interpreter = interpreter
@@ -348,6 +350,7 @@ class NovaVoiceService:
         self.automations = automations
         self.proactive = proactive
         self.memory = memory
+        self.communications = communications
         self.speaker_profiles = speaker_profiles
         self.persona = persona
         # Satellites within earshot share one conversation/goal scope so a

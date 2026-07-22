@@ -134,6 +134,15 @@ class ProactiveFeedbackRequest(AutomationOwnerRequest):
     outcome: Literal["accepted", "dismissed", "redundant", "annoying"]
 
 
+class CommunicationApprovalRequest(BaseModel):
+    approval_token: str
+    actor: str = "dashboard-admin"
+
+
+class CommunicationActorRequest(BaseModel):
+    actor: str = "dashboard-admin"
+
+
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
     """Trim preview speech to a sane length at a word boundary."""
 
@@ -327,6 +336,56 @@ def create_app(
         }
         payload["ok"] = bool(payload["ok"] and payload["audio"]["ok"])
         return payload
+
+    @app.post("/v1/communications/{draft_id}/preview")
+    async def preview_communication(draft_id: str, request: CommunicationActorRequest) -> dict:
+        manager = selected_service.communications
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Communications are unavailable")
+        try:
+            draft, token = await manager.preview(draft_id, actor=request.actor)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown communication draft") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"draft": draft.model_dump(mode="json"), "approvalToken": token}
+
+    @app.post("/v1/communications/{draft_id}/send")
+    async def send_communication(draft_id: str, request: CommunicationApprovalRequest) -> dict:
+        manager = selected_service.communications
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Communications are unavailable")
+        try:
+            draft = await manager.send_approved(
+                draft_id, request.approval_token, actor=request.actor
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown communication draft") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"draft": draft.model_dump(mode="json")}
+
+    @app.post("/v1/communications/{draft_id}/cancel")
+    async def cancel_communication(draft_id: str, request: CommunicationActorRequest) -> dict:
+        manager = selected_service.communications
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Communications are unavailable")
+        try:
+            draft = await manager.cancel(draft_id, actor=request.actor)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown communication draft") from error
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"draft": draft.model_dump(mode="json")}
+
+    @app.get("/v1/communications/{draft_id}/audit")
+    async def communication_audit(draft_id: str) -> dict:
+        manager = selected_service.communications
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Communications are unavailable")
+        if await manager.get(draft_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown communication draft")
+        return {"events": await manager.audit(draft_id)}
 
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
@@ -605,8 +664,11 @@ def create_app(
         try:
             require_household_owner(owner_id)
             record = await require_automations().draft(
-                automation_id=request.id, owner_id=owner_id, summary=request.summary,
-                trigger=request.trigger, actions=request.proposed_actions,
+                automation_id=request.id,
+                owner_id=owner_id,
+                summary=request.summary,
+                trigger=request.trigger,
+                actions=request.proposed_actions,
             )
         except AutomationLifecycleError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -1370,9 +1432,7 @@ def create_app(
                 frame = AudioFrame.unpack(value)
                 if frame.kind != FrameKind.AUDIO_INPUT:
                     continue
-                if playback_connection is None or not room_playback.is_current(
-                    playback_connection
-                ):
+                if playback_connection is None or not room_playback.is_current(playback_connection):
                     await websocket.close(code=4001, reason="satellite connection superseded")
                     return
                 if frame.sequence <= last_sequence:
@@ -1442,8 +1502,7 @@ def create_app(
             return
         finally:
             connection_was_current = bool(
-                playback_connection is not None
-                and room_playback.is_current(playback_connection)
+                playback_connection is not None and room_playback.is_current(playback_connection)
             )
             if hello is not None:
                 structural_telemetry.record_queue(

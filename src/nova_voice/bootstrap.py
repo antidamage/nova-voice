@@ -4,6 +4,11 @@ from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
 from nova_voice.capabilities.registry import CapabilityRegistry
+from nova_voice.communications import (
+    CommunicationManager,
+    DisabledDeliveryTransport,
+    WebhookDeliveryTransport,
+)
 from nova_voice.config import Settings
 from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
@@ -13,6 +18,7 @@ from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
+from nova_voice.providers.communications.provider import CommunicationsProvider
 from nova_voice.providers.icloud.client import ICloudCalDAVClient
 from nova_voice.providers.icloud.provider import ICloudProvider
 from nova_voice.providers.library.provider import HouseholdLibraryProvider
@@ -61,12 +67,29 @@ def build_service(settings: Settings) -> NovaVoiceService:
         default_backend=settings.web_backend_default,
         search_results=settings.web_search_results,
     )
-    registry = CapabilityRegistry(allowlist={"nova", "web", "icloud", "personal", "library"})
+    registry = CapabilityRegistry(
+        allowlist={"nova", "web", "icloud", "personal", "library", "communications"}
+    )
     registry.register(nova_provider)
     registry.register(web_provider)
     personal_store = PersonalDataStore(settings.personal_data_path)
     registry.register(PersonalDataProvider(personal_store))
     registry.register(HouseholdLibraryProvider(personal_store))
+    delivery_transport = (
+        WebhookDeliveryTransport(
+            settings.communications_bridge_url,
+            settings.communications_bridge_token,
+            timeout_seconds=settings.communications_timeout_seconds,
+        )
+        if settings.communications_bridge_url and settings.communications_bridge_token
+        else DisabledDeliveryTransport()
+    )
+    communications = CommunicationManager(
+        settings.communications_database_path,
+        personal_store,
+        delivery_transport,
+    )
+    registry.register(CommunicationsProvider(communications))
     if settings.icloud_configured:
         registry.register(
             ICloudProvider(
@@ -132,4 +155,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         automations=automations,
         proactive=proactive,
         memory=memory,
+        communications=communications,
     )
