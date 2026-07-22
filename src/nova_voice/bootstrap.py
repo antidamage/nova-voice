@@ -11,6 +11,7 @@ from nova_voice.interpretation.skills import load_skills
 from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
+from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.web.client import BraveScrapeClient, GeminiClient, WebSearchClient
@@ -66,6 +67,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
     store = TranscriptStore(settings.database_path, settings.retention_hours)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
     authority = HouseholdAuthority(durable_store, settings.household_tzinfo)
+    proactive = ProactiveInterventionEngine(durable_store)
     memory = MemPalaceClient(
         settings.mempalace_url,
         settings.mempalace_token if settings.mempalace_enabled else None,
@@ -77,6 +79,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
         poll_seconds=settings.household_event_poll_seconds,
         batch_size=settings.household_event_batch_size,
         retention_days=settings.household_event_retention_days,
+        on_event=proactive.handle_event,
     )
     speaker_profiles = SpeakerProfileStore(
         settings.database_path,
