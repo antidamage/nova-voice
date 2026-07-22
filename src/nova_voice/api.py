@@ -42,6 +42,7 @@ from nova_voice.durable.models import (
     PlanRecord,
     PlanState,
     ProactiveInterventionRecord,
+    ResearchRecord,
     utc_now,
 )
 from nova_voice.interpretation.llama_cpp import InterpretationError
@@ -528,6 +529,37 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown commitment") from error
         return {"commitment": record.model_dump(mode="json")}
 
+    @app.get("/v1/research")
+    async def list_research() -> dict:
+        manager = selected_service.research
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Research is unavailable")
+        return {"research": [record.model_dump(mode="json") for record in await manager.list()]}
+
+    @app.get("/v1/research/{research_id:path}")
+    async def get_research(research_id: str) -> dict:
+        manager = selected_service.research
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Research is unavailable")
+        try:
+            record = await manager.get(research_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown research job") from error
+        return {"research": record.model_dump(mode="json")}
+
+    @app.post("/v1/research/{research_id:path}/cancel")
+    async def cancel_research(research_id: str, request: CommunicationActorRequest) -> dict:
+        manager = selected_service.research
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Research is unavailable")
+        try:
+            record = await manager.cancel(research_id, actor_id=request.actor_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown research job") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"research": record.model_dump(mode="json")}
+
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
         """Authenticated read-only operational trace for the live voice stack."""
@@ -583,13 +615,23 @@ def create_app(
     @app.get("/v1/agent/administration")
     async def agent_administration(audit_limit: int = 100) -> dict:
         durable, _ = require_agent_administration()
-        goals, plans, executions, grants, identities, commitments, audit = await asyncio.gather(
+        (
+            goals,
+            plans,
+            executions,
+            grants,
+            identities,
+            commitments,
+            research,
+            audit,
+        ) = await asyncio.gather(
             durable.list(GoalRecord),
             durable.list(PlanRecord),
             durable.list(ExecutionRecord),
             durable.list(DelegationGrantRecord),
             durable.list(IdentityPolicyRecord),
             durable.list(CommitmentRecord),
+            durable.list(ResearchRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -600,6 +642,7 @@ def create_app(
             "grants": [row.record.model_dump(mode="json") for row in grants],
             "identities": [row.record.model_dump(mode="json") for row in identities],
             "commitments": [row.record.model_dump(mode="json") for row in commitments],
+            "research": [row.record.model_dump(mode="json") for row in research],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }

@@ -120,3 +120,16 @@ count. One-time items remain visibly missed. Authenticated devices can list,
 snooze, complete, or cancel the same record, and the continuation device is
 retained for audit and handoff. All state changes use optimistic revisions, so
 two devices cannot silently overwrite each other.
+
+## Asynchronous cited research
+
+The `research` provider turns longer knowledge requests into durable background
+jobs and immediately releases the speech path. Jobs survive service restarts,
+use a bounded worker pool, can be cancelled while queued or running, and reuse
+the configured `web` provider rather than introducing a second search stack.
+
+Completed records retain the backend response, source URLs/domains, a concise
+three-sentence spoken summary, and an explicit low/medium/high uncertainty
+assessment. A deterministic proactive intervention announces completion once.
+The authenticated Voice API and Dashboard administration page expose the full
+evidence and citations, while voice receives only the concise summary.

@@ -28,9 +28,11 @@ from nova_voice.providers.nova.client import NovaDashboardClient
 from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.providers.personal.provider import PersonalDataProvider
 from nova_voice.providers.personal.store import PersonalDataStore
+from nova_voice.providers.research.provider import ResearchProvider
 from nova_voice.providers.transactions.provider import TransactionsProvider
 from nova_voice.providers.web.client import BraveScrapeClient, GeminiClient, WebSearchClient
 from nova_voice.providers.web.provider import WebProvider
+from nova_voice.research import ResearchManager
 from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerProfileStore
 from nova_voice.transactions import (
@@ -85,6 +87,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "communications",
             "transactions",
             "commitments",
+            "research",
         }
     )
     registry.register(nova_provider)
@@ -121,6 +124,8 @@ def build_service(settings: Settings) -> NovaVoiceService:
     registry.register(TransactionsProvider(transactions))
     commitments = CommitmentManager(durable_store, poll_seconds=settings.commitment_poll_seconds)
     registry.register(CommitmentsProvider(commitments))
+    research = ResearchManager(durable_store, web_provider)
+    registry.register(ResearchProvider(research))
     if settings.icloud_configured:
         registry.register(
             ICloudProvider(
@@ -195,4 +200,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         communications=communications,
         transactions=transactions,
         commitments=commitments,
+        research=research,
     )
