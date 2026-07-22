@@ -31,6 +31,7 @@ from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
 from nova_voice.durable.models import (
     AutomationRecord,
+    CommitmentRecord,
     DelegationGrantRecord,
     ExecutionRecord,
     GoalRecord,
@@ -156,6 +157,11 @@ class TransactionBudgetRequest(BaseModel):
     currency: str
     limit_amount: float
     counterparty: str | None = None
+
+
+class CommitmentContinuationRequest(BaseModel):
+    device: str
+    until: datetime | None = None
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -474,6 +480,54 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"budget": budget}
 
+    @app.get("/v1/commitments")
+    async def list_commitments() -> dict:
+        manager = selected_service.commitments
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Commitments are unavailable")
+        return {"commitments": [record.model_dump(mode="json") for record in await manager.list()]}
+
+    @app.post("/v1/commitments/{commitment_id}/snooze")
+    async def snooze_commitment(commitment_id: str, request: CommitmentContinuationRequest) -> dict:
+        manager = selected_service.commitments
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Commitments are unavailable")
+        if request.until is None:
+            raise HTTPException(status_code=422, detail="Snooze requires an until time")
+        try:
+            record = await manager.snooze(commitment_id, until=request.until, device=request.device)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown commitment") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"commitment": record.model_dump(mode="json")}
+
+    @app.post("/v1/commitments/{commitment_id}/complete")
+    async def complete_commitment(
+        commitment_id: str, request: CommitmentContinuationRequest
+    ) -> dict:
+        manager = selected_service.commitments
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Commitments are unavailable")
+        try:
+            record = await manager.acknowledge(commitment_id, device=request.device)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown commitment") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"commitment": record.model_dump(mode="json")}
+
+    @app.post("/v1/commitments/{commitment_id}/cancel")
+    async def cancel_commitment(commitment_id: str, request: CommitmentContinuationRequest) -> dict:
+        manager = selected_service.commitments
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Commitments are unavailable")
+        try:
+            record = await manager.cancel(commitment_id, device=request.device)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown commitment") from error
+        return {"commitment": record.model_dump(mode="json")}
+
     @app.get("/monitor", response_class=HTMLResponse, include_in_schema=False)
     async def monitor_page() -> HTMLResponse:
         """Authenticated read-only operational trace for the live voice stack."""
@@ -529,12 +583,13 @@ def create_app(
     @app.get("/v1/agent/administration")
     async def agent_administration(audit_limit: int = 100) -> dict:
         durable, _ = require_agent_administration()
-        goals, plans, executions, grants, identities, audit = await asyncio.gather(
+        goals, plans, executions, grants, identities, commitments, audit = await asyncio.gather(
             durable.list(GoalRecord),
             durable.list(PlanRecord),
             durable.list(ExecutionRecord),
             durable.list(DelegationGrantRecord),
             durable.list(IdentityPolicyRecord),
+            durable.list(CommitmentRecord),
             durable.list_audit(),
         )
         bounded = max(1, min(500, audit_limit))
@@ -544,6 +599,7 @@ def create_app(
             "executions": [row.record.model_dump(mode="json") for row in executions],
             "grants": [row.record.model_dump(mode="json") for row in grants],
             "identities": [row.record.model_dump(mode="json") for row in identities],
+            "commitments": [row.record.model_dump(mode="json") for row in commitments],
             "audit": [record.model_dump(mode="json") for record in audit[-bounded:]],
             "auditTotal": len(audit),
         }

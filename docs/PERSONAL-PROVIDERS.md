@@ -104,3 +104,19 @@ compensating cancellation. Proposal, preview, authorization, receipt, failure,
 budget, and cancellation state is durable and audited without placing payment
 credentials in prompts or traces. With no bridge configured, proposals remain
 useful but all real transactions fail closed.
+
+## Durable commitments
+
+The `commitments` provider stores reminders, recurring obligations, deadlines,
+and wait-until conditions in the durable agent database. A worker polls active
+time commitments, creates exactly one durable proactive intervention per
+occurrence, and resumes safely after restart. Household events can satisfy
+condition-based commitments without polling an external service.
+
+Daily, weekly, and monthly recurrence advances from the scheduled occurrence,
+not from process wake time. An overdue item past its deadline records a miss;
+recurring items advance to the first future occurrence while preserving a miss
+count. One-time items remain visibly missed. Authenticated devices can list,
+snooze, complete, or cancel the same record, and the continuation device is
+retained for audit and handoff. All state changes use optimistic revisions, so
+two devices cannot silently overwrite each other.

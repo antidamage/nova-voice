@@ -4,6 +4,7 @@ from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
 from nova_voice.capabilities.registry import CapabilityRegistry
+from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import (
     CommunicationManager,
     DisabledDeliveryTransport,
@@ -18,6 +19,7 @@ from nova_voice.memory import MemPalaceClient
 from nova_voice.persistence import TranscriptStore
 from nova_voice.persona import Persona
 from nova_voice.proactive import ProactiveInterventionEngine
+from nova_voice.providers.commitments.provider import CommitmentsProvider
 from nova_voice.providers.communications.provider import CommunicationsProvider
 from nova_voice.providers.icloud.client import ICloudCalDAVClient
 from nova_voice.providers.icloud.provider import ICloudProvider
@@ -82,11 +84,13 @@ def build_service(settings: Settings) -> NovaVoiceService:
             "library",
             "communications",
             "transactions",
+            "commitments",
         }
     )
     registry.register(nova_provider)
     registry.register(web_provider)
     personal_store = PersonalDataStore(settings.personal_data_path)
+    durable_store = DurableAgentStore(settings.effective_durable_database_path)
     registry.register(PersonalDataProvider(personal_store))
     registry.register(HouseholdLibraryProvider(personal_store))
     delivery_transport = (
@@ -115,6 +119,8 @@ def build_service(settings: Settings) -> NovaVoiceService:
     )
     transactions = TransactionManager(settings.transactions_database_path, transaction_transport)
     registry.register(TransactionsProvider(transactions))
+    commitments = CommitmentManager(durable_store, poll_seconds=settings.commitment_poll_seconds)
+    registry.register(CommitmentsProvider(commitments))
     if settings.icloud_configured:
         registry.register(
             ICloudProvider(
@@ -134,7 +140,6 @@ def build_service(settings: Settings) -> NovaVoiceService:
         timeout_seconds=settings.llm_timeout_seconds,
     )
     store = TranscriptStore(settings.database_path, settings.retention_hours)
-    durable_store = DurableAgentStore(settings.effective_durable_database_path)
     authority = HouseholdAuthority(durable_store, settings.household_tzinfo)
     automations = AutomationManager(durable_store)
     proactive = ProactiveInterventionEngine(durable_store, automations=automations)
@@ -143,13 +148,20 @@ def build_service(settings: Settings) -> NovaVoiceService:
         settings.mempalace_token if settings.mempalace_enabled else None,
         timeout_seconds=settings.mempalace_timeout_seconds,
     )
+
+    async def handle_household_event(event) -> None:
+        await proactive.handle_event(event)
+        await commitments.satisfy_event(
+            str(event.payload.get("eventKey") or event.kind), now=event.created_at
+        )
+
     event_consumer = HouseholdEventConsumer(
         nova_client,
         durable_store,
         poll_seconds=settings.household_event_poll_seconds,
         batch_size=settings.household_event_batch_size,
         retention_days=settings.household_event_retention_days,
-        on_event=proactive.handle_event,
+        on_event=handle_household_event,
     )
     speaker_profiles = SpeakerProfileStore(
         settings.database_path,
@@ -182,4 +194,5 @@ def build_service(settings: Settings) -> NovaVoiceService:
         memory=memory,
         communications=communications,
         transactions=transactions,
+        commitments=commitments,
     )
