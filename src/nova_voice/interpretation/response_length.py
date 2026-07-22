@@ -24,10 +24,10 @@ def command_acknowledgement(word_count: int) -> str:
     return _COMMAND_ACKNOWLEDGEMENTS.get(word_count, "Done.")
 
 
-def bounded_long_reply(text: str) -> str:
-    """Keep a generated story to three sentences while preserving its conclusion."""
+def bounded_long_reply(text: str, *, max_sentences: int = 3) -> str:
+    """Bound a long reply while preserving its conclusion."""
 
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
-    if len(sentences) <= 3:
+    if len(sentences) <= max_sentences:
         return text.strip()
-    return " ".join([sentences[0], sentences[1], sentences[-1]])
+    return " ".join([*sentences[: max_sentences - 1], sentences[-1]])
