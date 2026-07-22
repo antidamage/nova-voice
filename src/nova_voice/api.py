@@ -52,6 +52,8 @@ from nova_voice.durable.models import (
     ProactiveInterventionRecord,
     RelationshipContinuityRecord,
     ResearchRecord,
+    RolloutEvidence,
+    RolloutStage,
     utc_now,
 )
 from nova_voice.interpretation.llama_cpp import InterpretationError
@@ -66,6 +68,7 @@ from nova_voice.multimodal import (
 from nova_voice.multimodal_inputs import LocalMultimodalInputProvider
 from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova.client import NovaDashboardError
+from nova_voice.rollout import RolloutLifecycleError, RolloutManager
 from nova_voice.satellites.playback import (
     RoomPlaybackRouter,
     SatellitePlaybackConnection,
@@ -220,6 +223,28 @@ class ConversationQuestionRequest(BaseModel):
 class DialogueAcknowledgeRequest(BaseModel):
     person_id: str
     display_name: str | None = None
+
+
+class RolloutCreateRequest(BaseModel):
+    id: str
+    owner_id: str
+    component: str
+    pins_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RolloutPromoteRequest(BaseModel):
+    owner_id: str
+    evidence: RolloutEvidence
+    authority_scope: tuple[str, ...] = ()
+
+
+class RolloutRevokeRequest(BaseModel):
+    owner_id: str
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class RolloutRollbackRequest(RolloutRevokeRequest):
+    target_stage: RolloutStage
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -1095,6 +1120,78 @@ def create_app(
                 status_code=403,
                 detail="Automation administration requires an assigned household owner",
             )
+
+    def require_rollouts() -> RolloutManager:
+        durable, _ = require_agent_administration()
+        return RolloutManager(durable)
+
+    @app.get("/v1/agent/rollouts")
+    async def agent_rollouts() -> dict:
+        records = await require_rollouts().list()
+        return {"rollouts": [record.model_dump(mode="json") for record in records]}
+
+    @app.post("/v1/agent/rollouts", status_code=201)
+    async def create_agent_rollout(request: RolloutCreateRequest) -> dict:
+        require_household_owner(request.owner_id)
+        try:
+            record = await require_rollouts().create(
+                rollout_id=request.id,
+                owner_id=request.owner_id,
+                component=request.component,
+                pins_digest=request.pins_digest,
+            )
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(status_code=409, detail="Rollout already exists") from error
+        return {"rollout": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/rollouts/{rollout_id}/promote")
+    async def promote_agent_rollout(rollout_id: str, request: RolloutPromoteRequest) -> dict:
+        require_household_owner(request.owner_id)
+        try:
+            record = await require_rollouts().promote(
+                rollout_id,
+                actor_id=request.owner_id,
+                evidence=request.evidence,
+                authority_scope=request.authority_scope,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown rollout") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except RolloutLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"rollout": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/rollouts/{rollout_id}/revoke")
+    async def revoke_agent_rollout(rollout_id: str, request: RolloutRevokeRequest) -> dict:
+        require_household_owner(request.owner_id)
+        try:
+            record = await require_rollouts().revoke(
+                rollout_id, actor_id=request.owner_id, reason=request.reason
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown rollout") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"rollout": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/rollouts/{rollout_id}/rollback")
+    async def rollback_agent_rollout(rollout_id: str, request: RolloutRollbackRequest) -> dict:
+        require_household_owner(request.owner_id)
+        try:
+            record = await require_rollouts().rollback(
+                rollout_id,
+                actor_id=request.owner_id,
+                target_stage=request.target_stage,
+                reason=request.reason,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown rollout") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except RolloutLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"rollout": record.model_dump(mode="json")}
 
     def require_proactive() -> ProactiveInterventionEngine:
         if selected_service.proactive is None:

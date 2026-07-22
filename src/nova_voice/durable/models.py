@@ -119,6 +119,20 @@ class AutomationState(StrEnum):
     FAILED = "failed"
 
 
+class RolloutStage(StrEnum):
+    FIXTURE = "fixture"
+    REPLAY = "replay"
+    SHADOW = "shadow"
+    OWNER_CANARY = "owner_canary"
+    HOUSEHOLD = "household"
+    STANDING_AUTONOMY = "standing_autonomy"
+
+
+class RolloutStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
 class CommitmentState(StrEnum):
     ACTIVE = "active"
     DUE = "due"
@@ -389,6 +403,50 @@ class AutomationRecord(DurableModel):
     activated_at: datetime | None = None
     rolled_back_at: datetime | None = None
     monitor_failures: int = Field(default=0, ge=0)
+
+
+class RolloutEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: RolloutStage
+    artifact_revision: str = Field(min_length=1, max_length=240)
+    pins_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    eligible: bool
+    scenario_runs: dict[str, str] = Field(default_factory=dict)
+    reasons: tuple[str, ...] = ()
+
+
+class RolloutEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    at: datetime = Field(default_factory=utc_now)
+    actor_id: str = Field(min_length=1, max_length=160)
+    action: Literal["created", "promoted", "revoked", "rolled_back"]
+    from_stage: RolloutStage | None = None
+    to_stage: RolloutStage
+    evidence_revision: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class RolloutRecord(DurableModel):
+    owner_id: str = Field(min_length=1, max_length=160)
+    component: str = Field(min_length=1, max_length=160)
+    pins_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stage: RolloutStage = RolloutStage.FIXTURE
+    status: RolloutStatus = RolloutStatus.ACTIVE
+    authority_scope: tuple[str, ...] = ()
+    history: tuple[RolloutEvent, ...] = ()
+    revoked_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_rollout(self) -> RolloutRecord:
+        if self.revoked_at is not None and self.revoked_at.utcoffset() is None:
+            raise ValueError("revoked_at must be timezone-aware")
+        if self.status == RolloutStatus.REVOKED and self.revoked_at is None:
+            raise ValueError("revoked rollout requires revoked_at")
+        if self.stage == RolloutStage.STANDING_AUTONOMY and not self.authority_scope:
+            raise ValueError("standing autonomy requires a bounded authority scope")
+        return self
 
 
 class CommitmentRecord(DurableModel):
