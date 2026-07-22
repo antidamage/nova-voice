@@ -232,15 +232,17 @@ class _Memory:
         self.listed: list[str | None] = []
         self.created: list[MemoryRecord] = []
 
-    async def search(self, query: str, *, owner_id: str | None):
-        self.searches.append((query, owner_id))
+    async def search(self, query: str, **kwargs):
+        access = kwargs.get("access")
+        self.searches.append((query, access.actor_id if access else kwargs.get("owner_id")))
         return list(self.records)
 
-    async def list(self, *, owner_id: str | None = None):
-        self.listed.append(owner_id)
+    async def list(self, **kwargs):
+        access = kwargs.get("access")
+        self.listed.append(access.actor_id if access else kwargs.get("owner_id"))
         return list(self.records)
 
-    async def create(self, memory: MemoryRecord):
+    async def create(self, memory: MemoryRecord, **_kwargs):
         self.created.append(memory)
         return memory
 

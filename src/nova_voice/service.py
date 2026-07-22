@@ -55,7 +55,9 @@ from nova_voice.interpretation.speech_cues import (
     has_abandonment,
 )
 from nova_voice.memory import (
+    MemoryAccessContext,
     MemoryIntentKind,
+    MemoryOperation,
     MemoryRecord,
     MemPalaceClient,
     classify_memory_intent,
@@ -798,6 +800,10 @@ class NovaVoiceService:
             self._zero_render_temperature_scopes.discard(scope)
         goal = self.sessions.active_goal(utterance.room_id, utterance.ended_at)
         memory_control_reply: str | None = None
+        memory_access = MemoryAccessContext(
+            actor_id=utterance.speaker.person_id,
+            recognized=utterance.speaker.status == "recognized",
+        )
 
         async def mutate_memory(
             method: str,
@@ -809,7 +815,16 @@ class NovaVoiceService:
                 return None
             cancellation.begin_non_cancellable_side_effect("memory")
             try:
-                return await memory.request(method, path, payload)
+                body = dict(payload or {})
+                if method.upper() == "DELETE":
+                    separator = "&" if "?" in path else "?"
+                    path = (
+                        f"{path}{separator}actor_id={memory_access.actor_id or ''}"
+                        f"&recognized={str(memory_access.recognized).lower()}"
+                    )
+                else:
+                    body["_access"] = memory_access.model_payload()
+                return await memory.request(method, path, body or None)
             finally:
                 cancellation.non_cancellable_side_effect_finished()
 
@@ -839,15 +854,18 @@ class NovaVoiceService:
             memory_text = utterance.transcript.strip()
             memory_intent = classify_memory_intent(memory_text)
             if memory_intent.kind == MemoryIntentKind.QUERY_ALL:
-                selected_memories = await self.memory.list(owner_id=utterance.speaker.person_id)
+                selected_memories = await self.memory.list(
+                    access=memory_access, operation=MemoryOperation.CALLBACK
+                )
             elif memory_intent.kind == MemoryIntentKind.QUERY_TOPIC:
                 selected_memories = await self.memory.search(
                     memory_intent.query or memory_text,
-                    owner_id=utterance.speaker.person_id,
+                    access=memory_access,
+                    operation=MemoryOperation.CALLBACK,
                 )
             elif memory_intent.kind == MemoryIntentKind.CONTROL:
                 selected_memories = await self.memory.search(
-                    memory_text, owner_id=utterance.speaker.person_id
+                    memory_text, access=memory_access, operation=MemoryOperation.CORRECT
                 )
             else:
                 selected_memories = []
@@ -860,7 +878,7 @@ class NovaVoiceService:
             )
             if correction:
                 selected_memories = await self.memory.search(
-                    correction.group(1), owner_id=utterance.speaker.person_id
+                    correction.group(1), access=memory_access, operation=MemoryOperation.CORRECT
                 )
                 if len(selected_memories) == 1:
                     result = await mutate_memory(
@@ -871,7 +889,7 @@ class NovaVoiceService:
                     memory_control_reply = "Corrected." if result is not None else None
             elif expiry:
                 selected_memories = await self.memory.search(
-                    expiry.group(1), owner_id=utterance.speaker.person_id
+                    expiry.group(1), access=memory_access, operation=MemoryOperation.CORRECT
                 )
                 if len(selected_memories) == 1:
                     expires_at = datetime.now(UTC) + timedelta(days=int(expiry.group(2)))
@@ -1420,7 +1438,8 @@ class NovaVoiceService:
                             else [],
                             provenance="voice conversation salience rule",
                             source_turn_id=utterance.id,
-                        )
+                        ),
+                        access=memory_access,
                     )
                 finally:
                     cancellation.non_cancellable_side_effect_finished()

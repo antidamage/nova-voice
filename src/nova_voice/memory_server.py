@@ -13,7 +13,13 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from nova_voice.config import Settings
-from nova_voice.memory import MemoryRecord, MemoryStatus
+from nova_voice.memory import (
+    MemoryAccessContext,
+    MemoryAudiencePolicy,
+    MemoryOperation,
+    MemoryRecord,
+    MemoryStatus,
+)
 
 
 class MemoryPalace:
@@ -58,13 +64,15 @@ class MemoryPalace:
             )
         return memory
 
-    async def search(self, query: str, owner_id: str, limit: int = 5) -> list[MemoryRecord]:
+    async def search(self, query: str, limit: int = 5) -> list[MemoryRecord]:
         async with self._lock:
+            count = await asyncio.to_thread(self.collection().count)
+            if count == 0:
+                return []
             raw = await asyncio.to_thread(
                 self.collection().query,
                 query_texts=[query],
-                n_results=max(1, min(limit, 10)),
-                where={"owner_id": owner_id},
+                n_results=min(count, max(25, min(limit * 5, 100))),
                 include=["metadatas"],
             )
         results: list[MemoryRecord] = []
@@ -173,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     selected = settings or Settings()
     expected_token = selected.mempalace_token or ""
     palace = MemoryPalace(selected.mempalace_data_path)
+    policy = MemoryAudiencePolicy()
     app = FastAPI(title="Nova Voice MemPalace", version="1")
 
     def require_token(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -185,28 +194,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         count = await asyncio.to_thread(palace.collection().count)
         return {"ok": True, "backend": "mempalace", "memories": count}
 
+    def access_context(payload: dict) -> MemoryAccessContext:
+        return MemoryAccessContext(
+            actor_id=str(payload.get("actor_id") or "") or None,
+            recognized=bool(payload.get("recognized", False)),
+            participant_ids=tuple(str(item) for item in payload.get("participant_ids", ())),
+            administrative=bool(payload.get("administrative", False)),
+        )
+
     @app.post("/v1/memories")
-    async def create(memory: MemoryRecord, _: None = Depends(require_token)) -> dict:
+    async def create(payload: dict, _: None = Depends(require_token)) -> dict:
+        try:
+            memory = MemoryRecord.model_validate(payload.get("memory"))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Invalid memory") from error
+        context = access_context(payload.get("access") or {})
+        if not policy.can_create(memory, context):
+            raise HTTPException(status_code=403, detail="Memory audience denied")
         return {"memory": (await palace.put(memory)).model_dump(mode="json")}
 
     @app.post("/v1/search")
     async def search(payload: dict, _: None = Depends(require_token)) -> dict:
-        owner_id, query = str(payload.get("owner_id") or ""), str(payload.get("query") or "")
-        if not owner_id or not query.strip():
-            raise HTTPException(status_code=422, detail="owner_id and query are required")
-        memories = await palace.search(query, owner_id, int(payload.get("limit", 5)))
+        query = str(payload.get("query") or "")
+        context = access_context(payload)
+        if (not context.actor_id and not context.administrative) or not query.strip():
+            raise HTTPException(status_code=422, detail="access context and query are required")
+        operation = MemoryOperation(str(payload.get("operation") or "retrieve"))
+        memories = policy.filter(
+            await palace.search(query, int(payload.get("limit", 5))), context, operation
+        )[: max(1, min(int(payload.get("limit", 5)), 10))]
         return {"memories": [item.model_dump(mode="json") for item in memories]}
 
     @app.get("/v1/memories")
-    async def list_memories(owner_id: str | None = None, _: None = Depends(require_token)) -> dict:
-        memories = await palace.list(owner_id)
+    async def list_memories(
+        actor_id: str | None = None,
+        recognized: bool = False,
+        administrative: bool = False,
+        participant_ids: str = "",
+        operation: MemoryOperation = MemoryOperation.RETRIEVE,
+        _: None = Depends(require_token),
+    ) -> dict:
+        context = MemoryAccessContext(
+            actor_id=actor_id,
+            recognized=recognized,
+            administrative=administrative,
+            participant_ids=tuple(item for item in participant_ids.split(",") if item),
+        )
+        memories = policy.filter(await palace.list(), context, operation)
         return {"memories": [item.model_dump(mode="json") for item in memories]}
 
     @app.patch("/v1/memories/{memory_id}")
     async def update(memory_id: str, payload: dict, _: None = Depends(require_token)) -> dict:
+        context = access_context(payload.pop("_access", {}))
         existing = await palace.get(memory_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Unknown memory")
+        if not policy.can_access(existing, context, MemoryOperation.CORRECT):
+            raise HTTPException(status_code=403, detail="Memory correction denied")
         allowed = {
             "text",
             "expires_at",
@@ -223,10 +267,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"memory": (await palace.put(updated)).model_dump(mode="json")}
 
     @app.delete("/v1/memories/{memory_id}")
-    async def forget(memory_id: str, _: None = Depends(require_token)) -> dict:
+    async def forget(
+        memory_id: str,
+        actor_id: str | None = None,
+        recognized: bool = False,
+        administrative: bool = False,
+        _: None = Depends(require_token),
+    ) -> dict:
         existing = await palace.get(memory_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Unknown memory")
+        context = MemoryAccessContext(actor_id, recognized, administrative=administrative)
+        if not policy.can_access(existing, context, MemoryOperation.FORGET):
+            raise HTTPException(status_code=403, detail="Memory forget denied")
         deleted = existing.model_copy(
             update={"status": MemoryStatus.DELETED, "updated_at": datetime.now(UTC)}
         )
@@ -234,8 +287,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "memory": deleted.model_dump(mode="json")}
 
     @app.get("/v1/export")
-    async def export(owner_id: str | None = None, _: None = Depends(require_token)) -> dict:
-        memories = await palace.list(owner_id)
+    async def export(
+        actor_id: str | None = None,
+        recognized: bool = False,
+        administrative: bool = False,
+        _: None = Depends(require_token),
+    ) -> dict:
+        context = MemoryAccessContext(actor_id, recognized, administrative=administrative)
+        memories = policy.filter(await palace.list(), context, MemoryOperation.EXPORT)
         return {"version": 1, "memories": [item.model_dump(mode="json") for item in memories]}
 
     @app.post("/v1/backup")

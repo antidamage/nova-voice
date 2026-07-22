@@ -52,7 +52,7 @@ from nova_voice.durable.models import (
     utc_now,
 )
 from nova_voice.interpretation.llama_cpp import InterpretationError
-from nova_voice.memory import MemPalaceClient
+from nova_voice.memory import MemoryAccessContext, MemPalaceClient
 from nova_voice.monitor import VoiceMonitor
 from nova_voice.monitor import page_html as monitor_page_html
 from nova_voice.proactive import ProactiveInterventionEngine
@@ -904,13 +904,22 @@ def create_app(
     @app.get("/v1/agent/memories")
     async def agent_memories(owner_id: str | None = None) -> dict:
         client = require_memory()
-        memories = await client.list(owner_id=owner_id)
+        memories = await client.list(
+            access=MemoryAccessContext(
+                actor_id=owner_id or "dashboard-admin",
+                administrative=not owner_id,
+                recognized=bool(owner_id),
+            )
+        )
         return {"memories": [item.model_dump(mode="json") for item in memories]}
 
     @app.patch("/v1/agent/memories/{memory_id}")
     async def update_agent_memory(memory_id: str, request: MemoryUpdateRequest) -> dict:
         client = require_memory()
         payload = request.model_dump(mode="json", exclude_none=True)
+        payload["_access"] = MemoryAccessContext(
+            actor_id="dashboard-admin", administrative=True
+        ).model_payload()
         result = await client.request("PATCH", f"/v1/memories/{memory_id}", payload)
         if result is None:
             raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
@@ -919,7 +928,9 @@ def create_app(
     @app.delete("/v1/agent/memories/{memory_id}")
     async def forget_agent_memory(memory_id: str) -> dict:
         client = require_memory()
-        result = await client.request("DELETE", f"/v1/memories/{memory_id}")
+        result = await client.request(
+            "DELETE", f"/v1/memories/{memory_id}?actor_id=dashboard-admin&administrative=true"
+        )
         if result is None:
             raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
         return result
@@ -928,7 +939,13 @@ def create_app(
     async def export_agent_memories(owner_id: str | None = None) -> dict:
         client = require_memory()
         result = await client.request(
-            "GET", "/v1/export", {"owner_id": owner_id} if owner_id else None
+            "GET",
+            "/v1/export",
+            {
+                "actor_id": owner_id or "dashboard-admin",
+                "recognized": bool(owner_id),
+                "administrative": not owner_id,
+            },
         )
         if result is None:
             raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
