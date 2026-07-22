@@ -10,6 +10,8 @@ Group=nova-voice
 WorkingDirectory=/opt/nova-voice/current/ops
 ExecStart=/opt/nova-voice/venv/bin/python /opt/nova-voice/current/ops/tier0_endurance_monitor.py
 TimeoutStartSec=90000
+StateDirectory=nova-voice/evaluation
+StateDirectoryMode=0750
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -20,4 +22,3 @@ LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 IPAddressDeny=any
 IPAddressAllow=localhost
-
