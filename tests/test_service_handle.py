@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from conftest import interpretation
+from pydantic import ValidationError
 
 from nova_voice.agent_settings import AgentSettings
 from nova_voice.config import Settings
@@ -17,6 +18,8 @@ from nova_voice.domain import (
     SpeakerIdentity,
     SpeechAct,
     ToolResult,
+    TurnStage,
+    TurnTerminalStatus,
 )
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.providers.nova.client import NovaDashboardError
@@ -936,6 +939,43 @@ async def test_self_intention_cannot_execute_even_when_model_requests_action(utt
     assert not result.shadowed
     assert result.interpretation.actions == []
     assert provider.executed == []
+
+
+@pytest.mark.asyncio
+async def test_foreground_turn_emits_complete_immutable_trace(utterance) -> None:
+    value = interpretation(
+        decision=Decision.EXECUTE,
+        actions=[_action(provider="nova", tool="nova.control")],
+        addressed=0.99,
+    )
+    interpreter = _Interpreter(value, rendered="Done")
+    provider = _Provider()
+    service = _service(
+        Settings(shadow_mode=False, passive_execution_enabled=True),
+        interpreter,
+        provider,
+        _Store(),
+    )
+    spoken = utterance.model_copy(update={"wake_detected": True})
+
+    result = await service.handle(spoken)
+
+    trace = result.turn_trace
+    assert trace is not None
+    assert trace.utterance_id == spoken.id
+    assert trace.input_revision.startswith("sha256:")
+    assert trace.context_revision is not None
+    assert [stage.stage for stage in trace.stages] == list(TurnStage)
+    assert trace.terminal_status == TurnTerminalStatus.COMPLETED
+    assert trace.policy is not None and trace.policy.execute
+    assert trace.tool_journal[0].status == "completed"
+    assert trace.verification[0].ok
+    assert trace.verification[0].observed_revision is not None
+    assert trace.response_revisions
+    assert trace.total_ms >= 0
+    assert spoken.transcript not in trace.model_dump_json()
+    with pytest.raises(ValidationError):
+        trace.terminal_status = TurnTerminalStatus.FAILED
 
 
 @pytest.mark.asyncio

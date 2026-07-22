@@ -192,6 +192,11 @@ class Settings(BaseSettings):
     vad_threshold: float = Field(default=0.5, ge=0, le=1)
     vad_end_silence_ms: int = Field(default=600, ge=100, le=3000)
     vad_pre_roll_ms: int = Field(default=400, ge=0, le=2000)
+    endpointing_enabled: bool = True
+    endpoint_wait_threshold: float = Field(default=0.65, ge=0, le=1)
+    endpoint_continue_threshold: float = Field(default=0.35, ge=0, le=1)
+    endpoint_intermediate_wait_ms: int = Field(default=300, ge=0, le=1000)
+    endpoint_max_pause_ms: int = Field(default=1200, ge=100, le=3000)
 
     @field_validator("household_timezone")
     @classmethod

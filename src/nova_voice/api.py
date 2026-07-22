@@ -780,6 +780,15 @@ def create_app(
                 nonlocal processed_frames
                 turn_tasks: set[asyncio.Task] = set()
 
+                async def emit_listening_ack(chunk: bytes, sample_rate: int) -> None:
+                    playback = room_playback.open_stream(room_id, hello.satellite_id)
+                    try:
+                        selected_audio.note_playback(room_id, chunk, sample_rate)
+                        await playback.emit(chunk, sample_rate)
+                        await playback.finish()
+                    finally:
+                        playback.release()
+
                 async def run_turn(pending_turn) -> None:
                     playback = room_playback.open_stream(
                         room_id,
@@ -870,6 +879,7 @@ def create_app(
                                 wake_detected=turn_signal["wake_armed"],
                                 playback_active=bool(frame.flags & FLAG_PLAYBACK_ACTIVE),
                                 dashboard_foreground=hello.dashboard_foreground,
+                                listening_ack_sink=emit_listening_ack,
                             )
                             processed_frames += 1
                             if pending is not None:

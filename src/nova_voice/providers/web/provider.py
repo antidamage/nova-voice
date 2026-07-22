@@ -95,7 +95,11 @@ class WebProvider(CapabilityProvider):
             tool_policies={
                 # Read-only: retrieves information, mutates no household state.
                 "web.ask": ToolPolicy(
-                    risk="low", reversible=True, idempotent=True, parallel_safe=True
+                    risk="low",
+                    reversible=True,
+                    idempotent=True,
+                    parallel_safe=True,
+                    cancellation="anytime",
                 ),
             },
         )

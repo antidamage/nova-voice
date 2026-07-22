@@ -2,9 +2,10 @@
 
   ## Summary
 
-  Nova already has a solid real-time foundation: satellite arbitration, streaming STT, wake/follow-up conversations, speaker
+  Nova already has a solid real-time foundation: satellite arbitration, final-buffer STT with a streaming-capable adapter,
+  wake/follow-up conversations, speaker
   recognition, structured intent/action planning, provider tools, policy gates, smart-home verification, web lookup, interruption, TTS
-  routing, short-lived context, diagnostics, and 409 passing tests.
+  routing, short-lived context, diagnostics, and 421 passing tests.
 
   The main gaps are architectural rather than prompt-level:
 
@@ -16,14 +17,16 @@
   - There is no durable personal memory, commitment tracking, delegation system, proactive decision engine, or agent-owned event
     subscription.
 
-  - Turn-taking still relies primarily on VAD/final STT rather than semantic end-of-turn prediction, adaptive interruption recovery, and
-    speculative cascade execution.
+  - Turn-taking now layers bounded audio-native semantic endpointing, adaptive
+    interruption recovery, and stable read-only prefetch on the authoritative
+    final transcript; live household tuning and acceptance evidence remain.
 
   - Most coverage is mocked/unit-level; recorded-audio replay, household simulation, endurance, false-activation, and long-running-task
     evaluation remain incomplete.
 
-  - Documentation has drifted: 20-second versus 60-second conversation windows, “no browser microphones” versus an implemented browser
-    satellite, and implementation claims that lack live acceptance evidence.
+  - Runtime documentation now matches the deployed 60-second default, supported browser microphone paths, Iridium/Nova topology, and
+    final-buffer STT/incremental-PCM TTS limits. Live latency, replay, physical-audio, residency, and endurance acceptance evidence is
+    still incomplete.
 
   Target design: retain the cascade architecture and its deterministic safety core, while separating immediate voice interaction from
   durable goals, plans, events, permissions, memory, and background work.
@@ -31,7 +34,8 @@
   ## Runtime and Loop Architecture
 
   1. Audio micro-loop
-      - Keep satellite activity gating, central VAD, election, echo suppression, speaker recognition, streaming STT, and response
+      - Keep satellite activity gating, central VAD, election, echo suppression, speaker recognition, the streaming-capable STT adapter,
+        and response
         locking.
 
       - Add an audio-native semantic end-of-turn detector after VAD silence, with configurable wait/continue thresholds and a fixed
@@ -151,7 +155,7 @@
   and required deployment/health verification are complete. Documentation-only tasks do not require deployment. Do not mark a parent
   gate complete because one of its examples works.
 
-  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 2 of 58 tasks complete. Next task: **T0-01**.
+  Status: `[x]` deployed/accepted, `[ ]` pending. Current progress: 11 of 58 tasks complete. Next task: **T0-12**.
 
   ### Milestone decision map
 
@@ -160,17 +164,18 @@
   it is **Blocked**. Update milestone state whenever task checkboxes change. Work may proceed within a ready milestone in the task order
   below, but a milestone gate cannot be skipped by completing only its last task.
 
-  Milestone progress: 1 of 26 complete. Ready to choose now: **M0-01 Documentation truth** or **M0-02 Traceable foreground turns**.
+  Milestone progress: 4 of 26 complete. Ready to choose now: **M0-05 Reproducible household simulation** or **M1-01 Durable goal and
+  plan engine**.
 
   | State | Milestone | Completed feature outcome | Required tasks | Milestone dependencies |
   | --- | --- | --- | --- | --- |
-  | Ready | **M0-01 — Documentation truth** | Operators and agents have one accurate account of deployed voice behavior. | `T0-01` | None |
-  | Ready | **M0-02 — Traceable foreground turns** | Every foreground turn runs through explicit stages with a complete immutable trace and safe cancellation semantics. | `T0-02`–`T0-04` | None |
-  | Blocked | **M0-03 — Natural turn-taking** | Nova detects semantic turn completion, handles interruptions/backchannels, prefetches safely, and streams cancellable speech. | `T0-05`–`T0-09` | `M0-02` |
+  | **Complete** | **M0-01 — Documentation truth** | Operators and agents have one accurate account of deployed voice behavior. | `T0-01` | None |
+  | **Complete** | **M0-02 — Traceable foreground turns** | Every foreground turn runs through explicit stages with a complete immutable trace and safe cancellation semantics. | `T0-02`–`T0-04` | None |
+  | **Complete** | **M0-03 — Natural turn-taking** | Nova detects semantic turn completion, handles interruptions/backchannels, prefetches safely, and streams cancellable speech. | `T0-05`–`T0-09` | `M0-02` |
   | **Complete** | **M0-04 — Knowledge and speech reliability** | Knowledge gaps recover through one safe web lookup and numbers are spoken contextually. | `T0-10`–`T0-11` | None |
-  | Blocked | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
+  | Ready | **M0-05 — Reproducible household simulation** | Recorded audio and fake-clock household scenarios reproduce failures deterministically. | `T0-12`–`T0-13` | `M0-02` |
   | Blocked | **M0-06 — Dependable real-time core accepted** | Live latency, endurance, corpus, residency, and streaming gates prove the Tier 0 core. | `T0-14`–`T0-16` | `M0-01`, `M0-03`, `M0-04`, `M0-05`, `MOPS-01` |
-  | Blocked | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
+  | Ready | **M1-01 — Durable goal and plan engine** | Goals and plans survive restarts, execute exactly once, support waits/approvals, and recover partial failures. | `T1-01`–`T1-05` | `M0-02` |
   | Blocked | **M1-02 — Resumable household event backbone** | Voice consumes authenticated, normalized, cursor-based household events without duplication. | `T1-06` | `M1-01` |
   | Blocked | **M1-03 — Household authority and administration** | Identity classes, delegation grants, revocation, APIs, Dashboard controls, and audit replay are enforced end to end. | `T1-07`–`T1-09` | `M1-01` |
   | Blocked | **M1-04 — Selective durable conversational memory** | MemPalace stores, retrieves, consolidates, reviews, corrects, and forgets salient memories under provenance and sensitivity policy. | `T1-10`–`T1-13` | `M1-01` |
@@ -193,23 +198,23 @@
 
   ### Tier 0 task queue — dependable real-time core
 
-  - [ ] **T0-01 — Reconcile runtime documentation.** Align conversation duration, the currently supported in-scope browser microphone/
+  - [x] **T0-01 — Reconcile runtime documentation.** Align conversation duration, the currently supported in-scope browser microphone/
     satellite path, Iridium/Nova topology, streaming limitations, test counts, and acceptance claims with deployed behavior.
-  - [ ] **T0-02 — Define structured TurnTrace.** Add the immutable trace schema, trace IDs, input/context revisions, policy decision,
+  - [x] **T0-02 — Define structured TurnTrace.** Add the immutable trace schema, trace IDs, input/context revisions, policy decision,
     tool journal, verification evidence, response revisions, timing fields, and terminal status without changing turn behavior.
-  - [ ] **T0-03 — Extract the foreground turn state machine.** Split capture → endpoint → contextualize → interpret → authorize →
+  - [x] **T0-03 — Extract the foreground turn state machine.** Split capture → endpoint → contextualize → interpret → authorize →
     execute/query → verify → render → speak → commit into explicit tested stages using `TurnTrace` (`T0-02`).
-  - [ ] **T0-04 — Separate speech and task cancellation.** Make barge-in stop playback immediately while task cancellation follows
+  - [x] **T0-04 — Separate speech and task cancellation.** Make barge-in stop playback immediately while task cancellation follows
     provider-declared safety; cover cancellation before, during, and after side effects (`T0-03`).
-  - [ ] **T0-05 — Add semantic endpointing.** Run an audio-native end-of-turn decision after VAD silence with wait/continue thresholds,
+  - [x] **T0-05 — Add semantic endpointing.** Run an audio-native end-of-turn decision after VAD silence with wait/continue thresholds,
     a maximum pause, latency metrics, and recorded-audio tests (`T0-03`).
-  - [ ] **T0-06 — Add adaptive interruption recovery.** Classify true barge-in, backchannel, cross-talk, and false interruption, and
+  - [x] **T0-06 — Add adaptive interruption recovery.** Classify true barge-in, backchannel, cross-talk, and false interruption, and
     resume cancelled speech after false positives (`T0-04`, `T0-05`).
-  - [ ] **T0-07 — Add stable-interim prefetch.** Prefetch safe context, likely tools, and LLM state from stable interim transcripts but
+  - [x] **T0-07 — Add stable-interim prefetch.** Prefetch safe context, likely tools, and LLM state from stable interim transcripts but
     commit no tools, memory, or speech before the final-turn gate (`T0-03`, `T0-05`).
-  - [ ] **T0-08 — Finish sentence-streaming TTS.** Stream sentence/clause units, cancel between units, and prove actual first-audio and
+  - [x] **T0-08 — Finish sentence-streaming TTS.** Stream sentence/clause units, cancel between units, and prove actual first-audio and
     cancellation behavior against the selected production backend (`T0-04`).
-  - [ ] **T0-09 — Add deterministic listening acknowledgements.** Introduce a bounded soundboard/backchannel controller whose output
+  - [x] **T0-09 — Add deterministic listening acknowledgements.** Introduce a bounded soundboard/backchannel controller whose output
     never implies completion and never interferes with endpointing or interruption classification (`T0-05`, `T0-06`).
   - [x] **T0-10 — Add bounded knowledge-failure web recovery.** One addressed, policy-checked lookup and grounded rerender are deployed,
     with operational/local/permission/social/unaddressed exclusions and non-recursive failure handling.
@@ -463,7 +468,7 @@
 
   ## Test and Acceptance Plan
 
-  - Preserve the 409-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
+  - Preserve the 421-test baseline and add model-independent state-machine/property tests for all lifecycle transitions and invariants.
   - Build a virtual household with fake time, occupancy, HA entities, calendars, communications, failures, delayed state convergence,
     and concurrent speakers.
 

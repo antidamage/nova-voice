@@ -1,10 +1,11 @@
 # Nova Voice
 
 Nova Voice is Nova's fully local, room-aware voice interface.  Its runtime
-runs on Iridium.  It receives locally activity-gated microphone audio from native
-satellites, determines whether a person is addressing Nova, interprets the
-request, executes permitted household actions through documented providers,
-and returns synthesized audio to the one satellite that captured the request.
+runs on Iridium. It receives microphone audio from native satellites and the
+supported dashboard browser satellite, determines whether a person is
+addressing Nova, interprets the request, executes permitted household actions
+through documented providers, and returns synthesized audio to the one
+satellite that captured the request.
 
 `nova-voice` is a standalone product boundary.  It must not import dashboard
 source, share dashboard components, add dashboard routes, or depend on a
@@ -16,16 +17,21 @@ audio, interpretation, or session core.
 ## Implemented topology
 
 ```text
-room microphones                     Iridium                    source satellite
-Indium / Nocturnium --mTLS PCM--> satellite ingress --> VAD/election --> STT
-       ^                                                              |
-       |                                                              v
-       +--- response PCM (source only) <--- TTS <--- LLM/session/action <---+
+microphones                              Iridium                    source satellite
+native --mTLS PCM---------------------> satellite ingress --> VAD/election --> STT
+browser --WSS--> dashboard mTLS bridge --------^                            |
+       ^                                                                    v
+       +--- response PCM (source only) <--- streaming TTS <--- session/action
 ```
 
 - Native satellites are supervised background processes, not browser
   microphones.  They capture and play audio whether or not the dashboard is
   open.
+- The dashboard browser satellite is a supported, opt-in foreground client.
+  It uses `getUserMedia`/AudioWorklet and a same-origin WSS connection to the
+  dashboard bridge, which relays the satellite protocol to Iridium over mTLS.
+  It supports push-to-talk and page-bound always-on capture; HTTPS, microphone
+  permission, the open page, and the per-device Voice Agent setting are required.
 - The satellite transport is a mutually authenticated local-TLS WebSocket.
   It carries 16 kHz mono PCM audio during probable speech plus a versioned hello,
   health, timing, and playback-lifecycle control protocol.
@@ -166,12 +172,19 @@ configuration:
   than chosen from published model-card figures.
 - TTS candidates are Qwen3-TTS 12 Hz 1.7B/0.6B CustomVoice and current/original
   Chatterbox variants.  Exactly one measured winner is deployed at a time.
-- One Python process shares a CUDA context between selected STT and TTS; the
-  LLM is a separate llama.cpp process.  There is no runtime model swapping or
-  silent startup downgrade.
+- The deployed resident model services are llama.cpp for the LLM, the Nova
+  Voice Python process for STT/orchestration, and a separate vLLM-Omni service
+  for streaming TTS. The two-stage TTS service owns two CUDA worker processes.
+  There is no runtime model swapping or silent startup downgrade.
 
-Audio is continuously sent to Iridium.  Central VAD frames speech segments;
-each multiword final transcript receives structured interpretation.  The
+Native audio is sent while the satellite activity gate is open; browser audio
+is sent while its selected capture mode is active. Central VAD frames speech
+segments and an audio-cadence endpoint decision can extend an incomplete pause
+up to a configured maximum. Cache-aware interim hypotheses may warm read-only
+room context and likely-tool/LLM state; the finalized utterance remains the
+authoritative batch transcript and the only gate to tools, persistence, and
+speech. Each multiword final transcript receives
+structured interpretation. The
 structured pass owns command-intent classification; the legacy narrow-vocabulary
 prefilter is disabled by default so valid aliases and imperfect transcripts are
 not dropped before interpretation.  A transcript-first,
@@ -225,9 +238,36 @@ and selected model status.  Deployment is coordinated through the repository's
 Voice/Dashboard chain; `deploy-nova-stack.ps1` installs the Iridium runtime and
 does not restart unrelated LLM/TTS services unless required.
 
+The deployed vLLM-Omni TTS path emits incremental PCM for sentence/clause units
+of a finalized response; satellite playback is cancellable within a unit and
+before subsequent units. The automated 421-test suite is the
+current regression baseline; the physical-audio, recorded-replay, latency,
+false-activation, residency, and endurance gates below remain unaccepted until
+their measurements are recorded.
+
+Each foreground turn produces an immutable `TurnTrace` with a unique trace ID,
+hashed input/context revisions, ordered stage timings, policy decision, tool
+journal, verification evidence, response revisions, cancellation decisions, and
+terminal status. The state machine enforces capture -> endpoint -> contextualize
+-> interpret -> authorize -> execute/query -> verify -> render -> speak ->
+commit ordering. Barge-in cancels response playback independently. Task
+cancellation consults provider metadata: queued work can stop before side
+effects, read-only providers may permit in-flight cancellation, and a mutation
+already in flight must complete and verify rather than being abandoned in an
+unknown state.
+
+Speech captured during playback is classified before cancellation. Explicit or
+addressed requests are true barge-in; short acknowledgements, cross-talk,
+playback-correlated audio, and non-lexical noise leave the response stream
+running. During a semantic endpoint wait, an addressed turn may receive one
+bounded nonverbal earcon. The earcon has no completion semantics and its PCM is
+registered with echo suppression.
+
 ## Privacy and non-negotiables
 
-- Inference and audio remain on the household LAN; there is no cloud fallback.
+- Inference and audio remain on the household LAN. A configured public web
+  provider may answer a bounded knowledge lookup; it is not an inference or
+  audio fallback.
 - Raw audio is not persisted by default.  Development transcripts and derived
   conversation text expire within 24 hours.
 - Every response is delivered to exactly the one satellite that won the
