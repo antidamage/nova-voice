@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from nova_voice.audio.conversation import ConversationTracker
 from nova_voice.authority import HouseholdAuthority
+from nova_voice.automation import AutomationManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.config import Settings
 from nova_voice.durable.store import DurableAgentStore
@@ -67,6 +68,7 @@ def build_service(settings: Settings) -> NovaVoiceService:
     store = TranscriptStore(settings.database_path, settings.retention_hours)
     durable_store = DurableAgentStore(settings.effective_durable_database_path)
     authority = HouseholdAuthority(durable_store, settings.household_tzinfo)
+    automations = AutomationManager(durable_store)
     proactive = ProactiveInterventionEngine(durable_store)
     memory = MemPalaceClient(
         settings.mempalace_url,
@@ -107,5 +109,6 @@ def build_service(settings: Settings) -> NovaVoiceService:
         durable_store=durable_store,
         event_consumer=event_consumer,
         authority=authority,
+        automations=automations,
         memory=memory,
     )

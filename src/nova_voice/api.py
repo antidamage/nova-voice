@@ -22,11 +22,13 @@ from nova_voice.audio.runtime import (
     ProcessedAudioTurn,
     SatelliteAudioRuntime,
 )
+from nova_voice.automation import AutomationLifecycleError, AutomationManager
 from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
 from nova_voice.durable.models import (
+    AutomationRecord,
     DelegationGrantRecord,
     ExecutionRecord,
     GoalRecord,
@@ -112,6 +114,17 @@ class MemoryUpdateRequest(BaseModel):
     status: str | None = None
     supersedes: str | None = None
     needs_confirmation: bool | None = None
+
+
+class AutomationDraftRequest(BaseModel):
+    id: str
+    summary: str
+    trigger: dict
+    proposed_actions: list[dict]
+
+
+class AutomationOwnerRequest(BaseModel):
+    owner_id: str
 
 
 def _bounded_preview_text(text: str, limit: int = PREVIEW_TEXT_MAX) -> str:
@@ -555,6 +568,71 @@ def create_app(
         if result is None:
             raise HTTPException(status_code=502, detail="MemPalace memory is unavailable")
         return result
+
+    def require_automations() -> AutomationManager:
+        if selected_service.automations is None:
+            raise HTTPException(status_code=503, detail="Automation management is disabled")
+        return selected_service.automations
+
+    @app.get("/v1/agent/automations")
+    async def agent_automations() -> dict:
+        durable, _ = require_agent_administration()
+        records = await durable.list(AutomationRecord)
+        return {"automations": [row.record.model_dump(mode="json") for row in records]}
+
+    @app.post("/v1/agent/automations", status_code=201)
+    async def draft_automation(request: AutomationDraftRequest, owner_id: str) -> dict:
+        try:
+            record = await require_automations().draft(
+                automation_id=request.id, owner_id=owner_id, summary=request.summary,
+                trigger=request.trigger, actions=request.proposed_actions,
+            )
+        except AutomationLifecycleError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"automation": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/automations/{automation_id}/simulate")
+    async def simulate_automation(automation_id: str) -> dict:
+        try:
+            state = await selected_service.nova_provider.refresh(force=True)
+            record = await require_automations().simulate(automation_id, state=state)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown automation") from error
+        except AutomationLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"automation": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/automations/{automation_id}/approve")
+    async def approve_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
+        try:
+            record = await require_automations().approve(automation_id, actor_id=request.owner_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown automation") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except AutomationLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"automation": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/automations/{automation_id}/activate")
+    async def activate_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
+        try:
+            record = await require_automations().activate(automation_id, actor_id=request.owner_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown automation") from error
+        except AutomationLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"automation": record.model_dump(mode="json")}
+
+    @app.post("/v1/agent/automations/{automation_id}/rollback")
+    async def rollback_automation(automation_id: str, request: AutomationOwnerRequest) -> dict:
+        try:
+            record = await require_automations().rollback(automation_id, actor_id=request.owner_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Unknown automation") from error
+        except AutomationLifecycleError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"automation": record.model_dump(mode="json")}
 
     @app.get("/v1/speaker-profiles")
     async def speaker_profiles() -> dict:
