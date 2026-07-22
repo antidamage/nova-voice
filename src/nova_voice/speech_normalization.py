@@ -8,6 +8,7 @@ speech model produces inconsistent pronunciations.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date
 
 _DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
@@ -346,3 +347,51 @@ def normalize_spoken_numbers(text: str) -> str:
     for token, literal in protected.items():
         normalized = normalized.replace(token, literal)
     return normalized
+
+
+def apply_pronunciation_dictionary(text: str, pronunciations: Mapping[str, str]) -> str:
+    """Apply explicit whole-token pronunciations without rewriting URLs or email."""
+
+    if not text or not pronunciations:
+        return text
+    protected: dict[str, str] = {}
+
+    def protect(match: re.Match[str]) -> str:
+        token = chr(0xE100 + len(protected))
+        protected[token] = match.group(0)
+        return token
+
+    rendered = _PROTECTED_RE.sub(protect, text)
+    for source, replacement in sorted(
+        pronunciations.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        rendered = re.sub(
+            rf"(?<!\w){re.escape(source)}(?!\w)",
+            lambda _match, spoken=replacement: spoken,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+    for token, literal in protected.items():
+        rendered = rendered.replace(token, literal)
+    return rendered
+
+
+def spoken_language_for_text(text: str, preferred: str = "Auto") -> str:
+    """Choose a Qwen language label, using Auto for genuine code-switching."""
+
+    scripts: set[str] = set()
+    if re.search(r"[A-Za-z]", text):
+        scripts.add("English")
+    if re.search(r"[\u3040-\u30ff]", text):
+        scripts.add("Japanese")
+    if re.search(r"[\uac00-\ud7af]", text):
+        scripts.add("Korean")
+    if re.search(r"[\u4e00-\u9fff]", text):
+        scripts.add("Chinese")
+    if re.search(r"[\u0400-\u04ff]", text):
+        scripts.add("Russian")
+    if len(scripts) > 1:
+        return "Auto"
+    if preferred != "Auto":
+        return preferred
+    return next(iter(scripts), "Auto")

@@ -68,6 +68,7 @@ from nova_voice.satellites.protocol import (
     SatelliteHello,
 )
 from nova_voice.service import NovaVoiceService
+from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.telemetry import StructuralTelemetry
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
@@ -91,6 +92,7 @@ class VoicePreviewRequest(BaseModel):
 class SpeakerProfileUpdateRequest(BaseModel):
     display_name: str | None = None
     pronouns: str | None = None
+    speech_preferences: SpeakerSpeechPreferences | None = None
 
 
 class SpeakerTemplateAssignmentRequest(BaseModel):
@@ -1100,6 +1102,7 @@ def create_app(
             person_id,
             display_name=display_name,
             pronouns=(payload.pronouns or "" if "pronouns" in payload.model_fields_set else None),
+            speech_preferences=payload.speech_preferences,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="Speaker profile was not found")
