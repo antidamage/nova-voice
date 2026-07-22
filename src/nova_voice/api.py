@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import re
@@ -12,9 +14,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.bootstrap import build_audio_runtime
@@ -55,6 +58,12 @@ from nova_voice.interpretation.llama_cpp import InterpretationError
 from nova_voice.memory import MemoryAccessContext, MemPalaceClient
 from nova_voice.monitor import VoiceMonitor
 from nova_voice.monitor import page_html as monitor_page_html
+from nova_voice.multimodal import (
+    MultimodalInputKind,
+    MultimodalPermission,
+    MultimodalRequest,
+)
+from nova_voice.multimodal_inputs import LocalMultimodalInputProvider
 from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.satellites.playback import (
@@ -93,6 +102,36 @@ class SpeakerProfileUpdateRequest(BaseModel):
     display_name: str | None = None
     pronouns: str | None = None
     speech_preferences: SpeakerSpeechPreferences | None = None
+
+
+class MultimodalShareApiRequest(BaseModel):
+    request_id: str
+    kind: Literal["dashboard_screen", "user_image", "document", "device_diagram"]
+    actor_id: str
+    purpose: str
+    audience: tuple[str, ...]
+    mime_type: Literal[
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+        "application/json",
+        "text/plain",
+    ]
+    content_base64: str = Field(max_length=14_000_000)
+    retain_until: datetime | None = None
+
+
+class CameraSnapshotApiRequest(BaseModel):
+    request_id: str
+    camera_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    snapshot_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,120}$")
+    actor_id: str
+    purpose: str
+    audience: tuple[str, ...]
+    grant_id: str
+    max_bytes: int = Field(default=50_000_000, ge=1, le=50_000_000)
+    retain_until: datetime | None = None
 
 
 class SpeakerTemplateAssignmentRequest(BaseModel):
@@ -237,6 +276,11 @@ def create_app(
     janitor_task: asyncio.Task | None = None
     monitor = VoiceMonitor()
     structural_telemetry = StructuralTelemetry(selected_settings.structural_telemetry_path)
+    multimodal_inputs = LocalMultimodalInputProvider(
+        selected_settings.multimodal_data_path,
+        dashboard_base_url=selected_settings.nova_base_url,
+        timeout_seconds=selected_settings.multimodal_timeout_seconds,
+    )
 
     def attach_monitor() -> None:
         if selected_audio is None:
@@ -375,6 +419,7 @@ def create_app(
             "maxAudioSeconds": selected_settings.diagnostics_max_audio_seconds,
         }
         payload["ok"] = bool(payload["ok"] and payload["audio"]["ok"])
+        payload["multimodal"] = await multimodal_inputs.health()
         return payload
 
     @app.post("/v1/communications/{draft_id}/preview")
@@ -717,6 +762,75 @@ def create_app(
             current.model_dump(mode="json", by_alias=True) if current is not None else None
         )
         return payload
+
+    @app.post("/v1/multimodal/shares", status_code=201)
+    async def create_multimodal_share(request: MultimodalShareApiRequest) -> dict:
+        try:
+            content = base64.b64decode(request.content_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise HTTPException(status_code=422, detail="Invalid base64 content") from error
+        permission = MultimodalPermission(
+            actor_id=request.actor_id,
+            purpose=request.purpose,
+            audience=request.audience,
+            explicit_user_share=True,
+            retain_until=request.retain_until,
+        )
+        contract = MultimodalRequest(
+            request_id=request.request_id,
+            kind=MultimodalInputKind(request.kind),
+            source_uri=f"dashboard-share://{request.request_id}",
+            permission=permission,
+            expected_mime_types=(request.mime_type,),
+        )
+        try:
+            asset = await multimodal_inputs.store_share(contract, content, request.mime_type)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"asset": asset.model_dump(mode="json")}
+
+    @app.post("/v1/multimodal/camera-snapshots", status_code=201)
+    async def acquire_camera_snapshot(request: CameraSnapshotApiRequest) -> dict:
+        durable, authority = require_agent_administration()
+        authorized = authority.is_owner(request.actor_id)
+        if not authorized:
+            stored = await durable.get(DelegationGrantRecord, request.grant_id)
+            if stored is not None:
+                grant = stored.record
+                authorized = bool(
+                    isinstance(grant, DelegationGrantRecord)
+                    and grant.active
+                    and grant.grantee_id == request.actor_id
+                    and grant.capability in {"*", "camera.read"}
+                    and (
+                        not grant.target_scope or request.camera_id in grant.target_scope
+                    )
+                    and (grant.expires_at is None or grant.expires_at > utc_now())
+                )
+        if not authorized:
+            raise HTTPException(status_code=403, detail="Camera snapshot access denied")
+        permission = MultimodalPermission(
+            actor_id=request.actor_id,
+            purpose=request.purpose,
+            audience=request.audience,
+            grant_id=request.grant_id,
+            retain_until=request.retain_until,
+        )
+        contract = MultimodalRequest(
+            request_id=request.request_id,
+            kind=MultimodalInputKind.CAMERA_SNAPSHOT,
+            source_uri=(
+                f"camera://{request.camera_id}/snapshots/{request.snapshot_id}"
+            ),
+            permission=permission,
+            expected_mime_types=("video/mp2t", "application/octet-stream"),
+            max_bytes=request.max_bytes,
+        )
+        try:
+            asset = await multimodal_inputs.acquire(contract)
+        except (httpx.HTTPError, ValueError) as error:
+            raise HTTPException(status_code=502, detail="Camera snapshot unavailable") from error
+        return {"asset": asset.model_dump(mode="json")}
 
     def require_agent_administration():
         if selected_service.durable_store is None or selected_service.authority is None:
