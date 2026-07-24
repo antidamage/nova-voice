@@ -794,6 +794,8 @@ class SatelliteAudioRuntime:
         await self.tts.configure(
             speaker=engine_speaker,
             language=settings.language.value,
+            # Dots-only diffusion step count; other engines accept and ignore it.
+            num_steps=settings.dots_num_steps,
         )
         self._configured_speaker = engine_speaker
         self._configured_language = settings.language.value

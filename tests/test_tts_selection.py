@@ -146,3 +146,33 @@ async def test_dots_health_reports_ready_on_200() -> None:
     assert health["ok"] is True
     assert health["ready"] is True
     assert "error" not in health
+
+
+@pytest.mark.asyncio
+async def test_dots_configure_sends_num_steps_in_request() -> None:
+    # The dashboard's live "streaming steps" control flows through configure()
+    # into each dots /v1/audio/speech request; None restores the service default
+    # (the field is simply omitted). The classic vLLM path never sends it.
+    from nova_voice.inference.tts import DotsStreamingTextToSpeech
+
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(__import__("json").loads(request.content))
+        return httpx.Response(200, content=b"\x01\x00\x02\x00")
+
+    adapter = DotsStreamingTextToSpeech(
+        "http://dots.local", "dots.tts-mf", "johnny_multi", "English"
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        await adapter.configure(speaker="johnny_multi", language="English", num_steps=3)
+        await adapter.synthesize("hi", "Natural")
+        await adapter.configure(speaker="johnny_multi", language="English", num_steps=None)
+        await adapter.synthesize("hey there", "Natural")
+    finally:
+        await adapter._client.aclose()
+
+    assert requests[0]["num_steps"] == 3
+    assert "num_steps" not in requests[1]

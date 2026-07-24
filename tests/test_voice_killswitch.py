@@ -24,9 +24,12 @@ class AlwaysWinsElection:
 
 
 class FakeTts:
-    async def configure(self, *, speaker: str, language: str) -> None:
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
         self.speaker = speaker
         self.language = language
+        self.num_steps = num_steps
 
 
 def make_runtime() -> tuple[SatelliteAudioRuntime, ConversationTracker]:

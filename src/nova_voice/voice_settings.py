@@ -385,6 +385,12 @@ class VoiceSettings(BaseModel):
     # Steady-state audio frame size sent to satellites once the fast-start
     # first chunk has gone out.
     tts_frame_ms: int = Field(default=100, ge=20, le=200, multiple_of=10)
+    # Custom (dots.tts) diffusion step count — the model-side latency/quality
+    # lever. Fewer steps reach first audio sooner and cost less GPU per reply,
+    # at some quality cost. Ignored by the Classic (Qwen) engine, which has no
+    # diffusion sampler. Sent to the dots service per request so it applies live
+    # without a service restart.
+    dots_num_steps: int = Field(default=6, ge=1, le=16)
     # Operator-authored personality description appended to the interpretation
     # and response-rendering system prompts.  Empty string disables it.
     personality: str = Field(default="You are a bright, bubbly helper!", max_length=2000)
