@@ -310,6 +310,11 @@ class PendingAudioTurn:
     endpoint_wait_ms: int = 0
     endpoint_probability: float = 1.0
     prefetch_task: asyncio.Task[ForegroundPrefetch] | None = None
+    # When this turn was formed by merging a resumed sentence onto an earlier
+    # attempt, the transcript id of that earlier attempt. The merged transcript
+    # upgrades that displayed line in place instead of leaving the superseded
+    # partial behind.
+    supersedes_announce_id: str | None = None
 
 
 class SatelliteAudioRuntime:
@@ -401,6 +406,11 @@ class SatelliteAudioRuntime:
         self._tts_consistency_turns = 0
         self._tts_consistency_alerts = 0
         self._processing_phases: dict[str, str] = {}
+        # The transcript id each in-flight turn announced for its user line,
+        # keyed by the turn's asyncio task. A merged continuation reads its
+        # predecessor's id from here so the merged transcript can replace the
+        # earlier partial in place rather than appending a second line.
+        self._turn_announce: dict[asyncio.Task, str] = {}
         self._processing_owners: dict[str, asyncio.Task[Any]] = {}
 
     def _scope_id(self, room_id: str) -> str:
@@ -453,12 +463,30 @@ class SatelliteAudioRuntime:
             ),
         )
 
+    def take_turn_announce_id(self, task: asyncio.Task | None) -> str | None:
+        """The user-transcript id a given in-flight turn task announced, if any.
+
+        Also opportunistically prunes finished tasks so the map can never grow
+        without bound if a non-merge caller path skips the normal cleanup.
+        """
+
+        for done in [item for item in self._turn_announce if item.done()]:
+            self._turn_announce.pop(done, None)
+        return self._turn_announce.get(task) if task is not None else None
+
     @staticmethod
     def merge_pending_turns(
         first: PendingAudioTurn,
         continuation: PendingAudioTurn,
+        *,
+        supersedes_announce_id: str | None = None,
     ) -> PendingAudioTurn:
-        """Append resumed audio and retain the newest transport/claim handles."""
+        """Append resumed audio and retain the newest transport/claim handles.
+
+        ``supersedes_announce_id`` is the earlier attempt's transcript id, so the
+        merged turn's transcript replaces that displayed line rather than leaving
+        the superseded partial behind.
+        """
 
         if first.prefetch_task is not None and not first.prefetch_task.done():
             first.prefetch_task.cancel()
@@ -490,6 +518,7 @@ class SatelliteAudioRuntime:
             endpoint_wait_ms=continuation.endpoint_wait_ms,
             endpoint_probability=continuation.endpoint_probability,
             prefetch_task=None,
+            supersedes_announce_id=supersedes_announce_id,
         )
 
     def speaking_satellite(self, room_id: str) -> str | None:
@@ -1183,11 +1212,14 @@ class SatelliteAudioRuntime:
                 endpoint_wait_ms=pending.endpoint_wait_ms,
                 endpoint_probability=pending.endpoint_probability,
                 prefetch=prefetch,
+                supersedes_announce_id=pending.supersedes_announce_id,
             )
         finally:
             if owner is not None and self._processing_owners.get(scope_id) is owner:
                 self._processing_owners.pop(scope_id, None)
                 self._processing_phases.pop(scope_id, None)
+            if owner is not None:
+                self._turn_announce.pop(owner, None)
 
     async def process_pcm(
         self,
@@ -1206,6 +1238,7 @@ class SatelliteAudioRuntime:
         endpoint_wait_ms: int = 0,
         endpoint_probability: float = 1.0,
         prefetch: ForegroundPrefetch | None = None,
+        supersedes_announce_id: str | None = None,
     ) -> ProcessedAudioTurn | None:
         """Process one bounded PCM utterance through the resident voice stack.
 
@@ -1539,23 +1572,39 @@ class SatelliteAudioRuntime:
             if speaker_identity is not None and speaker_identity.status == "recognized"
             else None
         )
+        # A merged continuation supersedes its earlier partial: upgrade that
+        # displayed line in place. Dedup can't infer this — both attempts are
+        # addressed, so it treats them as a legitimate repeat — so the merge
+        # passes the id explicitly. An existing dedup replace still wins.
+        replaces_id = dedup_verdict.replace_announce_id or supersedes_announce_id
         announce_id = self._announce_transcript(
             "user",
             spoken_transcript,
             satellite_id=satellite_id,
             room_id=room_id,
-            replaces_id=dedup_verdict.replace_announce_id,
+            replaces_id=replaces_id,
             visible=addressed,
             speaker_name=announced_speaker_name,
         )
-        self._dedup.record(
-            scope_id=scope_id,
-            satellite_id=satellite_id,
-            tokens=dedup_tokens,
-            text=transcript,
-            announce_id=announce_id,
-            addressed=addressed,
-        )
+        if (
+            supersedes_announce_id is not None
+            and dedup_verdict.replace_announce_id is None
+        ):
+            # Keep the dedup window's survivor in sync with the merged text
+            # instead of recording a second entry for the same utterance.
+            self._dedup.replace_text(supersedes_announce_id, transcript, dedup_tokens)
+        else:
+            self._dedup.record(
+                scope_id=scope_id,
+                satellite_id=satellite_id,
+                tokens=dedup_tokens,
+                text=transcript,
+                announce_id=announce_id,
+                addressed=addressed,
+            )
+        current_turn_task = asyncio.current_task()
+        if current_turn_task is not None and addressed:
+            self._turn_announce[current_turn_task] = announce_id
         now = datetime.now(UTC)
         service_started = time.perf_counter()
 

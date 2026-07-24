@@ -2033,11 +2033,18 @@ def create_app(
                             reason=decision.reason,
                         )
                         if decision.accepted and previous_pending is not None:
+                            # Capture the cancelled attempt's transcript id before
+                            # tearing it down, so the merged turn replaces that
+                            # displayed line instead of leaving the partial behind.
+                            superseded_announce_id = selected_audio.take_turn_announce_id(
+                                previous_task
+                            )
                             previous_task.cancel()
                             await asyncio.gather(previous_task, return_exceptions=True)
                             pending_turn = selected_audio.merge_pending_turns(
                                 previous_pending,
                                 pending_turn,
+                                supersedes_announce_id=superseded_announce_id,
                             )
                             task = asyncio.create_task(run_turn(pending_turn))
                             track_turn(task, pending_turn)
