@@ -166,11 +166,19 @@ class Settings(BaseSettings):
     tts_stream_base_url: str = "http://127.0.0.1:8091"
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=192_000)
     # dots.tts custom-voice service (Custom engine). Native 48 kHz; ``tts_speaker``
-    # is a custom-voice id resolved by the service's voice registry.
-    dots_stream_base_url: str = "http://127.0.0.1:8093"
+    # is a custom-voice id resolved by the service's voice registry. Port 8095:
+    # 8093 belongs to the web-search sidecar and 8094 to MemPalace.
+    dots_stream_base_url: str = "http://127.0.0.1:8095"
     dots_sample_rate: int = Field(default=48_000, ge=8_000, le=192_000)
     tts_speaker: str = "Serena"
     tts_language: str = "English"
+    # Engine-switch handshake with the root-side switcher. The orchestrator runs
+    # unprivileged (User=nova-voice, NoNewPrivileges), so it cannot swap systemd
+    # units itself: it writes a request file that a root systemd .path unit
+    # watches, and the root switcher reports progress into the status file.
+    # Both live under /var/lib/nova-voice (already in ReadWritePaths).
+    engine_switch_request_path: Path = Path("/var/lib/nova-voice/engine-switch-request.json")
+    engine_switch_status_path: Path = Path("/var/lib/nova-voice/engine-switch-status.json")
     tts_device: Literal["cuda", "cpu"] = "cuda"
     # ``auto`` selects BF16 where it is natively supported and stable FP32 on
     # Turing/pre-BF16 CUDA devices. Explicit FP16 requires deployment testing.

@@ -34,7 +34,9 @@ Environment=DOTS_MAX_GENERATE_LENGTH=256
 # "curr_block->next == nullptr". VRAM headroom for the co-resident STT comes from
 # the reduced generate-length bucket above instead.
 Environment=DOTS_HOST=127.0.0.1
-Environment=DOTS_PORT=8093
+# 8095: port 8093 belongs to the web-search sidecar (nova-voice-websearch) and
+# 8094 to MemPalace; dots on 8093 silently blocked websearch from binding.
+Environment=DOTS_PORT=8095
 # Warm the dots.tts weights into page cache ahead of load. Best-effort.
 ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/dots.tts-mf
 # The service self-warms behind a /health ready gate (optimize=True warmup is

@@ -781,11 +781,21 @@ class SatelliteAudioRuntime:
         self._disabled_satellites = {sat.casefold() for sat in settings.disabled_satellites}
         if not self._voice_enabled and self._conversations is not None:
             self._conversations.clear()
+        # Each engine has its own speaker namespace: Classic (Qwen) uses the
+        # preset enum, Custom (dots.tts) uses a cloned-voice id from its voice
+        # registry. Configuring the resident adapter with the other engine's
+        # name makes every synthesis 404 ("unknown voice"), so the speaker is
+        # chosen per engine here rather than trusting one shared field.
+        engine_speaker = (
+            settings.custom_speaker
+            if getattr(self.tts, "engine", "classic") == "custom"
+            else settings.speaker.value
+        )
         await self.tts.configure(
-            speaker=settings.speaker.value,
+            speaker=engine_speaker,
             language=settings.language.value,
         )
-        self._configured_speaker = settings.speaker.value
+        self._configured_speaker = engine_speaker
         self._configured_language = settings.language.value
         self._pitch_percent = settings.pitch
         self._configured_speech_rate = settings.speech_rate

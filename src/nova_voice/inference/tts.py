@@ -37,6 +37,11 @@ def select_tts_dtype(
 
 
 class TextToSpeech(ABC):
+    # Which engine module's voice namespace this adapter resolves speakers in:
+    # "classic" = Qwen preset names, "custom" = dots.tts cloned-voice ids. The
+    # runtime picks the engine-appropriate speaker field from settings by this.
+    engine: str = "classic"
+
     @abstractmethod
     async def synthesize(self, text: str, instruction: str) -> tuple[bytes, int]: ...
 
@@ -293,8 +298,32 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
     adapters above are the "Classic" engine. Only one is resident at a time.
     """
 
+    engine = "custom"
+
     async def health(self) -> dict:
-        info = await super().health()
-        info["backend"] = "dots.tts"
-        info["engine"] = "custom"
-        return info
+        # The dots service self-warms behind its /health ready gate (the
+        # optimize=True warmup takes minutes on Turing), so a reachable server
+        # is not yet a usable one. Surface `ready` so callers (preview, the
+        # dashboard status strip) can distinguish "warming up" from "down".
+        info: dict = {
+            "model": self.model_name,
+            "backend": "dots.tts",
+            "engine": "custom",
+            "speaker": self.speaker,
+            "language": self.language,
+            "streaming": True,
+            "sampleRate": self.sample_rate,
+        }
+        try:
+            response = await self._client.get(f"{self.base_url}/health", timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            return {**info, "ok": False, "ready": False, "error": type(error).__name__}
+        ready = bool(payload.get("ready"))
+        result = {**info, "ok": bool(payload.get("ok")) and ready, "ready": ready}
+        if not ready:
+            result["error"] = payload.get("loadError") or "warming up"
+        if isinstance(payload.get("voices"), list):
+            result["voices"] = payload["voices"]
+        return result

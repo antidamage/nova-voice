@@ -80,3 +80,15 @@ async def test_vllm_adapter_requests_true_pcm_stream_and_caches_complete_audio()
     assert '"stream":true' in body
     assert '"stream_format":"audio"' in body
     assert '"response_format":"pcm"' in body
+
+
+def test_adapter_engine_attribute_names_each_voice_namespace() -> None:
+    # The runtime picks which settings field feeds `configure(speaker=...)`
+    # from this attribute: Classic adapters resolve Qwen preset names, the
+    # dots adapter resolves cloned-voice ids (a preset name there is a 404).
+    from nova_voice.inference.tts import DotsStreamingTextToSpeech, TextToSpeech
+
+    assert TextToSpeech.engine == "classic"
+    assert QwenTextToSpeech.engine == "classic"
+    assert VllmQwenTextToSpeech.engine == "classic"
+    assert DotsStreamingTextToSpeech.engine == "custom"
