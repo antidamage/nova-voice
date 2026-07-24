@@ -135,6 +135,13 @@ For every final utterance, classify emotion and speech act, decide whether it is
 directed to the assistant, maintain the room goal, and optionally create a bounded
 semantic action plan.
 
+Message structure: the FIRST user message is the conversation-open context —
+semanticTools (the callable tools), relevantState (a household snapshot taken when
+this conversation began; it does not refresh mid-conversation), and selectedMemory.
+It stays authoritative for the whole conversation. The FINAL user message is the
+current turn to interpret (utterance, activeGoal, deterministicCues). Any messages
+between them are earlier turns of this conversation.
+
 Critical distinctions:
 - Imperatives, polite requests, and explicit desired household states are directives.
 - A speaker saying they plan, need, have, or have got to do something themselves is
@@ -410,11 +417,30 @@ class LlamaCppInterpreter(Interpreter):
         tools: list[dict],
         conversation: ConversationSnapshot | None = None,
     ) -> Interpretation:
-        selected_memory = relevant_state.get("selectedMemory", [])
-        household_state = {
-            key: value for key, value in relevant_state.items() if key != "selectedMemory"
+        # Bulky prompt inputs (household state + selected memory) are captured
+        # once at conversation open and reused frozen on follow-up turns, so
+        # each turn only carries its own utterance. The live ``relevant_state``
+        # is used only when there is no conversation snapshot to freeze against
+        # (e.g. the opening turn before initialization, or a preview).
+        if conversation is not None and conversation.initial_state is not None:
+            household_state = conversation.initial_state
+            selected_memory = list(conversation.initial_memory)
+        else:
+            selected_memory = relevant_state.get("selectedMemory", [])
+            household_state = {
+                key: value for key, value in relevant_state.items() if key != "selectedMemory"
+            }
+        # The conversation-stable inputs — callable tools, the frozen household
+        # snapshot, and selected memory — are sent once as a pinned block ahead
+        # of the turn history so the model (and llama.cpp's prefix cache) treats
+        # them as established context rather than reprocessing them every turn.
+        opening_context = {
+            "semanticTools": tools,
+            "relevantState": household_state,
+            "selectedMemory": selected_memory,
         }
-        context = {
+        # The only per-turn payload: this utterance and the cues derived from it.
+        turn_context = {
             "utterance": {
                 "transcript": utterance.transcript,
                 "confidence": utterance.transcript_confidence,
@@ -434,12 +460,6 @@ class LlamaCppInterpreter(Interpreter):
                     self.web_access_enabled and web_lookup_is_relevant(utterance.transcript)
                 ),
             },
-            # Prompt hierarchy is fixed: identity/policy are in the system
-            # prompt, then participants/conversation/goal, selected memory,
-            # live household state, and finally the callable tools.
-            "selectedMemory": selected_memory,
-            "relevantState": household_state,
-            "semanticTools": tools,
         }
         # Transcripts arrive with the spoken wake phrase already rewritten to
         # the agent's display name, so the name itself is an accepted wake
@@ -503,6 +523,12 @@ class LlamaCppInterpreter(Interpreter):
             )
         schema = Interpretation.model_json_schema()
         messages = [{"role": "system", "content": system}]
+        # Pinned conversation-open context, ahead of the turn history so it forms
+        # a stable, cacheable prefix. Its field names (semanticTools,
+        # relevantState, selectedMemory) match what the system prompt refers to.
+        messages.append(
+            {"role": "user", "content": json.dumps(opening_context, separators=(",", ":"))}
+        )
         if conversation is not None:
             messages.extend(
                 {
@@ -511,7 +537,9 @@ class LlamaCppInterpreter(Interpreter):
                 }
                 for message in conversation.messages
             )
-        messages.append({"role": "user", "content": json.dumps(context, separators=(",", ":"))})
+        messages.append(
+            {"role": "user", "content": json.dumps(turn_context, separators=(",", ":"))}
+        )
         payload = {
             "model": self.model,
             "messages": messages,
@@ -629,6 +657,19 @@ class LlamaCppInterpreter(Interpreter):
             if conversation is not None and conversation.initial_environment is not None
             else None
         )
+        # Reuse the frozen conversation-open household snapshot and memory here
+        # too, so the reply pass is shaped by the same established context as the
+        # interpretation pass rather than a fresh live-state injection each turn.
+        if conversation is not None and conversation.initial_state is not None:
+            frozen_state = conversation.initial_state
+            frozen_memory = list(conversation.initial_memory)
+        else:
+            frozen_state = {
+                key: value
+                for key, value in (relevant_state or {}).items()
+                if key != "selectedMemory"
+            }
+            frozen_memory = (relevant_state or {}).get("selectedMemory", [])
         facts = {
             "utterance": utterance.transcript,
             "speaker": utterance.speaker.model_dump(mode="json"),
@@ -646,17 +687,11 @@ class LlamaCppInterpreter(Interpreter):
             "actions": [action.model_dump(mode="json") for action in interpretation.actions],
             "results": [result.model_dump(mode="json") for result in results],
             "environment": environment if conversation is None else conversation_environment,
-            "selectedMemory": (relevant_state or {}).get("selectedMemory", []),
+            "selectedMemory": frozen_memory,
             "conversationContinuity": (relevant_state or {}).get("conversationContinuity"),
             "discussionMode": (relevant_state or {}).get("discussionMode"),
             "relevantState": (
-                {
-                    key: value
-                    for key, value in (relevant_state or {}).items()
-                    if key != "selectedMemory"
-                }
-                if household_state_is_relevant(utterance.transcript)
-                else None
+                frozen_state if household_state_is_relevant(utterance.transcript) else None
             ),
             "responseInstruction": response_instruction,
         }

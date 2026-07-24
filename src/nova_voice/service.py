@@ -995,6 +995,10 @@ class NovaVoiceService:
         # captures the snapshot once.
         weather = relevant_state.pop("weather", None)
         if conversation is not None and conversation.initial_environment is None:
+            # Freeze the bulky prompt inputs (household state + selected memory)
+            # at conversation open. Follow-up turns reuse this snapshot from a
+            # stable, cacheable prompt prefix instead of re-sending live state
+            # every turn; it refreshes only when the window reopens.
             conversation = self.conversations.initialize_prompt(
                 utterance.room_id,
                 environment={
@@ -1003,6 +1007,12 @@ class NovaVoiceService:
                 },
                 personality=getattr(self.interpreter, "personality", ""),
                 persona_prompt=self.persona.response_prompt,
+                state={
+                    key: value
+                    for key, value in relevant_state.items()
+                    if key != "selectedMemory"
+                },
+                memory=relevant_state.get("selectedMemory", []),
             )
         timings_ms["providerContext"] = round((time.perf_counter() - context_started) * 1000, 3)
         turn_machine.set_context(

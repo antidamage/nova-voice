@@ -161,7 +161,9 @@ async def test_recognized_current_speaker_overrides_prior_speaker_context(
     assert '"name":"Adeline"' in system
     assert '"pronouns":"she/her"' in system
     assert "the user has changed" in system
-    assert requests[0]["messages"][1]["content"] == (
+    # messages[1] is the pinned conversation-open context; the turn history that
+    # carries the prior speaker's line follows it.
+    assert requests[0]["messages"][2]["content"] == (
         "[Speaker: Alex; pronouns: he/him] What is on?"
     )
 
@@ -227,6 +229,77 @@ async def test_renderer_receives_confirmation_that_profile_correction_was_applie
         "evidence": "call me Adeline and I use she/her pronouns",
     }
     assert facts["speakerProfileUpdateApplied"] is True
+
+    await interpreter.close()
+
+
+@pytest.mark.asyncio
+async def test_followup_turn_uses_frozen_open_time_state_not_live_state(utterance) -> None:
+    """A conversation's household snapshot is frozen at open.
+
+    On a follow-up turn the interpreter must send the snapshot captured when the
+    conversation began (carried on the ConversationSnapshot), not whatever live
+    state the caller passes this turn — that is what keeps each turn's payload to
+    the new utterance and the prompt prefix stable/cacheable.
+    """
+
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": interpretation(decision=Decision.REPLY).model_dump_json(
+                                by_alias=True
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    conversation = ConversationSnapshot(
+        id="conversation-1",
+        room_id="lounge",
+        initial_environment={"now": {"time": "8:14 am"}},
+        personality="",
+        persona_prompt="",
+        messages=(
+            ConversationMessage("user", "Is the lounge light on?"),
+            ConversationMessage("assistant", "Yes, it is."),
+        ),
+        initial_state={"room": "lounge", "loungeLight": "on"},
+        initial_memory=("remembered fact",),
+    )
+    spoken = utterance.model_copy(
+        update={"transcript": "And now?", "conversation_active": True}
+    )
+
+    await interpreter.interpret(
+        spoken,
+        active_goal=None,
+        # Deliberately different from the frozen snapshot: this must be ignored
+        # on a follow-up in favour of the conversation-open state.
+        relevant_state={"room": "lounge", "loungeLight": "off", "selectedMemory": ["live only"]},
+        tools=[],
+        conversation=conversation,
+    )
+
+    opening = json.loads(requests[0]["messages"][1]["content"])
+    assert opening["relevantState"] == {"room": "lounge", "loungeLight": "on"}
+    assert opening["selectedMemory"] == ["remembered fact"]
+    current = json.loads(requests[0]["messages"][-1]["content"])
+    assert current["utterance"]["transcript"] == "And now?"
+    assert "relevantState" not in current
 
     await interpreter.close()
 
@@ -319,13 +392,25 @@ async def test_llm_requests_retain_history_and_initial_prompt_snapshot(utterance
 
     assert rendered == "Done, the lights are on."
     interpretation_request, render_request = requests
+
+    # The interpretation pass pins the conversation-open context (tools + frozen
+    # household state) as its own user message ahead of the turn history, so the
+    # bulky, stable inputs form a cacheable prefix. The reply pass keeps only its
+    # per-turn facts message (no tool schemas), so its layout is unchanged.
+    interp_roles = [message["role"] for message in interpretation_request["messages"]]
+    assert interp_roles == ["system", "user", "user", "assistant", "user"]
+    assert interpretation_request["messages"][2]["content"] == "Bandit, how are you?"
+    assert (
+        interpretation_request["messages"][3]["content"]
+        == "Sparkling, thanks. What do you need?"
+    )
+    render_roles = [message["role"] for message in render_request["messages"]]
+    assert render_roles == ["system", "user", "assistant", "user"]
+    assert render_request["messages"][1]["content"] == "Bandit, how are you?"
+    assert render_request["messages"][2]["content"] == "Sparkling, thanks. What do you need?"
     for payload in requests:
-        roles = [message["role"] for message in payload["messages"]]
-        assert roles == ["system", "user", "assistant", "user"]
-        assert payload["messages"][1]["content"] == "Bandit, how are you?"
-        assert payload["messages"][2]["content"] == "Sparkling, thanks. What do you need?"
-        system = payload["messages"][0]["content"]
-        assert "Bright, bubbly, and concise." in system
+        assert "Bright, bubbly, and concise." in payload["messages"][0]["content"]
+
     interpretation_system = interpretation_request["messages"][0]["content"]
     assert interpretation_system.count("8:14 am") == 1
     # Weather is bulky and rarely relevant; unlike time it is only surfaced
@@ -333,9 +418,15 @@ async def test_llm_requests_retain_history_and_initial_prompt_snapshot(utterance
     # it, and "What did I just ask?" does not.
     assert "rainy" not in interpretation_system
     assert "meaningful" in interpretation_system
+    # Household state lives in the pinned opening context; the per-turn message
+    # carries only this utterance and its derived cues, not tools or state.
+    opening = json.loads(interpretation_request["messages"][1]["content"])
+    assert opening["relevantState"] == {"room": "lounge", "zones": []}
+    assert opening["semanticTools"] == []
     current = json.loads(interpretation_request["messages"][-1]["content"])
     assert current["utterance"]["conversationActive"] is True
-    assert current["relevantState"] == {"room": "lounge", "zones": []}
+    assert "relevantState" not in current
+    assert "semanticTools" not in current
     render_system = render_request["messages"][0]["content"]
     assert "Cheerful with a little dry wit." in render_system
     assert "8:14 am" not in render_system
