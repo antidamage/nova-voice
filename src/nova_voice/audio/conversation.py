@@ -36,6 +36,14 @@ class ConversationSnapshot:
     # system context so follow-up turns can reason over data an earlier tool
     # call returned, rather than losing it after the reply is spoken.
     observations: tuple[str, ...] = ()
+    # Household state and selected memory captured ONCE when the conversation
+    # opened. These are the bulky, largely-static prompt inputs; freezing them
+    # here (rather than re-injecting live state every turn) keeps each turn's
+    # payload to the new utterance and lets the interpreter place them in a
+    # stable, cacheable prompt prefix. They intentionally do not refresh mid
+    # conversation — a new snapshot is taken only when the window reopens.
+    initial_state: dict[str, Any] | None = None
+    initial_memory: tuple[Any, ...] = ()
 
 
 @dataclass
@@ -50,6 +58,10 @@ class _RoomConversation:
     messages: list[ConversationMessage] | None = None
     observations: list[str] | None = None
     speaker_template_id: str | None = None
+    # Frozen at conversation open alongside initial_environment; see
+    # ConversationSnapshot.initial_state.
+    initial_state: dict[str, Any] | None = None
+    initial_memory: list[Any] | None = None
 
 
 class ConversationTracker:
@@ -112,8 +124,16 @@ class ConversationTracker:
         environment: dict[str, Any],
         personality: str,
         persona_prompt: str,
+        state: dict[str, Any] | None = None,
+        memory: list[Any] | None = None,
     ) -> ConversationSnapshot | None:
-        """Snapshot the prompt inputs once, when the conversation begins."""
+        """Snapshot the prompt inputs once, when the conversation begins.
+
+        ``state`` (live household state) and ``memory`` (selected durable
+        memories) are the bulky, largely-static inputs. Capturing them here,
+        once, lets follow-up turns reuse a frozen, cacheable snapshot instead of
+        re-injecting live state on every turn.
+        """
 
         session = self._rooms.get(self._key(room_id))
         if session is None:
@@ -122,6 +142,8 @@ class ConversationTracker:
             session.initial_environment = dict(environment)
             session.personality = personality
             session.persona_prompt = persona_prompt
+            session.initial_state = dict(state) if state is not None else None
+            session.initial_memory = list(memory) if memory is not None else None
         return self._snapshot(session)
 
     def snapshot(self, room_id: str) -> ConversationSnapshot | None:
@@ -279,4 +301,10 @@ class ConversationTracker:
             persona_prompt=session.persona_prompt,
             messages=tuple(session.messages or ()),
             observations=tuple(session.observations or ()),
+            initial_state=(
+                dict(session.initial_state)
+                if session.initial_state is not None
+                else None
+            ),
+            initial_memory=tuple(session.initial_memory or ()),
         )
