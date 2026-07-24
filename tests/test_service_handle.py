@@ -78,6 +78,7 @@ class _Interpreter(Interpreter):
         conversation=None,
         temperature=None,
         command_max_words=None,
+        bare_wake_max_words=None,
     ):
         self.render_calls.append(
             {
@@ -90,6 +91,7 @@ class _Interpreter(Interpreter):
                 "conversation": conversation,
                 "temperature": temperature,
                 "command_max_words": command_max_words,
+                "bare_wake_max_words": bare_wake_max_words,
             }
         )
         return self.rendered
@@ -866,6 +868,51 @@ async def test_command_reply_length_is_rolled_and_zero_is_silent(utterance, monk
     result2 = await service2.handle(utterance.model_copy(update={"wake_detected": True}))
     assert result2.response_text == "On it, all done"
     assert interpreter2.render_calls[-1]["command_max_words"] == 4
+
+
+@pytest.mark.asyncio
+async def test_bare_wake_word_gets_short_high_temperature_reply(utterance, monkeypatch) -> None:
+    from nova_voice import service as service_module
+
+    value = interpretation(decision=Decision.REPLY, addressed=0.99)
+    interpreter = _Interpreter(value, rendered="Yeah?")
+    interpreter.wake_words = ["nova"]
+    service = _service(Settings(), interpreter, _Provider(), _Store())
+    monkeypatch.setattr(service_module.random, "choice", lambda _options: 1)
+
+    result = await service.handle(
+        utterance.model_copy(update={"wake_detected": True, "transcript": "Nova"})
+    )
+
+    assert result.response_text == "Yeah?"
+    render_call = interpreter.render_calls[-1]
+    assert render_call["bare_wake_max_words"] == 1
+    assert render_call["temperature"] == service._bare_wake_word_temperature
+
+
+@pytest.mark.asyncio
+async def test_wake_word_with_a_command_is_not_treated_as_bare(utterance) -> None:
+    value = interpretation(
+        decision=Decision.EXECUTE,
+        actions=[_action(provider="nova", tool="nova.control")],
+        addressed=0.99,
+    )
+    interpreter = _Interpreter(value, rendered="Done")
+    interpreter.wake_words = ["nova"]
+    service = _service(
+        Settings(shadow_mode=False, passive_execution_enabled=True),
+        interpreter,
+        _Provider(),
+        _Store(),
+    )
+
+    await service.handle(
+        utterance.model_copy(
+            update={"wake_detected": True, "transcript": "Nova, turn the lounge light on"}
+        )
+    )
+
+    assert all(call["bare_wake_max_words"] is None for call in interpreter.render_calls)
 
 
 @pytest.mark.asyncio

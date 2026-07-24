@@ -401,6 +401,12 @@ class NovaVoiceService:
         # failure-recovery wording deterministic regardless of the dashboard's
         # configured render temperature.
         self._zero_render_temperature_scopes: set[str] = set()
+        # A bare wake word ("<name>" or "<address prefix> <name>", nothing
+        # else) is rendered at a fixed high temperature regardless of the
+        # dashboard's configured render temperature, so the one-or-two-word
+        # acknowledgement varies turn to turn instead of reading as a canned
+        # template.
+        self._bare_wake_word_temperature: float = 10.0
 
     def apply_voice_settings(self, settings: VoiceSettings) -> None:
         self.persona = self.persona.with_voice_settings(settings)
@@ -984,6 +990,9 @@ class NovaVoiceService:
         # Date/time and weather are a conversation-start snapshot.  Household
         # target state remains live on every turn, but these ambient prompt
         # injections are never appended again during the same conversation.
+        # Whether either fact actually reaches the model on a given turn is
+        # decided later, per-turn, by select_environment_context — this only
+        # captures the snapshot once.
         weather = relevant_state.pop("weather", None)
         if conversation is not None and conversation.initial_environment is None:
             conversation = self.conversations.initialize_prompt(
@@ -1366,12 +1375,26 @@ class NovaVoiceService:
                 reply_min, self.voice_settings.command_reply_max_words
             )
 
+        # A bare wake word/address prefix ("<name>", "hey <name>") with no
+        # command attached is a person just calling out, not a request. Give
+        # it a short, varied verbal nudge instead of the normal conversational
+        # reply, rendered at a fixed high temperature so it doesn't repeat.
+        bare_wake_word_turn = bool(
+            utterance.wake_detected
+            and interpretation.decision == Decision.REPLY
+            and not interpretation.actions
+            and not results
+            and command_word_count(utterance.transcript, self._address_words()) == 0
+        )
+        bare_wake_max_words = random.choice((1, 2)) if bare_wake_word_turn else None
+
         if verified_dashboard_command and command_max_words == 0:
             response_text = None
         elif not outcome.shadowed and (
             self._needs_model_render(interpretation, results)
             or wants_varied_wording
             or verified_dashboard_command
+            or bare_wake_word_turn
         ):
             rendered = await self.interpreter.render_response(
                 utterance,
@@ -1381,8 +1404,13 @@ class NovaVoiceService:
                 environment=None,
                 relevant_state=relevant_state,
                 conversation=conversation,
-                temperature=effective_render_temperature,
+                temperature=(
+                    self._bare_wake_word_temperature
+                    if bare_wake_word_turn
+                    else effective_render_temperature
+                ),
                 command_max_words=command_max_words,
+                bare_wake_max_words=bare_wake_max_words,
             )
             response_text = rendered or response_text
             if rendered:

@@ -158,9 +158,17 @@ class Settings(BaseSettings):
     speaker_short_execute_max_words: int = Field(default=4, ge=1, le=20)
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
     tts_model_path: Path | None = None
-    tts_backend: Literal["qwen", "vllm"] = "qwen"
+    # Engine selector. ``qwen``/``vllm`` = Classic Qwen3-TTS presets (in-process /
+    # vLLM-Omni). ``dots`` = Custom zero-shot voice-cloning engine served by the
+    # dots.tts service. Only one TTS engine is GPU-resident at a time; switching
+    # engines swaps which service is loaded (see services/dots_tts).
+    tts_backend: Literal["qwen", "vllm", "dots"] = "qwen"
     tts_stream_base_url: str = "http://127.0.0.1:8091"
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=192_000)
+    # dots.tts custom-voice service (Custom engine). Native 48 kHz; ``tts_speaker``
+    # is a custom-voice id resolved by the service's voice registry.
+    dots_stream_base_url: str = "http://127.0.0.1:8093"
+    dots_sample_rate: int = Field(default=48_000, ge=8_000, le=192_000)
     tts_speaker: str = "Serena"
     tts_language: str = "English"
     tts_device: Literal["cuda", "cpu"] = "cuda"

@@ -50,6 +50,7 @@ class _Interpreter(Interpreter):
         conversation=None,
         temperature=None,
         command_max_words=None,
+        bare_wake_max_words=None,
     ) -> str | None:
         self.render_calls.append((utterance, value, results))
         return self.responses.pop(0) if self.responses else None

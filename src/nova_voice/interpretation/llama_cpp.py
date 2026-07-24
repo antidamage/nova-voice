@@ -20,6 +20,7 @@ from nova_voice.domain import (
 )
 from nova_voice.interpretation.base import Interpreter
 from nova_voice.interpretation.response_length import (
+    bare_wake_acknowledgement,
     bounded_long_reply,
     command_acknowledgement,
     spoken_word_count,
@@ -472,11 +473,17 @@ class LlamaCppInterpreter(Interpreter):
                 "the current turn explicitly established that outcome."
             )
         if conversation is not None and conversation.initial_environment is not None:
+            interpret_environment = dict(conversation.initial_environment)
+            # Weather is bulky and rarely relevant; unlike time, only surface it
+            # into the prompt on turns that plausibly concern it, mirroring the
+            # gating render_response already applies via select_environment_context.
+            if not _WEATHER_RELEVANCE.search(utterance.transcript):
+                interpret_environment.pop("weather", None)
             system += (
                 "\n\nConversation-start local time and weather snapshot (do not assume it "
                 "has refreshed during this conversation). Use it when it answers the request "
                 "or is a meaningful addition; do not force it into unrelated replies:\n"
-                + json.dumps(conversation.initial_environment, separators=(",", ":"))
+                + json.dumps(interpret_environment, separators=(",", ":"))
             )
         room = (utterance.room_id or "").strip()
         if room and room != "preview":
@@ -558,13 +565,26 @@ class LlamaCppInterpreter(Interpreter):
         conversation: ConversationSnapshot | None = None,
         temperature: float | None = None,
         command_max_words: int | None = None,
+        bare_wake_max_words: int | None = None,
     ) -> str | None:
         all_succeeded = bool(results) and all(result.ok for result in results)
         web_action_ids = {
             action.id for action in interpretation.actions if action.call.provider == "web"
         }
         web_answered = any(result.ok and result.action_id in web_action_ids for result in results)
-        if web_answered:
+        if bare_wake_max_words is not None:
+            # The user only spoke the wake word/prefix, no request followed it.
+            # This is a person responding to being called by name, not a
+            # greeting or an offer of help, so keep it to a short verbal nudge.
+            plural = "s" if bare_wake_max_words != 1 else ""
+            response_instruction = (
+                "The user only said your wake word or address prefix, with no request "
+                f"attached. Reply with a short, casual verbal acknowledgement in exactly "
+                f"{bare_wake_max_words} spoken word{plural} in the configured personality "
+                "(for example: Yeah? or Go ahead) — react like a person who was just "
+                "called by name, not a greeting or an offer to help."
+            )
+        elif web_answered:
             # A web lookup returned material in facts.results[].observed (either a
             # ready-made "answer" from the grounded backend, or search results
             # plus an "excerpt" to summarize). Relay it in Nova's own voice; never
@@ -648,12 +668,21 @@ class LlamaCppInterpreter(Interpreter):
         conversational_reply = not results and interpretation.decision == "reply"
         discussion_mode = (relevant_state or {}).get("discussionMode") or {}
         requested_depth = discussion_mode.get("discussion_depth", "normal")
-        long_form = conversational_reply and (
-            requested_depth == "deep"
-            or (requested_depth == "normal" and random.random() < self.long_response_probability)
+        long_form = (
+            bare_wake_max_words is None
+            and conversational_reply
+            and (
+                requested_depth == "deep"
+                or (requested_depth == "normal" and random.random() < self.long_response_probability)
+            )
         )
         web_budget = max(1, int(self.web_answer_max_sentences))
-        if web_answered:
+        if bare_wake_max_words is not None:
+            plural = "s" if bare_wake_max_words != 1 else ""
+            length_instruction = (
+                f"Reply in exactly {bare_wake_max_words} spoken word{plural}, nothing more."
+            )
+        elif web_answered:
             length_instruction = (
                 f"Relay the web answer as at most {web_budget} natural spoken "
                 f"sentence{'s' if web_budget != 1 else ''}; be informative, not padded."
@@ -777,6 +806,10 @@ greet briefly and offer help. Return only the response JSON schema."""
             if all_succeeded and command_max_words is not None:
                 if spoken_word_count(rendered) != command_max_words:
                     return command_acknowledgement(command_max_words)
+            if bare_wake_max_words is not None:
+                if spoken_word_count(rendered) != bare_wake_max_words:
+                    return bare_wake_acknowledgement(bare_wake_max_words)
+                return rendered
             if long_form:
                 return bounded_long_reply(
                     rendered, max_sentences=5 if requested_depth == "deep" else 3

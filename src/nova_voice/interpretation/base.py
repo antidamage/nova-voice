@@ -68,6 +68,7 @@ class Interpreter(ABC):
         conversation: ConversationSnapshot | None = None,
         temperature: float | None = None,
         command_max_words: int | None = None,
+        bare_wake_max_words: int | None = None,
     ) -> str | None:
         return None
 
