@@ -314,9 +314,12 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
             "streaming": True,
             "sampleRate": self.sample_rate,
         }
+        # The service reports 503 (not 200) while warming up, but the body is
+        # still valid JSON with the same ready/loadError fields either way — so
+        # this reads the body directly instead of raise_for_status(), which
+        # would discard that detail and report a bare "HTTPStatusError".
         try:
             response = await self._client.get(f"{self.base_url}/health", timeout=3)
-            response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as error:
             return {**info, "ok": False, "ready": False, "error": type(error).__name__}
