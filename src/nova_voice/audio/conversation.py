@@ -181,13 +181,21 @@ class ConversationTracker:
             removed = messages.pop(0)
             total -= _estimate_tokens(removed.content)
 
+    # Soft token-aware cap on retained dashboard observations, mirroring
+    # MESSAGE_HISTORY_TOKEN_BUDGET above. The count cap alone is not enough: a
+    # single nova.query result can carry a large observed-state payload, and a
+    # handful of those can balloon the injected context past the interpretation
+    # model's whole context window on their own.
+    OBSERVATIONS_TOKEN_BUDGET = 400
+
     def record_observations(
         self, room_id: str, entries: list[str], *, limit: int = 8
     ) -> None:
         """Retain dashboard API responses for later turns of this conversation.
 
-        Newest entries win once ``limit`` is exceeded so the injected context
-        stays bounded; blank entries and consecutive duplicates are skipped.
+        Newest entries win once ``limit`` (count) or ``OBSERVATIONS_TOKEN_BUDGET``
+        (size) is exceeded so the injected context stays bounded; blank entries
+        and consecutive duplicates are skipped.
         """
 
         session = self._rooms.get(self._key(room_id))
@@ -202,6 +210,10 @@ class ConversationTracker:
             session.observations.append(text)
         if len(session.observations) > limit:
             del session.observations[:-limit]
+        total = sum(_estimate_tokens(entry) for entry in session.observations)
+        while total > self.OBSERVATIONS_TOKEN_BUDGET and len(session.observations) > 1:
+            removed = session.observations.pop(0)
+            total -= _estimate_tokens(removed)
 
     def refresh(self, room_id: str) -> None:
         # A known in-flight turn may take longer than the idle window to render

@@ -786,7 +786,73 @@ def create_app(
         payload["current"] = (
             current.model_dump(mode="json", by_alias=True) if current is not None else None
         )
+        # Engine awareness: the dashboard renders one engine's control module at a
+        # time (Classic Qwen presets vs Custom dots.tts cloned voices). In Custom
+        # mode the selectable voices ARE the registered clones, so the classic
+        # preset/accent/emotion controls are hidden by the UI.
+        cfg = get_settings()
+        engine = "custom" if cfg.tts_backend == "dots" else "classic"
+        payload["engine"] = engine
+        payload["engines"] = [
+            {"id": "classic", "label": "Classic presets"},
+            {"id": "custom", "label": "Custom voices"},
+        ]
+        if engine == "custom":
+            custom = await _dots_custom_voices()
+            payload["customVoices"] = custom
+            payload["voices"] = [
+                {
+                    "value": voice["id"],
+                    "label": voice.get("name", voice["id"]),
+                    "detail": f"custom voice · {voice.get('language', 'en')}",
+                }
+                for voice in custom
+            ]
         return payload
+
+    async def _dots_custom_voices() -> list[dict]:
+        """List custom voices from the dots.tts service (empty if unreachable)."""
+        base = get_settings().dots_stream_base_url
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{base}/v1/voices")
+                response.raise_for_status()
+                return response.json().get("voices", [])
+        except (httpx.HTTPError, ValueError):
+            return []
+
+    @app.get("/v1/voices/custom")
+    async def list_custom_voices() -> dict:
+        return {"voices": await _dots_custom_voices()}
+
+    @app.post("/v1/voices/custom", include_in_schema=False)
+    async def build_custom_voice(request: Request) -> dict:
+        """Relay a multipart "build voice" upload through to the dots service."""
+        base = get_settings().dots_stream_base_url
+        body = await request.body()
+        headers = {"content-type": request.headers.get("content-type", "")}
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(
+                    f"{base}/v1/voices", content=body, headers=headers
+                )
+        except httpx.HTTPError as error:
+            raise HTTPException(status_code=502, detail="dots.tts service unreachable") from error
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
+
+    @app.delete("/v1/voices/custom/{voice_id}")
+    async def delete_custom_voice(voice_id: str) -> dict:
+        base = get_settings().dots_stream_base_url
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(f"{base}/v1/voices/{voice_id}")
+        except httpx.HTTPError as error:
+            raise HTTPException(status_code=502, detail="dots.tts service unreachable") from error
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
 
     @app.post("/v1/multimodal/shares", status_code=201)
     async def create_multimodal_share(request: MultimodalShareApiRequest) -> dict:

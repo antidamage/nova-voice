@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import random
 import re
+
+_BARE_WAKE_ACKNOWLEDGEMENTS = {
+    1: ["Yeah?", "Hm?", "Mm?", "Yo.", "Hey.", "Oh?", "Sup?"],
+    2: ["Yeah, hi.", "Hm, yes?", "Go ahead.", "I'm here.", "Yes, hello.", "Right here."],
+}
 
 _COMMAND_ACKNOWLEDGEMENTS = {
     1: "Done.",
@@ -22,6 +28,13 @@ def spoken_word_count(text: str) -> int:
 
 def command_acknowledgement(word_count: int) -> str:
     return _COMMAND_ACKNOWLEDGEMENTS.get(word_count, "Done.")
+
+
+def bare_wake_acknowledgement(word_count: int) -> str:
+    """A short, casual fallback for a wake word spoken with no request."""
+
+    options = _BARE_WAKE_ACKNOWLEDGEMENTS.get(word_count) or _BARE_WAKE_ACKNOWLEDGEMENTS[1]
+    return random.choice(options)
 
 
 def bounded_long_reply(text: str, *, max_sentences: int = 3) -> str:

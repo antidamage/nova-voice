@@ -1,0 +1,67 @@
+[Unit]
+Description=Nova Voice dots.tts custom-voice streaming runtime (Custom engine)
+After=network-online.target
+Wants=network-online.target
+# The Custom engine is mutually exclusive with the Classic Qwen TTS unit: only
+# one TTS engine is GPU-resident at a time (see services/dots_tts). The engine
+# switch stops the inactive unit before starting this one; systemd does not
+# enforce the exclusion so the switch tooling and the residency gate must.
+Conflicts=nova-voice-tts.service
+
+[Service]
+Type=simple
+User=antidamage
+Group=antidamage
+WorkingDirectory=/opt/nova-voice/current/services/dots_tts
+Environment=HOME=/home/antidamage
+Environment=HF_HOME=/home/antidamage/.cache/huggingface
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=PYTHONUNBUFFERED=1
+# Serving config (see services/dots_tts/server.py). fp16 is Turing-validated;
+# num_steps=6 gives ~162 ms first-audio / RTF 0.68 warm on the RTX 2080 Ti.
+Environment=DOTS_MODEL=/opt/nova-voice/models/dots.tts-mf
+Environment=DOTS_VOICES_DIR=/opt/nova-voice/voices
+Environment=DOTS_PRECISION=float16
+Environment=DOTS_OPTIMIZE=1
+Environment=DOTS_NUM_STEPS=6
+# Cap generated audio length to the 256 compile bucket so the resident footprint
+# leaves room for the in-process STT on the shared 11 GiB GPU.
+Environment=DOTS_MAX_GENERATE_LENGTH=256
+# NOTE: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments here — it is
+# incompatible with the optimize=True CUDA-graph warmup and fails the load with
+# "curr_block->next == nullptr". VRAM headroom for the co-resident STT comes from
+# the reduced generate-length bucket above instead.
+Environment=DOTS_HOST=127.0.0.1
+Environment=DOTS_PORT=8093
+# Warm the dots.tts weights into page cache ahead of load. Best-effort.
+ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/dots.tts-mf
+# The service self-warms behind a /health ready gate (optimize=True warmup is
+# ~7 min on Turing). Type=simple so systemd start does not block on warmup;
+# consumers must gate on GET /health "ready": true before routing traffic.
+ExecStart=/opt/nova-voice/dots/venv/bin/python /opt/nova-voice/current/services/dots_tts/server.py
+MemoryAccounting=yes
+MemoryHigh=8G
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=45
+KillMode=mixed
+LimitMEMLOCK=infinity
+TasksMax=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Voice registry writes (build/delete) and the HF cache read.
+ReadWritePaths=/opt/nova-voice/voices /home/antidamage/.cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.168.8.0/24
+
+[Install]
+WantedBy=multi-user.target

@@ -328,7 +328,10 @@ async def test_llm_requests_retain_history_and_initial_prompt_snapshot(utterance
         assert "Bright, bubbly, and concise." in system
     interpretation_system = interpretation_request["messages"][0]["content"]
     assert interpretation_system.count("8:14 am") == 1
-    assert "rainy" in interpretation_system
+    # Weather is bulky and rarely relevant; unlike time it is only surfaced
+    # into the interpretation prompt when the transcript plausibly concerns
+    # it, and "What did I just ask?" does not.
+    assert "rainy" not in interpretation_system
     assert "meaningful" in interpretation_system
     current = json.loads(interpretation_request["messages"][-1]["content"])
     assert current["utterance"]["conversationActive"] is True

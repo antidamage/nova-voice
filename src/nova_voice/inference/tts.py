@@ -280,3 +280,21 @@ class VllmQwenTextToSpeech(TextToSpeech):
             "sampleRate": self.sample_rate,
             "cacheEntries": len(self._cache),
         }
+
+
+class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
+    """Adapter for the dots.tts custom-voice service.
+
+    The dots.tts service (``services/dots_tts``) exposes the same streaming
+    ``/v1/audio/speech`` PCM contract as vLLM-Omni, so the transport is shared.
+    The differences are semantic: ``speaker`` is a custom-voice id resolved by
+    the service's voice registry (zero-shot cloning from a reference clip), and
+    audio is native 48 kHz. This is the "Custom voice" engine module; the Qwen
+    adapters above are the "Classic" engine. Only one is resident at a time.
+    """
+
+    async def health(self) -> dict:
+        info = await super().health()
+        info["backend"] = "dots.tts"
+        info["engine"] = "custom"
+        return info

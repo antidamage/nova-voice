@@ -14,7 +14,11 @@ from nova_voice.config import Settings
 from nova_voice.inference.scheduler import GpuExecutionGate
 from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import NemoSpeechToText
-from nova_voice.inference.tts import QwenTextToSpeech, VllmQwenTextToSpeech
+from nova_voice.inference.tts import (
+    DotsStreamingTextToSpeech,
+    QwenTextToSpeech,
+    VllmQwenTextToSpeech,
+)
 from nova_voice.service import NovaVoiceService
 
 
@@ -28,7 +32,18 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             settings.stt_boost_alpha if settings.stt_context_biasing_enabled else 0.0
         ),
     )
-    if settings.tts_backend == "vllm":
+    if settings.tts_backend == "dots":
+        # Custom engine: the dots.tts service speaks the same streaming
+        # /v1/audio/speech PCM contract, at native 48 kHz. ``tts_speaker`` is a
+        # custom-voice id resolved by the service's voice registry.
+        tts = DotsStreamingTextToSpeech(
+            settings.dots_stream_base_url,
+            settings.tts_model,
+            settings.tts_speaker,
+            settings.tts_language,
+            sample_rate=settings.dots_sample_rate,
+        )
+    elif settings.tts_backend == "vllm":
         # The remote OpenAI-compatible server validates its served model id;
         # the local checkpoint path is only meaningful to the in-process
         # qwen-tts backend.
