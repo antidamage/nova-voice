@@ -283,6 +283,47 @@ def test_resumed_pending_audio_is_appended_and_uses_newest_turn_claim() -> None:
     assert merged.wake_detected
     assert merged.arbiter_claim is newest_claim
     assert merged.endpoint_wait_ms == 800
+    # No id given: nothing to supersede.
+    assert merged.supersedes_announce_id is None
+
+    # When the earlier attempt had a displayed transcript, the merged turn
+    # carries its id so the merged transcript replaces that line in place.
+    superseding = SatelliteAudioRuntime.merge_pending_turns(
+        first, continuation, supersedes_announce_id="earlier-line"
+    )
+    assert superseding.supersedes_announce_id == "earlier-line"
+
+
+def test_take_turn_announce_id_reads_live_turn_and_prunes_finished() -> None:
+    import asyncio
+
+    class Service:
+        pass
+
+    async def scenario() -> None:
+        runtime = SatelliteAudioRuntime(Service(), object(), object(), lambda: None)
+
+        async def _turn() -> None:
+            # A live turn task; record the transcript it "announced".
+            runtime._turn_announce[asyncio.current_task()] = "live-line"
+            await asyncio.sleep(0.05)
+
+        live = asyncio.create_task(_turn())
+        await asyncio.sleep(0)  # let it register
+
+        finished = asyncio.create_task(asyncio.sleep(0))
+        await finished
+        runtime._turn_announce[finished] = "stale-line"
+
+        assert runtime.take_turn_announce_id(live) == "live-line"
+        # The finished task's entry is pruned on lookup so the map stays bounded.
+        assert finished not in runtime._turn_announce
+        assert runtime.take_turn_announce_id(None) is None
+
+        live.cancel()
+        await asyncio.gather(live, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 def test_continuation_replays_only_before_side_effects() -> None:
