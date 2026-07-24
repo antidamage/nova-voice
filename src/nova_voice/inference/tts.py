@@ -63,7 +63,9 @@ class TextToSpeech(ABC):
         pcm16, sample_rate = await self.synthesize(text, instruction)
         yield pcm16, sample_rate
 
-    async def configure(self, *, speaker: str, language: str) -> None:
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
         raise RuntimeError("TTS adapter does not support live voice settings")
 
 
@@ -152,9 +154,13 @@ class QwenTextToSpeech(TextToSpeech):
                 self._cache.popitem(last=False)
             return result
 
-    async def configure(self, *, speaker: str, language: str) -> None:
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
         # Use the synthesis lock so a collection signal can never change the
         # speaker or language halfway through an in-flight generation.
+        # num_steps is a dots-only diffusion knob; the in-process Qwen path has
+        # no equivalent, so it is accepted (uniform interface) and ignored.
         async with self._lock:
             self.speaker = speaker
             self.language = language
@@ -190,6 +196,10 @@ class VllmQwenTextToSpeech(TextToSpeech):
         self.speaker = speaker
         self.language = language
         self.sample_rate = sample_rate
+        # Extra per-request generation options negotiated via configure(). Only
+        # the dots engine consumes these (e.g. num_steps); the classic vLLM path
+        # leaves it empty so its request body is unchanged.
+        self._extra_request: dict[str, object] = {}
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
         self._config_lock = asyncio.Lock()
         self._cache: OrderedDict[tuple[str, str, str, str], tuple[bytes, int]] = OrderedDict()
@@ -221,6 +231,9 @@ class VllmQwenTextToSpeech(TextToSpeech):
             "stream": True,
             "stream_format": "audio",
             "response_format": "pcm",
+            # Engine-specific generation options (dots: num_steps). Empty for the
+            # classic vLLM path, so its request is byte-for-byte unchanged.
+            **self._extra_request,
         }
         complete = bytearray()
         carry = b""
@@ -258,10 +271,14 @@ class VllmQwenTextToSpeech(TextToSpeech):
             result_rate = chunk_rate
         return bytes(payload), result_rate
 
-    async def configure(self, *, speaker: str, language: str) -> None:
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
         async with self._config_lock:
             self.speaker = speaker
             self.language = language
+            # Classic vLLM-Omni has no diffusion-step control, so num_steps is
+            # ignored here; the dots subclass overrides this to apply it.
 
     async def health(self) -> dict:
         try:
@@ -299,6 +316,20 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
     """
 
     engine = "custom"
+
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
+        await super().configure(speaker=speaker, language=language)
+        # The dots service reads num_steps per /v1/audio/speech request, so a
+        # dashboard change applies to the next reply without a restart. Clamp to
+        # the same 1..16 band the settings enforce; None leaves the service's own
+        # DOTS_NUM_STEPS default in effect.
+        async with self._config_lock:
+            if num_steps is None:
+                self._extra_request.pop("num_steps", None)
+            else:
+                self._extra_request["num_steps"] = max(1, min(16, int(num_steps)))
 
     async def health(self) -> dict:
         # The dots service self-warms behind its /health ready gate (the

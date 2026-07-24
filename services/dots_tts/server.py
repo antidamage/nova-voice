@@ -72,6 +72,10 @@ class SpeechRequest(BaseModel):
     stream: bool = True
     stream_format: str | None = None
     response_format: str | None = "pcm"
+    # Per-request diffusion step count from the dashboard's live control. None
+    # falls back to the service default (DOTS_NUM_STEPS). Fewer steps = sooner
+    # first audio + less GPU, at some quality cost.
+    num_steps: int | None = None
 
 
 def _pcm16_bytes(audio: torch.Tensor) -> bytes:
@@ -124,10 +128,13 @@ class DotsService:
         return str(found.reference_path), found.speaker_scale
 
     def _synthesize_chunks(
-        self, text: str, voice: str | None, language: str | None
+        self, text: str, voice: str | None, language: str | None, num_steps: int | None
     ) -> Iterator[bytes]:
         assert self.runtime is not None
         reference, speaker_scale = self._resolve_reference(voice)
+        # Per-request num_steps (dashboard live control) overrides the service
+        # default; clamp to a sane band so a bad value can't stall or crash a turn.
+        steps = NUM_STEPS if num_steps is None else max(1, min(16, int(num_steps)))
         # generate_stream takes the whole text and yields 48 kHz audio chunks as
         # they decode. It is the same path the runtime warms up, and it handles
         # language tagging internally — unlike the token-by-token double-streaming
@@ -137,7 +144,7 @@ class DotsService:
             text=text.strip(),
             prompt_audio_path=reference,
             language=language,
-            num_steps=NUM_STEPS,
+            num_steps=steps,
             guidance_scale=GUIDANCE_SCALE,
             speaker_scale=speaker_scale,
         ):
@@ -148,7 +155,7 @@ class DotsService:
             raise HTTPException(status_code=500, detail="no audio produced")
 
     async def stream_pcm(
-        self, text: str, voice: str | None, language: str | None
+        self, text: str, voice: str | None, language: str | None, num_steps: int | None = None
     ) -> AsyncIterator[bytes]:
         if not self.ready or self.runtime is None:
             raise HTTPException(status_code=503, detail="model not ready")
@@ -157,7 +164,7 @@ class DotsService:
         # cudagraph-tree TLS built during warmup is in scope for inference.
         loop = asyncio.get_running_loop()
         async with self._gpu_lock:
-            gen = self._synthesize_chunks(text, voice, language)
+            gen = self._synthesize_chunks(text, voice, language, num_steps)
             while True:
                 chunk = await loop.run_in_executor(self._gpu_executor, next, gen, None)
                 if chunk is None:
@@ -258,7 +265,7 @@ async def audio_speech(req: SpeechRequest):
     text = (req.input or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="input is required")
-    stream = service.stream_pcm(text, req.voice, req.language)
+    stream = service.stream_pcm(text, req.voice, req.language, req.num_steps)
     return StreamingResponse(stream, media_type="audio/pcm")
 
 
