@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch for Nova TTS engine switch requests
+# The orchestrator runs unprivileged (User=nova-voice, NoNewPrivileges), so it
+# cannot swap systemd units itself. It writes a request file; this path unit
+# runs the root switcher, which consumes the file and performs the swap.
+
+[Path]
+PathExists=/var/lib/nova-voice/engine-switch-request.json
+Unit=nova-tts-engine-switch.service
+
+[Install]
+WantedBy=multi-user.target

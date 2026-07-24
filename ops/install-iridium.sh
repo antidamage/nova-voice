@@ -45,6 +45,7 @@ sudo -u nova-voice env PLAYWRIGHT_BROWSERS_PATH="$ROOT/browsers" \
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-llm.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tts.service" /etc/systemd/system/
+install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-dots-tts.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-tier0-endurance.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-dfn.service" /etc/systemd/system/
 install -m 0644 "$SOURCE_DIR/deploy/systemd/nova-voice-websearch.service" /etc/systemd/system/

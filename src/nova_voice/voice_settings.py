@@ -321,6 +321,12 @@ class VoiceSettings(BaseModel):
     # False is a diagnostic mode that streams every captured frame.
     satellite_noise_gate_enabled: bool = True
     speaker: VoiceSpeaker = VoiceSpeaker.RYAN
+    # Custom-engine (dots.tts) voice: a cloned-voice id resolved by the dots
+    # service's registry. Kept separate from ``speaker`` because the two engines
+    # have disjoint voice namespaces — switching engines restores each engine's
+    # own last-used voice instead of sending a preset name to dots (a guaranteed
+    # 404 "unknown voice").
+    custom_speaker: str = Field(default="johnny_multi", min_length=1, max_length=64)
     language: VoiceLanguage = VoiceLanguage.ENGLISH
     accent: VoiceAccent = VoiceAccent.NEW_ZEALAND
     speech_rate: int = Field(default=100, ge=70, le=130, multiple_of=5)
@@ -457,6 +463,18 @@ class VoiceSettings(BaseModel):
             if isinstance(item, str) and item.strip():
                 seen.setdefault(item.strip().casefold(), None)
         return list(seen)
+
+    @field_validator("custom_speaker", mode="before")
+    @classmethod
+    def normalize_custom_speaker(cls, value: object) -> object:
+        # Permissive like the other dashboard-sourced fields: a stray value must
+        # never break the settings pull. Ids are the dots registry's normalized
+        # form (lowercase word characters); anything else falls back to the
+        # default clone.
+        if not isinstance(value, str):
+            return "johnny_multi"
+        candidate = value.strip().casefold()
+        return candidate if re.fullmatch(r"[a-z0-9_-]{1,64}", candidate) else "johnny_multi"
 
     @field_validator("agent_name_pronunciation", mode="before")
     @classmethod

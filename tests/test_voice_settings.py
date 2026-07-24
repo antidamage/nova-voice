@@ -304,3 +304,22 @@ def test_pronoun_instruction_labels_each_grammatical_form() -> None:
     assert "'I' is a valid pronoun for you" in instruction
     assert "first-person pronouns 'I', 'me', and 'my'" in instruction
     assert "Your third-person pronouns are" in instruction
+
+
+def test_custom_speaker_defaults_and_normalizes_forgivingly() -> None:
+    # Separate namespace from the Classic preset enum: a dots clone id. The
+    # validator is permissive so a stray dashboard value can never break the
+    # settings pull — it falls back to the default clone instead.
+    assert VoiceSettings().custom_speaker == "johnny_multi"
+    assert (
+        VoiceSettings.model_validate({"customSpeaker": " Johnny_Multi "}).custom_speaker
+        == "johnny_multi"
+    )
+    assert VoiceSettings.model_validate({"customSpeaker": 7}).custom_speaker == "johnny_multi"
+    assert (
+        VoiceSettings.model_validate({"customSpeaker": "not a voice id!"}).custom_speaker
+        == "johnny_multi"
+    )
+    assert (
+        VoiceSettings.model_validate({"customSpeaker": "hana-v2"}).custom_speaker == "hana-v2"
+    )

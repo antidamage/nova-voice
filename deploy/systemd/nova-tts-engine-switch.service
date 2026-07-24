@@ -1,0 +1,10 @@
+[Unit]
+Description=Nova TTS engine switcher
+
+[Service]
+Type=oneshot
+# The switch waits for the selected engine's health gate before reporting ready
+# (the dots.tts optimize=True warmup is ~7 min on Turing), so it must not run
+# under the default start timeout.
+TimeoutStartSec=0
+ExecStart=/usr/local/bin/nova-switch-tts-engine

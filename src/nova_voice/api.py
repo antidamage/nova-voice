@@ -101,6 +101,12 @@ class VoicePreviewRequest(BaseModel):
     question: str | None = None
 
 
+class EngineSwitchRequest(BaseModel):
+    # Dashboard-facing engine module names; "classic" = Qwen presets (vllm
+    # backend), "custom" = dots.tts cloned voices (dots backend).
+    engine: Literal["classic", "custom"]
+
+
 class SpeakerProfileUpdateRequest(BaseModel):
     display_name: str | None = None
     pronouns: str | None = None
@@ -825,6 +831,72 @@ def create_app(
     async def list_custom_voices() -> dict:
         return {"voices": await _dots_custom_voices()}
 
+    def _engine_switch_status() -> dict | None:
+        """The root switcher's progress report, or None when never run."""
+        path = get_settings().engine_switch_status_path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @app.get("/v1/engine")
+    async def engine_status() -> dict:
+        """Which TTS engine module is resident, plus any in-flight switch.
+
+        ``engine`` reflects this process's environment (the truth for what the
+        orchestrator is actually using); ``switch`` is the root-side switcher's
+        status file, which outlives orchestrator restarts so the dashboard can
+        follow a switch across the intentional downtime it causes.
+        """
+        cfg = get_settings()
+        payload: dict = {
+            "engine": "custom" if cfg.tts_backend == "dots" else "classic",
+            "engines": [
+                {"id": "classic", "label": "Classic presets"},
+                {"id": "custom", "label": "Custom voices"},
+            ],
+        }
+        switch = _engine_switch_status()
+        if switch is not None:
+            payload["switch"] = switch
+        runtime = selected_audio
+        if runtime is not None and getattr(runtime, "tts", None) is not None:
+            payload["tts"] = await runtime.tts.health()
+        return payload
+
+    @app.post("/v1/engine", status_code=202)
+    async def request_engine_switch(payload: EngineSwitchRequest) -> dict:
+        """Ask the root-side switcher to swap the resident TTS engine.
+
+        The orchestrator runs unprivileged (NoNewPrivileges), so the swap is a
+        handshake: this writes a request file that a root systemd .path unit
+        watches; the switcher rewrites the engine drop-ins, swaps the mutually
+        exclusive TTS units, restarts this service, and reports progress into
+        the status file. Expect the API to go down and come back mid-switch.
+        """
+        cfg = get_settings()
+        current = "custom" if cfg.tts_backend == "dots" else "classic"
+        if payload.engine == current:
+            return {"ok": True, "engine": current, "changed": False}
+        target = "dots" if payload.engine == "custom" else "classic"
+        request_path = cfg.engine_switch_request_path
+        body = json.dumps(
+            {"target": target, "requestedAt": datetime.now().astimezone().isoformat()}
+        )
+        try:
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = request_path.with_suffix(".tmp")
+            tmp_path.write_text(body, encoding="utf-8")
+            tmp_path.replace(request_path)
+        except OSError as error:
+            logger.error("engine switch request could not be written: %s", error)
+            raise HTTPException(
+                status_code=503, detail="Engine switch request could not be written"
+            ) from error
+        logger.info("engine switch to %s requested", target)
+        return {"ok": True, "engine": payload.engine, "changed": True}
+
     @app.post("/v1/voices/custom", include_in_schema=False)
     async def build_custom_voice(request: Request) -> dict:
         """Relay a multipart "build voice" upload through to the dots service."""
@@ -1457,10 +1529,32 @@ def create_app(
         instruction = (
             voice.style_instruction() if voice is not None else "Natural conversational delivery."
         )
+        # The Custom engine self-warms for minutes after a (re)start; a probe
+        # here turns that window into an explicit "warming up" message instead
+        # of an opaque synthesis failure.
+        if getattr(runtime.tts, "engine", "classic") == "custom":
+            probe = await runtime.tts.health()
+            if not probe.get("ok"):
+                reason = probe.get("error") or "engine unavailable"
+                raise HTTPException(
+                    status_code=503, detail=f"Custom voice engine is not ready: {reason}"
+                )
         try:
             pcm16, sample_rate = await runtime.tts.synthesize(
                 normalize_spoken_numbers(text), instruction
             )
+        except httpx.HTTPStatusError as error:
+            # A 404 from the TTS service means the configured speaker does not
+            # exist in the resident engine's voice namespace — name it, so the
+            # dashboard shows an actionable error instead of a generic failure.
+            speaker = getattr(runtime.tts, "speaker", None)
+            logger.warning("voice preview synthesis failed: %s", error)
+            if error.response.status_code == 404 and speaker:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"The TTS engine does not know the voice '{speaker}'",
+                ) from error
+            raise HTTPException(status_code=503, detail="Voice preview synthesis failed") from error
         except Exception as error:  # noqa: BLE001 - any synth failure is a 503 to the caller
             logger.warning("voice preview synthesis failed: %s", error)
             raise HTTPException(status_code=503, detail="Voice preview synthesis failed") from error
