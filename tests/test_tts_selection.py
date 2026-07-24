@@ -92,3 +92,57 @@ def test_adapter_engine_attribute_names_each_voice_namespace() -> None:
     assert QwenTextToSpeech.engine == "classic"
     assert VllmQwenTextToSpeech.engine == "classic"
     assert DotsStreamingTextToSpeech.engine == "custom"
+
+
+@pytest.mark.asyncio
+async def test_dots_health_reads_warming_body_despite_503() -> None:
+    # dots.tts returns HTTP 503 while its optimize=True warmup is still
+    # running, but the JSON body always carries the real ready/loadError
+    # state — health() must read that body instead of discarding it via
+    # raise_for_status(), which would only report the exception's class name.
+    from nova_voice.inference.tts import DotsStreamingTextToSpeech
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"ok": False, "ready": False, "loadError": None, "voices": ["johnny_multi"]},
+        )
+
+    adapter = DotsStreamingTextToSpeech(
+        "http://dots.local", "dots.tts-mf", "johnny_multi", "English"
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        health = await adapter.health()
+    finally:
+        await adapter._client.aclose()
+
+    assert health["ok"] is False
+    assert health["ready"] is False
+    assert health["error"] == "warming up"
+
+
+@pytest.mark.asyncio
+async def test_dots_health_reports_ready_on_200() -> None:
+    from nova_voice.inference.tts import DotsStreamingTextToSpeech
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"ok": True, "ready": True, "loadError": None, "voices": ["johnny_multi"]},
+        )
+
+    adapter = DotsStreamingTextToSpeech(
+        "http://dots.local", "dots.tts-mf", "johnny_multi", "English"
+    )
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        health = await adapter.health()
+    finally:
+        await adapter._client.aclose()
+
+    assert health["ok"] is True
+    assert health["ready"] is True
+    assert "error" not in health
