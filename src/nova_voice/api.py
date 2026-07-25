@@ -15,7 +15,7 @@ from typing import Literal
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -32,7 +32,6 @@ from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, Utterance
-from nova_voice.training.service import TrainingError, TrainingService
 from nova_voice.durable.models import (
     AutomationRecord,
     BriefingRecord,
@@ -120,29 +119,6 @@ class EngineSwitchRequest(BaseModel):
         if value not in engine_ids():
             raise ValueError(f"unknown engine: {value!r}")
         return value
-
-
-class TrainingSetRequest(BaseModel):
-    id: str
-    name: str = ""
-    language: str = "en"
-
-
-class TrainingStartRequest(BaseModel):
-    """All optional: omitted values fall back to the trainer's own defaults.
-
-    Batch size is the knob to reach for on an out-of-memory failure; the
-    save-every interval doubles as how granular an early stop can be, since a
-    stop takes effect at the next checkpoint.
-    """
-
-    batchSize: int | None = Field(default=None, ge=1, le=64)
-    totalEpochs: int | None = Field(default=None, ge=1, le=200)
-    saveEveryEpochs: int | None = Field(default=None, ge=1, le=50)
-
-
-class TrainingPublishRequest(BaseModel):
-    voiceId: str | None = None
 
 
 class SpeakerProfileUpdateRequest(BaseModel):
@@ -1639,71 +1615,10 @@ def create_app(
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return response.json()
 
-    # --- voice training ----------------------------------------------------
-    # Fine-tuning a voice from uploaded samples. Long-running work runs in a
-    # detached worker (see nova_voice.training.service), so these endpoints only
-    # ever signal it and read state off disk -- none of them block on training.
-    _training = TrainingService()
-
-    def _training_call(fn, *args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except TrainingError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-
-    @app.get("/v1/training")
-    async def training_status() -> dict:
-        return _training.status()
-
-    @app.post("/v1/training/sets", status_code=201)
-    async def create_training_set(payload: TrainingSetRequest) -> dict:
-        return _training_call(_training.create, payload.id, payload.name, payload.language)
-
-    @app.get("/v1/training/sets/{set_id}")
-    async def get_training_set(set_id: str) -> dict:
-        return _training_call(lambda: _training.get_set(set_id).summary())
-
-    @app.delete("/v1/training/sets/{set_id}")
-    async def delete_training_set(set_id: str) -> dict:
-        return _training_call(_training.delete, set_id)
-
-    @app.post("/v1/training/sets/{set_id}/samples", include_in_schema=False)
-    async def upload_training_samples(set_id: str, files: list[UploadFile] = File(...)) -> dict:
-        if not files:
-            raise HTTPException(status_code=400, detail="no files uploaded")
-        return _training_call(
-            _training.add_samples, set_id, [(f.filename or "", f.file) for f in files]
-        )
-
-    @app.delete("/v1/training/sets/{set_id}/samples")
-    async def clear_training_samples(set_id: str) -> dict:
-        return _training_call(_training.clear_samples, set_id)
-
-    @app.post("/v1/training/sets/{set_id}/start")
-    async def start_training(set_id: str, payload: TrainingStartRequest | None = None) -> dict:
-        options = payload or TrainingStartRequest()
-        return _training_call(
-            _training.start, set_id,
-            batch_size=options.batchSize,
-            total_epoch=options.totalEpochs,
-            save_every_epoch=options.saveEveryEpochs,
-        )
-
-    @app.post("/v1/training/sets/{set_id}/stop")
-    async def stop_training(set_id: str) -> dict:
-        return _training_call(_training.stop, set_id)
-
-    @app.post("/v1/training/sets/{set_id}/abort")
-    async def abort_training(set_id: str) -> dict:
-        return _training_call(_training.abort, set_id)
-
-    @app.post("/v1/training/sets/{set_id}/publish")
-    async def publish_training_bundle(set_id: str, payload: TrainingPublishRequest | None = None) -> dict:
-        return _training_call(_training.publish, set_id, (payload.voiceId if payload else None))
-
-    @app.get("/v1/training/sets/{set_id}/log")
-    async def training_log(set_id: str, lines: int = 200) -> dict:
-        return {"log": _training_call(_training.log_tail, set_id, lines)}
+    # Voice training endpoints deliberately do NOT live here. Training stops
+    # this service to free the GPU, so hosting its control plane here meant a run
+    # switched off its own status and stop endpoints. They are served by
+    # services/training_api, which holds no models and stays up throughout.
 
     @app.post("/v1/settings/refresh")
     async def refresh_voice_settings() -> dict:

@@ -191,6 +191,40 @@ class TrainingSet:
             return 0
         return sum(1 for p in self.raw_dir.iterdir() if p.is_file())
 
+    @property
+    def fingerprint_path(self) -> Path:
+        return self.dataset_dir / ".samples"
+
+    def samples_fingerprint(self) -> str:
+        """Cheap identity for the current sample set: count and total bytes.
+
+        Used to notice that samples were added or removed since the dataset was
+        built. Deliberately not a content hash -- this runs over thousands of
+        files on every start, and count+size catches every realistic edit
+        (uploads append, clears remove) without reading gigabytes.
+        """
+        if not self.raw_dir.is_dir():
+            return "0:0"
+        count = total = 0
+        for path in self.raw_dir.iterdir():
+            if path.is_file():
+                count += 1
+                total += path.stat().st_size
+        return f"{count}:{total}"
+
+    def dataset_matches_samples(self) -> bool:
+        """True when the prepared dataset was built from the current samples."""
+        if not self.fingerprint_path.is_file():
+            return False
+        try:
+            return self.fingerprint_path.read_text(encoding="utf-8").strip() == self.samples_fingerprint()
+        except OSError:
+            return False
+
+    def record_dataset_fingerprint(self) -> None:
+        self.dataset_dir.mkdir(parents=True, exist_ok=True)
+        self.fingerprint_path.write_text(self.samples_fingerprint(), encoding="utf-8")
+
     def resumable(self) -> bool:
         """True when checkpoints exist, so a start would continue rather than restart."""
         if not self.exp_dir.is_dir():
@@ -199,13 +233,18 @@ class TrainingSet:
 
     def summary(self) -> dict[str, Any]:
         state = self.read_state()
+        # Samples added or removed since the dataset was built mean the next run
+        # rebuilds and retrains from scratch. Reported so the UI can say that,
+        # rather than offering "Resume" and quietly doing something else.
+        samples_changed = self.resumable() and not self.dataset_matches_samples()
         return {
             "id": self.id,
             "name": self.name or self.id,
             "language": self.language,
             "createdAt": self.created_at,
             "sampleCount": self.sample_count(),
-            "resumable": self.resumable(),
+            "resumable": self.resumable() and not samples_changed,
+            "samplesChanged": samples_changed,
             "state": state.to_json(),
         }
 

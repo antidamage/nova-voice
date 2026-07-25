@@ -1,0 +1,38 @@
+[Unit]
+# Training control plane: start/stop/status/upload for voice fine-tuning.
+#
+# Deliberately NOT listed in nova-voice-training@.service's Conflicts=, and it
+# holds no models and touches no GPU. Training stops the voice stack, so putting
+# these endpoints on the voice API meant the run switched off its own control
+# surface -- progress froze and Stop returned a connection error while the run
+# continued. This process stays up throughout.
+Description=Nova Voice training control API
+After=network-online.target
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+Environment=PYTHONPATH=/opt/nova-voice/current/src
+Environment=PYTHONUNBUFFERED=1
+Environment=NOVA_TRAINING_API_PORT=8097
+EnvironmentFile=-/etc/nova-voice/nova-voice.env
+
+ExecStart=/opt/nova-voice/venv/bin/python /opt/nova-voice/current/services/training_api/server.py
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/training-sets /opt/nova-voice/trained-voices /etc/nova-voice
+
+# Household LAN only: the dashboard reaches this over mTLS, nothing else should.
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.168.8.0/24
+
+[Install]
+WantedBy=multi-user.target

@@ -124,6 +124,37 @@ def test_resumable_reflects_existing_checkpoints(service: TrainingService):
     assert live.resumable() is True, "a set with checkpoints must continue, not restart"
 
 
+def test_adding_samples_invalidates_the_prepared_dataset(service: TrainingService):
+    """Reusing a dataset is what makes resume fast, but it must be keyed on the
+    SAMPLES -- otherwise adding recordings and pressing Resume silently trains
+    on the old set again and republishes the same voice."""
+    import io as _io
+
+    service.create("grow", "Grow", "en")
+    live = service.store.get("grow")
+    service.add_samples("grow", [("a.wav", _io.BytesIO(b"RIFF0"))])
+
+    # Simulate a completed prepare + training run.
+    (live.sliced_dir / "seg.wav").write_bytes(b"RIFF")
+    (live.asr_dir / "sliced.list").write_text("seg.wav|x|EN|hello\n", encoding="utf-8")
+    (live.exp_dir / "logs_s1").mkdir(parents=True, exist_ok=True)
+    (live.exp_dir / "logs_s1" / "e15.ckpt").write_bytes(b"ckpt")
+    live.record_dataset_fingerprint()
+
+    assert live.dataset_matches_samples() is True
+    assert service.store.get("grow").summary()["resumable"] is True
+    assert service.store.get("grow").summary()["samplesChanged"] is False
+
+    # New audio arrives.
+    service.add_samples("grow", [("b.wav", _io.BytesIO(b"RIFF-longer-content"))])
+
+    fresh = service.store.get("grow")
+    assert fresh.dataset_matches_samples() is False, "new samples must invalidate the dataset"
+    summary = fresh.summary()
+    assert summary["samplesChanged"] is True
+    assert summary["resumable"] is False, "must not offer Resume when it would ignore new audio"
+
+
 def test_publish_refuses_an_incomplete_bundle(service: TrainingService):
     service.create("partial", "Partial", "en")
     with pytest.raises(TrainingError, match="incomplete"):
