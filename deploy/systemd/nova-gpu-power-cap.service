@@ -1,0 +1,30 @@
+[Unit]
+# Hold the GPU's power limit below its stock ceiling across reboots.
+#
+# The room this machine lives in is deliberately kept warm, which leaves the
+# card no thermal headroom at its default limit: under training load it sat at
+# 82-85 C against an 84 C target, with the fan pinned at ~119% and hunting
+# audibly, and SW thermal slowdown firing intermittently. Capping power costs a
+# few percent of throughput and returns the fan to a steady ~50-64%, with real
+# headroom left if the room warms further.
+#
+# nvidia-smi settings do NOT persist: they are lost on reboot AND whenever the
+# driver unloads, which happens as soon as the last CUDA process exits unless
+# persistence mode is on. Both are set here, in that order.
+Description=Cap NVIDIA GPU power limit (thermal headroom in a warm room)
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Persistence mode first: without it the driver unloads when the GPU goes idle
+# and takes the power limit with it.
+ExecStart=/usr/bin/nvidia-smi --persistence-mode=1
+ExecStart=/usr/bin/nvidia-smi --power-limit=200
+# Restore the stock limit when explicitly stopped, so disabling this unit is
+# enough to get full performance back without knowing the original value.
+ExecStop=/usr/bin/nvidia-smi --power-limit=260
+
+[Install]
+WantedBy=multi-user.target
