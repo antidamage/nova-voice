@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 from pathlib import Path
 
 from nova_voice.training.config_builder import (
@@ -305,13 +306,15 @@ class TrainingRunner:
         shutil.copy2(gpt_ckpt, bundle / "gpt.ckpt")
         shutil.copy2(sovits, bundle / "sovits.pth")
 
-        reference = _newest(self.set.sliced_dir, "*.wav")
+        transcripts = list(self.set.asr_dir.glob("*.list"))
+        reference, text = _choose_reference(
+            self.set.sliced_dir, transcripts[0] if transcripts else None
+        )
         if reference is not None:
             shutil.copy2(reference, bundle / "reference.wav")
-            transcripts = list(self.set.asr_dir.glob("*.list"))
-            text = _reference_text(transcripts[0], reference.name) if transcripts else ""
             if text:
                 (bundle / "reference.txt").write_text(text, encoding="utf-8")
+            self.log(f"reference clip: {reference.name} ({text[:60]!r})")
 
         (bundle / "meta.json").write_text(json.dumps({
             "id": self.set.id,
@@ -355,6 +358,64 @@ def _newest(directory: Path, pattern: str) -> Path | None:
         return None
     matches = sorted(directory.rglob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
+
+
+# GPT-SoVITS conditions every generation on the reference clip, and its own docs
+# ask for roughly 3-10 seconds. Outside that band quality degrades sharply: too
+# short carries no timbre, too long and the prompt starts to dominate.
+REFERENCE_MIN_SECONDS = 3.0
+REFERENCE_MAX_SECONDS = 10.0
+
+
+def _wav_seconds(path: Path) -> float:
+    try:
+        with wave.open(str(path)) as handle:
+            rate = handle.getframerate()
+            return handle.getnframes() / rate if rate else 0.0
+    except (wave.Error, OSError):
+        return 0.0
+
+
+def _choose_reference(sliced_dir: Path, transcript: Path | None) -> tuple[Path | None, str]:
+    """Pick the clip that will prompt every future generation.
+
+    Chosen deliberately rather than arbitrarily: taking (say) the newest sliced
+    file can land on a half-second one-word fragment, which then becomes the
+    timbre prompt for the whole voice. Prefer clips inside GPT-SoVITS's
+    recommended duration band, and among those the one with the most words --
+    more speech in the prompt means a better-conditioned voice.
+    """
+    if not sliced_dir.is_dir():
+        return None, ""
+    texts: dict[str, str] = {}
+    if transcript is not None and transcript.is_file():
+        try:
+            for line in transcript.read_text(encoding="utf-8").splitlines():
+                parts = line.split("|")
+                if len(parts) >= 4:
+                    texts[Path(parts[0]).name] = parts[3].strip()
+        except OSError:
+            pass
+
+    best: tuple[float, Path, str] | None = None
+    fallback: tuple[float, Path, str] | None = None
+    for wav in sorted(sliced_dir.glob("*.wav")):
+        seconds = _wav_seconds(wav)
+        words = len(texts.get(wav.name, "").split())
+        candidate = (float(words), wav, texts.get(wav.name, ""))
+        if REFERENCE_MIN_SECONDS <= seconds <= REFERENCE_MAX_SECONDS:
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+        elif fallback is None or seconds > fallback[0]:
+            # Nothing in band: keep the longest clip we saw, so a set of very
+            # short samples still yields the best available prompt.
+            fallback = (seconds, wav, texts.get(wav.name, ""))
+
+    if best is not None:
+        return best[1], best[2]
+    if fallback is not None:
+        return fallback[1], fallback[2]
+    return None, ""
 
 
 def _reference_text(transcript: Path, wav_name: str) -> str:
