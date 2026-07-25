@@ -200,6 +200,13 @@ class Settings(BaseSettings):
     denoise_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     echo_guard_enabled: bool = True
     echo_correlation_threshold: float = Field(default=0.55, ge=0, le=1)
+    # Stage 2 self-echo interception (post-STT).  Any one signal firing drops the
+    # transcript; see audio/echo.py for why three are needed and for the measured
+    # echo-versus-genuine-speech separation these sit inside.
+    echo_transcript_coverage_threshold: float = Field(default=0.6, ge=0, le=1)
+    echo_transcript_run_threshold: int = Field(default=4, ge=1, le=20)
+    echo_transcript_ratio_threshold: float = Field(default=0.55, ge=0, le=1)
+    echo_transcript_min_content_words: int = Field(default=3, ge=1, le=10)
     # Legacy pre-interpretation vocabulary filtering is opt-in. Command intent
     # belongs to the structured interpretation pass; dropping multiword speech
     # here prevents valid commands with names or unusual aliases from ever

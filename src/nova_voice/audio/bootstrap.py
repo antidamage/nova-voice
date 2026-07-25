@@ -82,7 +82,13 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
         ),
         speaker_recognizer=speaker_recognizer,
         echo_guard=(
-            PlaybackEchoGuard(correlation_threshold=settings.echo_correlation_threshold)
+            PlaybackEchoGuard(
+                correlation_threshold=settings.echo_correlation_threshold,
+                transcript_coverage_threshold=settings.echo_transcript_coverage_threshold,
+                transcript_run_threshold=settings.echo_transcript_run_threshold,
+                transcript_ratio_threshold=settings.echo_transcript_ratio_threshold,
+                transcript_min_content_words=settings.echo_transcript_min_content_words,
+            )
             if settings.echo_guard_enabled
             else None
         ),
