@@ -14,12 +14,8 @@ from nova_voice.config import Settings
 from nova_voice.inference.scheduler import GpuExecutionGate
 from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import NemoSpeechToText
-from nova_voice.inference.tts import (
-    DotsStreamingTextToSpeech,
-    QwenTextToSpeech,
-    VllmQwenTextToSpeech,
-)
 from nova_voice.service import NovaVoiceService
+from nova_voice.tts_engines import engine_for_backend
 
 
 def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> SatelliteAudioRuntime:
@@ -32,38 +28,10 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             settings.stt_boost_alpha if settings.stt_context_biasing_enabled else 0.0
         ),
     )
-    if settings.tts_backend == "dots":
-        # Custom engine: the dots.tts service speaks the same streaming
-        # /v1/audio/speech PCM contract, at native 48 kHz. ``tts_speaker`` is a
-        # custom-voice id resolved by the service's voice registry.
-        tts = DotsStreamingTextToSpeech(
-            settings.dots_stream_base_url,
-            settings.tts_model,
-            settings.tts_speaker,
-            settings.tts_language,
-            sample_rate=settings.dots_sample_rate,
-        )
-    elif settings.tts_backend == "vllm":
-        # The remote OpenAI-compatible server validates its served model id;
-        # the local checkpoint path is only meaningful to the in-process
-        # qwen-tts backend.
-        tts = VllmQwenTextToSpeech(
-            settings.tts_stream_base_url,
-            settings.tts_model,
-            settings.tts_speaker,
-            settings.tts_language,
-            sample_rate=settings.tts_sample_rate,
-        )
-    else:
-        model_name = str(settings.tts_model_path) if settings.tts_model_path else settings.tts_model
-        tts = QwenTextToSpeech(
-            model_name,
-            settings.tts_speaker,
-            settings.tts_language,
-            dtype=settings.tts_dtype,
-            device=settings.tts_device,
-            execution_gate=execution_gate,
-        )
+    # Which TTS engine to build — and how — is defined once in the engine
+    # registry (nova_voice.tts_engines), keyed by tts_backend. Each engine's
+    # build_adapter reproduces exactly what this site constructed before.
+    tts = engine_for_backend(settings.tts_backend).build_adapter(settings, execution_gate)
 
     def segmenter_factory() -> SpeechSegmenter:
         vad = SileroVad()
