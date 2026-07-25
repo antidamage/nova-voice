@@ -106,6 +106,23 @@ health_style="$(reg field "$target" healthStyle)"
 all_units="$(reg units)"
 [[ -f "$profile" ]] || fail "engine profile missing: $profile"
 
+# Refuse to switch to an engine that cannot possibly serve audio. An engine whose
+# voices are per-voice checkpoint bundles (the Trained engine) is useless with an
+# empty catalogue: the old engine gets stopped, the new one never reaches ready,
+# and the health gate below burns its full timeout before failing -- leaving the
+# household with NO working TTS for the duration. Cheaper and far less disruptive
+# to check first and leave the running engine alone. Engines whose voices are
+# built-in presets (Classic) have no catalogue dir and are unaffected.
+voices_dir="$(reg field "$target" voicesDir 2>/dev/null || true)"
+case "$target" in
+  trained) voices_dir="${voices_dir:-/opt/nova-voice/trained-voices}" ;;
+esac
+if [[ -n "$voices_dir" ]]; then
+  if [[ ! -d "$voices_dir" ]] || [[ -z "$(find "$voices_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    fail "engine '$target' has no voices installed ($voices_dir is empty) -- upload a voice bundle before switching to it. Leaving the current engine running."
+  fi
+fi
+
 echo ">>> switching Nova TTS engine to $target"
 write_status preparing
 
