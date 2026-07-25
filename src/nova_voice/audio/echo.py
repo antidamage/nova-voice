@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 import numpy as np
 
@@ -47,6 +49,85 @@ def _normalized_peak_correlation(reference: np.ndarray, segment: np.ndarray) -> 
     return best
 
 
+# The echo reaching a microphone is re-recognised speech, so the transcript of it
+# is reliably mangled: contractions differ from the written form, and words land
+# as near-homophones ("chilling" -> "chillin", "tale" -> "tail").  Comparing raw
+# tokens therefore misses real echo.  Normalising contractions and reducing each
+# word to a Soundex-style consonant skeleton collapses that whole error class.
+_CONTRACTIONS: tuple[tuple[str, str], ...] = (
+    (r"n['’]t\b", " not"),
+    (r"['’]re\b", " are"),
+    (r"['’]m\b", " am"),
+    (r"['’]ll\b", " will"),
+    (r"['’]ve\b", " have"),
+    (r"['’]d\b", " would"),
+    (r"\bgonna\b", "going to"),
+    (r"\bwanna\b", "want to"),
+    (r"\bgotta\b", "got to"),
+)
+# Function words carry no evidence that a transcript came from the assistant --
+# every English sentence shares them -- so coverage is measured without them.
+_STOPWORDS = frozenset(
+    """a an the and or but so if then than that this these those to of in on at for
+    with from by is are was were be been being am do does did not no yes just about
+    as up out very can will would could should there here what when who how why it
+    its you your yours we our us they them their he she him her his my me mine i""".split()
+)
+_SOUNDEX_CLASSES = {
+    **{character: "1" for character in "bfpv"},
+    **{character: "2" for character in "cgjkqsxz"},
+    **{character: "3" for character in "dt"},
+    "l": "4",
+    **{character: "5" for character in "mn"},
+    "r": "6",
+}
+
+
+def _phonetic_key(word: str) -> str:
+    """Reduce a word to a first letter plus consonant-class skeleton."""
+
+    # A dropped "-g" is the single most common ASR variance in casual speech.
+    if word.endswith("ing"):
+        word = word[:-1]
+    digits: list[str] = []
+    previous = ""
+    for character in word[1:]:
+        code = _SOUNDEX_CLASSES.get(character, "")
+        if code and code != previous:
+            digits.append(code)
+        # "h" and "w" are transparent: they do not break a repeated class.
+        if character not in "hw":
+            previous = code
+    return word[0] + "".join(digits)
+
+
+def _keyed_tokens(text: str) -> tuple[list[str], list[str]]:
+    """Return (all phonetic keys, content-word phonetic keys) for one text."""
+
+    lowered = text.casefold()
+    for pattern, replacement in _CONTRACTIONS:
+        lowered = re.sub(pattern, replacement, lowered)
+    words = [word for word in re.split(r"[^a-z]+", lowered) if len(word) > 1]
+    return (
+        [_phonetic_key(word) for word in words],
+        [_phonetic_key(word) for word in words if word not in _STOPWORDS],
+    )
+
+
+@dataclass(frozen=True)
+class TranscriptEchoVerdict:
+    """Why a transcript was (or was not) judged to be the assistant's own voice."""
+
+    matched: bool
+    signal: str = "none"
+    coverage: float = 0.0
+    longest_run: int = 0
+    ratio: float = 0.0
+
+    def __bool__(self) -> bool:
+        return self.matched
+
+
 @dataclass
 class _Reference:
     envelope: list[float] = field(default_factory=list)
@@ -72,10 +153,22 @@ class PlaybackEchoGuard:
         history_seconds: float = 30.0,
         correlation_threshold: float = 0.55,
         transcript_window_seconds: float = 25.0,
+        transcript_coverage_threshold: float = 0.6,
+        transcript_run_threshold: int = 4,
+        transcript_ratio_threshold: float = 0.55,
+        transcript_min_content_words: int = 3,
     ) -> None:
         self._history_blocks = int(history_seconds * _BLOCKS_PER_SECOND)
         self.correlation_threshold = correlation_threshold
         self.transcript_window = transcript_window_seconds
+        # Measured separation on real garbled echoes from this household: echo
+        # scored coverage 0.71-1.00 / run 3-8 / ratio 0.62-1.00, genuine speech
+        # 0.00-0.33 / 0-2 / 0.00-0.29.  These sit inside that gap, so move them
+        # from logged evidence rather than by feel.
+        self.coverage_threshold = transcript_coverage_threshold
+        self.run_threshold = transcript_run_threshold
+        self.ratio_threshold = transcript_ratio_threshold
+        self.min_content_words = transcript_min_content_words
         self._references: dict[str, _Reference] = {}
 
     def _reference(self, room_id: str) -> _Reference:
@@ -135,26 +228,74 @@ class PlaybackEchoGuard:
             np.asarray(reference.envelope, dtype=np.float32), segment
         )
 
-    def transcript_matches_response(self, room_id: str, transcript: str) -> bool:
-        """True when a transcript is largely a repeat of a recent spoken reply."""
+    def transcript_echo_verdict(self, room_id: str, transcript: str) -> TranscriptEchoVerdict:
+        """Judge whether a transcript is the assistant's own voice returning.
+
+        Three independent signals are combined, because each fails differently:
+
+        * **coverage** -- how much of the heard content is accounted for by the
+          reply.  Robust to the assistant being heard only partway through, but
+          order-blind, and inflated on very short transcripts.
+        * **longest run** -- the longest contiguous shared token run.  Order
+          sensitive, so filler the assistant never said cannot dilute it, and it
+          survives a transcript that is mostly garbage with one verbatim stretch.
+        * **ratio** -- overall sequence similarity, catching diffuse mangling
+          that leaves no long run intact.
+
+        Any one firing is enough. Coverage is withheld from short transcripts so
+        a brief genuine reply reusing the assistant's common words survives.
+        """
 
         reference = self._references.get(room_id)
         if reference is None or not reference.response_texts:
-            return False
+            return TranscriptEchoVerdict(False)
+        heard_all, heard_content = _keyed_tokens(transcript)
+        if not heard_all:
+            return TranscriptEchoVerdict(False)
         now = time.monotonic()
-        heard = {token for token in _tokenize(transcript)}
-        if not heard:
-            return False
+        best = TranscriptEchoVerdict(False)
         for stamp, text in reference.response_texts:
             if now - stamp > self.transcript_window:
                 continue
-            spoken = set(_tokenize(text))
-            if not spoken:
+            spoken_all, spoken_content = _keyed_tokens(text)
+            if not spoken_all:
                 continue
-            overlap = len(heard & spoken) / len(heard)
-            if overlap >= 0.6:
-                return True
-        return False
+            unique_heard = set(heard_content)
+            coverage = (
+                len(unique_heard & set(spoken_content)) / len(unique_heard)
+                if unique_heard
+                else 0.0
+            )
+            matcher = SequenceMatcher(None, heard_all, spoken_all, autojunk=False)
+            longest_run = matcher.find_longest_match(
+                0, len(heard_all), 0, len(spoken_all)
+            ).size
+            ratio = matcher.ratio()
+
+            signal = "none"
+            if (
+                len(unique_heard) >= self.min_content_words
+                and coverage >= self.coverage_threshold
+            ):
+                signal = "coverage"
+            elif longest_run >= self.run_threshold:
+                signal = "run"
+            elif len(heard_all) >= self.min_content_words and ratio >= self.ratio_threshold:
+                signal = "ratio"
+            verdict = TranscriptEchoVerdict(
+                signal != "none", signal, round(coverage, 3), longest_run, round(ratio, 3)
+            )
+            if verdict.matched:
+                return verdict
+            # Keep the closest near-miss so a leak can be diagnosed from logs.
+            if verdict.ratio > best.ratio:
+                best = verdict
+        return best
+
+    def transcript_matches_response(self, room_id: str, transcript: str) -> bool:
+        """True when a transcript is largely a repeat of a recent spoken reply."""
+
+        return bool(self.transcript_echo_verdict(room_id, transcript))
 
     def health(self) -> dict:
         """Expose whether the server has a live Nova-output AEC reference.
@@ -178,10 +319,12 @@ class PlaybackEchoGuard:
             "references": references,
             "activeReferences": active,
             "correlationThreshold": self.correlation_threshold,
+            # Stage 2 (post-STT interception) thresholds, exposed next to the
+            # acoustic one so both bars are tunable from observed evidence.
+            "transcriptCoverageThreshold": self.coverage_threshold,
+            "transcriptRunThreshold": self.run_threshold,
+            "transcriptRatioThreshold": self.ratio_threshold,
+            "transcriptMinContentWords": self.min_content_words,
         }
 
 
-def _tokenize(text: str) -> list[str]:
-    return [token for token in "".join(
-        char if char.isalpha() else " " for char in text.casefold()
-    ).split() if len(token) > 1]

@@ -1326,14 +1326,23 @@ class SatelliteAudioRuntime:
         # Input stage 2 (transcript layer of the AEC): a transcript that is
         # largely a repeat of something the assistant just said is its own
         # voice returning through the room, not a new request.
-        if (
-            self._echo_guard is not None
-            and self._echo_guard.transcript_matches_response(scope_id, transcript)
-        ):
+        transcript_echo = (
+            self._echo_guard.transcript_echo_verdict(scope_id, transcript)
+            if self._echo_guard is not None
+            else None
+        )
+        if transcript_echo is not None and transcript_echo.matched:
+            # The deciding signal and its margins are logged so the three
+            # thresholds can be moved from evidence rather than by feel.
             logger.info(
-                "voice dropped satellite=%s room=%s reason=self_echo_transcript words=%r",
+                "voice dropped satellite=%s room=%s reason=self_echo_transcript "
+                "signal=%s coverage=%.3f run=%d ratio=%.3f words=%r",
                 satellite_id,
                 room_id,
+                transcript_echo.signal,
+                transcript_echo.coverage,
+                transcript_echo.longest_run,
+                transcript_echo.ratio,
                 transcript,
             )
             await self._record_monitor(
@@ -1342,6 +1351,10 @@ class SatelliteAudioRuntime:
                 roomId=room_id,
                 reason="self_echo_transcript",
                 wakeDetected=wake_detected,
+                echoSignal=transcript_echo.signal,
+                echoCoverage=transcript_echo.coverage,
+                echoLongestRun=transcript_echo.longest_run,
+                echoRatio=transcript_echo.ratio,
                 speechDurationMs=selected_acoustic.duration_ms,
             )
             self.release_turn(arbiter_claim)

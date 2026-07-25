@@ -159,18 +159,62 @@ generation or network delivery.  A satellite that genuinely cancels advertises
 `capabilities.echoCancellation = true`, which retires the server's half-duplex
 policy for it and allows true full-duplex barge-in.
 
-- Nocturnium satisfies this through the PipeWire WebRTC echo-canceller graph
-  described above.
-- **Indium does not yet satisfy this and is required to.**  It must run a
-  software echo canceller (WebRTC AEC3 is the reference choice) *inside the
-  satellite process*, fed by the server-supplied playback PCM as the far-end
-  reference and by the existing plain input-only HAL unit as the near end.
-  Because the canceller is in-process, this must be achieved without adopting
-  the Voice-Processing I/O aggregate, so the Mac's default output is never
-  seized or ducked — that constraint is why local AEC was declined originally,
-  and it is a constraint on *how* to cancel, not a reason not to.  Until this
-  lands, Indium is a raw-microphone capture client and Stage 2 is doing work it
-  was never meant to carry alone.
+- Nocturnium currently satisfies this through the PipeWire WebRTC
+  echo-canceller graph described above.  That graph is host configuration
+  rather than satellite behaviour, so it does not travel: it has to be
+  reinstalled and re-validated per machine, and it cannot be relied on where no
+  PipeWire graph exists.  Nocturnium is therefore also a target for the
+  portable in-process canceller below.
+- **Indium does not yet satisfy this and is required to.**  It must cancel
+  *inside the satellite process*, fed by the server-supplied playback PCM as the
+  far-end reference and by the existing plain input-only HAL unit as the near
+  end.  This must be achieved without adopting the Voice-Processing I/O
+  aggregate, so the Mac's default output is never seized or ducked — that
+  constraint is why local AEC was declined originally, and it is a constraint on
+  *how* to cancel, not a reason not to.  Until this lands, Indium is a
+  raw-microphone capture client and Stage 2 is doing work it was never meant to
+  carry alone.
+
+#### The satellite AEC contract
+
+Cancellation is specified as a portable contract rather than a per-host recipe,
+because every satellite environment will eventually need it and they share no
+audio stack: macOS CoreAudio, Linux PipeWire, and the browser have nothing in
+common except that each already receives the exact far-end signal from the
+server.  New environments implement this contract; they do not invent a new
+approach.
+
+- **One canceller, many bindings.**  The adaptive filter lives in a single
+  platform-neutral component behind a narrow C ABI (create / push far-end /
+  process near-end / destroy / report), so each satellite binds the same
+  implementation instead of each platform growing its own.  Swift, a Linux
+  capture process, and a WASM build for the browser are then bindings, not
+  reimplementations.  A platform may substitute a native canceller it genuinely
+  has (the browser's `echoCancellation` constraint already is one) provided it
+  satisfies the proof obligation below.
+- **The far end is the server's stream, not a loopback device.**  Satellites
+  must not depend on capturing a monitor/loopback source, because that is
+  exactly the host-specific configuration that does not port.  The reference is
+  the PCM the server sent for playback.
+- **Alignment is derived, never assumed.**  The reference must be fed at render
+  time using the satellite's real playback lifecycle (`playbackEvents`), and the
+  residual bulk delay estimated and tracked, not hard-coded — buffering differs
+  per platform and drifts.  Sample rate conversion to the canceller's working
+  rate is the binding's responsibility.
+- **Advertising AEC requires proof, not presence.**  A satellite may only set
+  `capabilities.echoCancellation = true` when it has measured its own echo
+  return loss enhancement (ERLE) and cleared a floor.  Each implementation ships
+  a self-test that plays a known signal, captures it, and reports ERLE; a
+  binding that cannot demonstrate cancellation must advertise `false` and accept
+  half-duplex.  This generalises the existing rule that a satellite must never
+  claim AEC merely because a PipeWire device exists.
+- **Degradation is explicit.**  Measured ERLE is reported in the satellite's
+  hello and surfaced in `/health` alongside the Stage 1/Stage 2 thresholds, so a
+  canceller that silently stops adapting is visible rather than being absorbed
+  by Stage 2 and appearing only as unexplained echo leakage.
+- **Stage 2 stays on regardless.**  Cancellation reduces echo; it does not
+  guarantee zero. The transcript backstop is never disabled by a satellite
+  advertising AEC — only the half-duplex microphone gating is.
 
 **Stage 2 — late-stage transcript interception (backstop).**  After STT, a
 transcript that is substantially a repeat of what the assistant just said is the
