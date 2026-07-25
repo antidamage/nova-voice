@@ -316,6 +316,10 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
     """
 
     engine = "custom"
+    # Health-report backend label. A field (not a literal) so ready-gate engines
+    # that reuse this health() path — e.g. the trained GPT-SoVITS engine — report
+    # their own backend without duplicating the method.
+    _backend_label = "dots.tts"
 
     async def configure(
         self, *, speaker: str, language: str, num_steps: int | None = None
@@ -332,14 +336,14 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
                 self._extra_request["num_steps"] = max(1, min(16, int(num_steps)))
 
     async def health(self) -> dict:
-        # The dots service self-warms behind its /health ready gate (the
-        # optimize=True warmup takes minutes on Turing), so a reachable server
-        # is not yet a usable one. Surface `ready` so callers (preview, the
-        # dashboard status strip) can distinguish "warming up" from "down".
+        # The service self-warms behind its /health ready gate (the optimize=True
+        # warmup takes minutes on Turing), so a reachable server is not yet a
+        # usable one. Surface `ready` so callers (preview, the dashboard status
+        # strip) can distinguish "warming up" from "down".
         info: dict = {
             "model": self.model_name,
-            "backend": "dots.tts",
-            "engine": "custom",
+            "backend": self._backend_label,
+            "engine": self.engine,
             "speaker": self.speaker,
             "language": self.language,
             "streaming": True,
@@ -361,3 +365,27 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
         if isinstance(payload.get("voices"), list):
             result["voices"] = payload["voices"]
         return result
+
+
+class GptSovitsTextToSpeech(DotsStreamingTextToSpeech):
+    """Adapter for the fine-tuned GPT-SoVITS ("Trained") voice service.
+
+    Like the dots service, GPT-SoVITS exposes the same streaming
+    ``/v1/audio/speech`` PCM contract behind a ``/health`` readiness gate, so it
+    reuses the transport and the ready-gate ``health()`` above. The differences
+    are semantic: ``speaker`` is a *trained-checkpoint* id (a fine-tuned voice,
+    not a zero-shot reference clip), audio is at the model's native rate, and
+    there is no diffusion-step control — so ``configure`` ignores ``num_steps``
+    rather than sending it. This is the "Trained voice" engine module.
+    """
+
+    engine = "trained"
+    _backend_label = "gpt-sovits"
+
+    async def configure(
+        self, *, speaker: str, language: str, num_steps: int | None = None
+    ) -> None:
+        # GPT-SoVITS has no diffusion sampler, so num_steps is meaningless here;
+        # skip the dots subclass's num_steps injection and just set speaker/
+        # language via the plain vLLM-transport configure.
+        await VllmQwenTextToSpeech.configure(self, speaker=speaker, language=language)

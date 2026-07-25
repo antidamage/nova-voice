@@ -159,10 +159,11 @@ class Settings(BaseSettings):
     tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
     tts_model_path: Path | None = None
     # Engine selector. ``qwen``/``vllm`` = Classic Qwen3-TTS presets (in-process /
-    # vLLM-Omni). ``dots`` = Custom zero-shot voice-cloning engine served by the
-    # dots.tts service. Only one TTS engine is GPU-resident at a time; switching
-    # engines swaps which service is loaded (see services/dots_tts).
-    tts_backend: Literal["qwen", "vllm", "dots"] = "qwen"
+    # vLLM-Omni). ``dots`` = Custom zero-shot voice-cloning engine (dots.tts).
+    # ``gptsovits`` = Trained fine-tuned engine (GPT-SoVITS). Only one TTS engine
+    # is GPU-resident at a time; switching swaps which service is loaded. The
+    # id↔backend↔unit↔profile mapping lives in nova_voice.tts_engines.
+    tts_backend: Literal["qwen", "vllm", "dots", "gptsovits"] = "qwen"
     tts_stream_base_url: str = "http://127.0.0.1:8091"
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=192_000)
     # dots.tts custom-voice service (Custom engine). Native 48 kHz; ``tts_speaker``
@@ -170,6 +171,12 @@ class Settings(BaseSettings):
     # 8093 belongs to the web-search sidecar and 8094 to MemPalace.
     dots_stream_base_url: str = "http://127.0.0.1:8095"
     dots_sample_rate: int = Field(default=48_000, ge=8_000, le=192_000)
+    # GPT-SoVITS trained-voice service (Trained engine). ``tts_speaker`` is a
+    # trained-checkpoint id resolved by the trained service's registry. Port
+    # 8096: 8093/8094/8095 are taken (websearch/MemPalace/dots). Native rate is
+    # GPT-SoVITS's output rate (32 kHz for v2); verify against the built model.
+    trained_stream_base_url: str = "http://127.0.0.1:8096"
+    trained_sample_rate: int = Field(default=32_000, ge=8_000, le=192_000)
     tts_speaker: str = "Serena"
     tts_language: str = "English"
     # Engine-switch handshake with the root-side switcher. The orchestrator runs

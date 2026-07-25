@@ -3,6 +3,10 @@ Description=Nova Voice streaming Qwen3-TTS runtime
 After=network-online.target nova-voice-llm.service
 Wants=network-online.target
 Requires=nova-voice-llm.service
+# Mutually exclusive with the other TTS engine units — only one TTS engine is
+# GPU-resident at a time. The switcher stops the inactive engines explicitly;
+# this Conflicts= is the symmetric systemd-level backstop.
+Conflicts=nova-voice-dots-tts.service nova-voice-trained-tts.service
 
 [Service]
 Type=simple

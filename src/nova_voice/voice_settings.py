@@ -327,6 +327,11 @@ class VoiceSettings(BaseModel):
     # own last-used voice instead of sending a preset name to dots (a guaranteed
     # 404 "unknown voice").
     custom_speaker: str = Field(default="johnny_multi", min_length=1, max_length=64)
+    # Trained-engine (GPT-SoVITS) voice: a fine-tuned checkpoint id resolved by
+    # the trained service's registry. Its own namespace for the same reason
+    # ``custom_speaker`` is separate — each engine restores its own last-used
+    # voice, and a name from another engine is a guaranteed 404.
+    trained_speaker: str = Field(default="", max_length=64)
     language: VoiceLanguage = VoiceLanguage.ENGLISH
     accent: VoiceAccent = VoiceAccent.NEW_ZEALAND
     speech_rate: int = Field(default=100, ge=70, le=130, multiple_of=5)
@@ -481,6 +486,17 @@ class VoiceSettings(BaseModel):
             return "johnny_multi"
         candidate = value.strip().casefold()
         return candidate if re.fullmatch(r"[a-z0-9_-]{1,64}", candidate) else "johnny_multi"
+
+    @field_validator("trained_speaker", mode="before")
+    @classmethod
+    def normalize_trained_speaker(cls, value: object) -> object:
+        # Same normalized-id form as custom_speaker, but empty is allowed: until
+        # a voice is trained there is no default, so a blank/stray value folds to
+        # "" (no selection) rather than a made-up id.
+        if not isinstance(value, str):
+            return ""
+        candidate = value.strip().casefold()
+        return candidate if re.fullmatch(r"[a-z0-9_-]{1,64}", candidate) else ""
 
     @field_validator("agent_name_pronunciation", mode="before")
     @classmethod

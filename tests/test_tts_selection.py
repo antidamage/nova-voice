@@ -85,13 +85,70 @@ async def test_vllm_adapter_requests_true_pcm_stream_and_caches_complete_audio()
 def test_adapter_engine_attribute_names_each_voice_namespace() -> None:
     # The runtime picks which settings field feeds `configure(speaker=...)`
     # from this attribute: Classic adapters resolve Qwen preset names, the
-    # dots adapter resolves cloned-voice ids (a preset name there is a 404).
-    from nova_voice.inference.tts import DotsStreamingTextToSpeech, TextToSpeech
+    # dots adapter resolves cloned-voice ids (a preset name there is a 404),
+    # the trained adapter resolves fine-tuned checkpoint ids.
+    from nova_voice.inference.tts import (
+        DotsStreamingTextToSpeech,
+        GptSovitsTextToSpeech,
+        TextToSpeech,
+    )
 
     assert TextToSpeech.engine == "classic"
     assert QwenTextToSpeech.engine == "classic"
     assert VllmQwenTextToSpeech.engine == "classic"
     assert DotsStreamingTextToSpeech.engine == "custom"
+    assert GptSovitsTextToSpeech.engine == "trained"
+
+
+def test_engine_registry_maps_every_backend_to_the_pre_registry_engine() -> None:
+    # Behaviour-preservation guard: the registry must resolve each tts_backend
+    # to exactly the engine the old hardcoded ``"custom" if ==="dots" else
+    # "classic"`` logic did, so generalizing bootstrap/api is a no-op for the
+    # existing engines.
+    from nova_voice.tts_engines import engine_for_backend
+
+    assert engine_for_backend("qwen").id == "classic"
+    assert engine_for_backend("vllm").id == "classic"
+    assert engine_for_backend("dots").id == "custom"
+    assert engine_for_backend("gptsovits").id == "trained"
+
+
+def test_engine_registry_agrees_with_config_default_ports() -> None:
+    # The registry is the single source of truth for each engine's port; the
+    # config default base URLs must agree with it, or the switcher's health poll
+    # (which reads the registry) and the running service (which reads config)
+    # would target different ports.
+    from nova_voice.config import Settings
+    from nova_voice.tts_engines import engine_by_id
+
+    settings = Settings()
+    assert str(engine_by_id("custom").stream_port) in settings.dots_stream_base_url
+    assert str(engine_by_id("trained").stream_port) in settings.trained_stream_base_url
+    assert str(engine_by_id("classic").stream_port) in settings.tts_stream_base_url
+
+
+def test_engine_registry_resolve_speaker_uses_each_namespace() -> None:
+    # Each engine reads its own speaker field; a name from another engine's
+    # namespace is a 404 at synthesis time.
+    from nova_voice.tts_engines import engine_by_id
+    from nova_voice.voice_settings import VoiceSettings
+
+    vs = VoiceSettings(custom_speaker="johnny_multi", trained_speaker="captain")
+    assert engine_by_id("classic").resolve_speaker(vs) == vs.speaker.value
+    assert engine_by_id("custom").resolve_speaker(vs) == "johnny_multi"
+    assert engine_by_id("trained").resolve_speaker(vs) == "captain"
+
+
+def test_engine_switch_request_rejects_unknown_engine() -> None:
+    # The API model validates against the registry, not a hardcoded pair.
+    import pytest as _pytest
+
+    from nova_voice.api import EngineSwitchRequest
+
+    for engine in ("classic", "custom", "trained"):
+        assert EngineSwitchRequest(engine=engine).engine == engine
+    with _pytest.raises(ValueError):
+        EngineSwitchRequest(engine="nonsense")
 
 
 @pytest.mark.asyncio
@@ -146,6 +203,55 @@ async def test_dots_health_reports_ready_on_200() -> None:
     assert health["ok"] is True
     assert health["ready"] is True
     assert "error" not in health
+
+
+@pytest.mark.asyncio
+async def test_ready_gate_health_reports_each_engine_backend_label() -> None:
+    # health() was parametrized (self._backend_label / self.engine) so the
+    # trained engine can reuse the dots ready-gate path. Guard that dots still
+    # reports its own backend and trained reports its own — no cross-contamination.
+    from nova_voice.inference.tts import DotsStreamingTextToSpeech, GptSovitsTextToSpeech
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "ready": True, "loadError": None})
+
+    for cls, backend, engine in (
+        (DotsStreamingTextToSpeech, "dots.tts", "custom"),
+        (GptSovitsTextToSpeech, "gpt-sovits", "trained"),
+    ):
+        adapter = cls("http://svc.local", "model", "voice_id", "English")
+        await adapter._client.aclose()
+        adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            health = await adapter.health()
+        finally:
+            await adapter._client.aclose()
+        assert health["backend"] == backend
+        assert health["engine"] == engine
+
+
+@pytest.mark.asyncio
+async def test_trained_configure_omits_num_steps() -> None:
+    # GPT-SoVITS has no diffusion sampler, so the trained adapter must NOT send
+    # num_steps even when asked (unlike the dots subclass it inherits from).
+    from nova_voice.inference.tts import GptSovitsTextToSpeech
+
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(__import__("json").loads(request.content))
+        return httpx.Response(200, content=b"\x01\x00\x02\x00")
+
+    adapter = GptSovitsTextToSpeech("http://trained.local", "gpt-sovits", "captain", "English")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        await adapter.configure(speaker="captain", language="English", num_steps=5)
+        await adapter.synthesize("hi", "Natural")
+    finally:
+        await adapter._client.aclose()
+
+    assert "num_steps" not in requests[0]
 
 
 @pytest.mark.asyncio

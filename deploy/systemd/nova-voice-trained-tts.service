@@ -1,0 +1,64 @@
+[Unit]
+Description=Nova Voice GPT-SoVITS trained-voice streaming runtime (Trained engine)
+After=network-online.target
+Wants=network-online.target
+# The Trained engine is mutually exclusive with the other TTS engine units: only
+# one TTS engine is GPU-resident at a time. Each engine unit Conflicts= the
+# others so starting one stops the rest; the switcher also stops every other
+# engine explicitly and the residency gate backs it up.
+Conflicts=nova-voice-tts.service nova-voice-dots-tts.service
+
+[Service]
+Type=simple
+User=antidamage
+Group=antidamage
+WorkingDirectory=/opt/nova-voice/current/services/trained_tts
+Environment=HOME=/home/antidamage
+Environment=HF_HOME=/home/antidamage/.cache/huggingface
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=PYTHONUNBUFFERED=1
+# Serving config (see services/trained_tts/server.py). GPT-SoVITS serves light
+# (~2 GB), so no LLM VRAM trim is needed by default (registry vram_profile=None).
+Environment=TRAINED_VOICES_DIR=/opt/nova-voice/trained-voices
+Environment=TRAINED_HOST=127.0.0.1
+# 8096: 8093 = web-search sidecar, 8094 = MemPalace, 8095 = dots.
+Environment=TRAINED_PORT=8096
+# server.py launches GPT-SoVITS's own api_v2.py as a child process and talks
+# to it on localhost. GPTSOVITS_ROOT is the checkout ops/install-trained-tts.sh
+# clones; GPTSOVITS_PYTHON is the interpreter INSIDE GPT-SoVITS's own conda
+# env (install.sh installs into an active conda env, not a venv at a fixed
+# path -- ops/install-trained-tts.sh prints the real path; fill it in here).
+# GPTSOVITS_API_PORT (api_v2.py's own bind port, loopback-only) defaults to
+# 9880 in server.py; override only if that collides with something else here.
+Environment=GPTSOVITS_ROOT=/opt/nova-voice/gptsovits/GPT-SoVITS
+Environment=GPTSOVITS_PYTHON=/home/antidamage/miniconda3/envs/nova-gptsovits/bin/python
+# The service self-warms behind a /health ready gate. Type=simple so systemd
+# start does not block on warmup; consumers must gate on GET /health
+# "ready": true before routing traffic.
+ExecStart=/opt/nova-voice/gptsovits/venv/bin/python /opt/nova-voice/current/services/trained_tts/server.py
+MemoryAccounting=yes
+MemoryHigh=6G
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=45
+KillMode=mixed
+LimitMEMLOCK=infinity
+TasksMax=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Trained-voice registry writes (upload/delete) and the model cache read.
+ReadWritePaths=/opt/nova-voice/trained-voices /home/antidamage/.cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=192.168.8.0/24
+
+[Install]
+WantedBy=multi-user.target

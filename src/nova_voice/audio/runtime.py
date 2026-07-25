@@ -51,6 +51,7 @@ from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService
+from nova_voice.tts_engines import engine_by_id
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import (
     apply_pronunciation_dictionary,
@@ -811,15 +812,14 @@ class SatelliteAudioRuntime:
         if not self._voice_enabled and self._conversations is not None:
             self._conversations.clear()
         # Each engine has its own speaker namespace: Classic (Qwen) uses the
-        # preset enum, Custom (dots.tts) uses a cloned-voice id from its voice
-        # registry. Configuring the resident adapter with the other engine's
+        # preset enum, Custom (dots.tts) a cloned-voice id, Trained (GPT-SoVITS)
+        # a checkpoint id. Configuring the resident adapter with another engine's
         # name makes every synthesis 404 ("unknown voice"), so the speaker is
-        # chosen per engine here rather than trusting one shared field.
-        engine_speaker = (
-            settings.custom_speaker
-            if getattr(self.tts, "engine", "classic") == "custom"
-            else settings.speaker.value
-        )
+        # chosen per engine here — from the engine registry — rather than
+        # trusting one shared field.
+        engine_speaker = engine_by_id(
+            getattr(self.tts, "engine", "classic")
+        ).resolve_speaker(settings)
         await self.tts.configure(
             speaker=engine_speaker,
             language=settings.language.value,

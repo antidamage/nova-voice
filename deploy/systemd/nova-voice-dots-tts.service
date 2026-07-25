@@ -2,11 +2,11 @@
 Description=Nova Voice dots.tts custom-voice streaming runtime (Custom engine)
 After=network-online.target
 Wants=network-online.target
-# The Custom engine is mutually exclusive with the Classic Qwen TTS unit: only
+# The Custom engine is mutually exclusive with the other TTS engine units: only
 # one TTS engine is GPU-resident at a time (see services/dots_tts). The engine
-# switch stops the inactive unit before starting this one; systemd does not
+# switch stops the inactive units before starting this one; systemd does not
 # enforce the exclusion so the switch tooling and the residency gate must.
-Conflicts=nova-voice-tts.service
+Conflicts=nova-voice-tts.service nova-voice-trained-tts.service
 
 [Service]
 Type=simple

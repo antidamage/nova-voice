@@ -17,7 +17,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from nova_voice.agent_settings import AgentSettings
 from nova_voice.audio.bootstrap import build_audio_runtime
@@ -83,6 +83,12 @@ from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.telemetry import StructuralTelemetry
+from nova_voice.tts_engines import (
+    dashboard_engines_manifest,
+    engine_by_id,
+    engine_for_backend,
+    engine_ids,
+)
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
 
 logger = logging.getLogger(__name__)
@@ -102,9 +108,17 @@ class VoicePreviewRequest(BaseModel):
 
 
 class EngineSwitchRequest(BaseModel):
-    # Dashboard-facing engine module names; "classic" = Qwen presets (vllm
-    # backend), "custom" = dots.tts cloned voices (dots backend).
-    engine: Literal["classic", "custom"]
+    # Dashboard-facing engine id, validated against the engine registry
+    # (classic | custom | trained) rather than a hardcoded pair, so a new engine
+    # is accepted the moment it is registered in nova_voice.tts_engines.
+    engine: str
+
+    @field_validator("engine")
+    @classmethod
+    def _known_engine(cls, value: str) -> str:
+        if value not in engine_ids():
+            raise ValueError(f"unknown engine: {value!r}")
+        return value
 
 
 class SpeakerProfileUpdateRequest(BaseModel):
@@ -793,32 +807,42 @@ def create_app(
             current.model_dump(mode="json", by_alias=True) if current is not None else None
         )
         # Engine awareness: the dashboard renders one engine's control module at a
-        # time (Classic Qwen presets vs Custom dots.tts cloned voices). In Custom
-        # mode the selectable voices ARE the registered clones, so the classic
+        # time (Classic presets vs a per-engine voice catalogue). When the
+        # resident engine has one (Custom clones, Trained checkpoints), the
+        # selectable voices ARE its registered entries, so the classic
         # preset/accent/emotion controls are hidden by the UI.
         cfg = get_settings()
-        engine = "custom" if cfg.tts_backend == "dots" else "classic"
-        payload["engine"] = engine
-        payload["engines"] = [
-            {"id": "classic", "label": "Classic presets"},
-            {"id": "custom", "label": "Custom voices"},
-        ]
-        if engine == "custom":
-            custom = await _dots_custom_voices()
-            payload["customVoices"] = custom
+        spec = engine_for_backend(cfg.tts_backend)
+        payload["engine"] = spec.id
+        payload["engines"] = dashboard_engines_manifest()
+        if spec.voices_base_url_setting is not None:
+            catalogue = await _engine_voices(spec.id)
+            payload["engineVoices"] = catalogue
             payload["voices"] = [
                 {
                     "value": voice["id"],
                     "label": voice.get("name", voice["id"]),
-                    "detail": f"custom voice · {voice.get('language', 'en')}",
+                    "detail": f"{spec.label.lower()} · {voice.get('language', 'en')}",
                 }
-                for voice in custom
+                for voice in catalogue
             ]
         return payload
 
-    async def _dots_custom_voices() -> list[dict]:
-        """List custom voices from the dots.tts service (empty if unreachable)."""
-        base = get_settings().dots_stream_base_url
+    def _voices_base_url(engine_id: str) -> str | None:
+        """The resolved base URL of an engine's voice-catalogue service, if any."""
+        try:
+            spec = engine_by_id(engine_id)
+        except KeyError:
+            return None
+        if spec.voices_base_url_setting is None:
+            return None
+        return getattr(get_settings(), spec.voices_base_url_setting)
+
+    async def _engine_voices(engine_id: str) -> list[dict]:
+        """List an engine's voice catalogue (empty if unreachable or it has none)."""
+        base = _voices_base_url(engine_id)
+        if base is None:
+            return []
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{base}/v1/voices")
@@ -826,10 +850,6 @@ def create_app(
                 return response.json().get("voices", [])
         except (httpx.HTTPError, ValueError):
             return []
-
-    @app.get("/v1/voices/custom")
-    async def list_custom_voices() -> dict:
-        return {"voices": await _dots_custom_voices()}
 
     def _engine_switch_status() -> dict | None:
         """The root switcher's progress report, or None when never run."""
@@ -851,11 +871,8 @@ def create_app(
         """
         cfg = get_settings()
         payload: dict = {
-            "engine": "custom" if cfg.tts_backend == "dots" else "classic",
-            "engines": [
-                {"id": "classic", "label": "Classic presets"},
-                {"id": "custom", "label": "Custom voices"},
-            ],
+            "engine": engine_for_backend(cfg.tts_backend).id,
+            "engines": dashboard_engines_manifest(),
         }
         switch = _engine_switch_status()
         if switch is not None:
@@ -876,10 +893,12 @@ def create_app(
         the status file. Expect the API to go down and come back mid-switch.
         """
         cfg = get_settings()
-        current = "custom" if cfg.tts_backend == "dots" else "classic"
+        current = engine_for_backend(cfg.tts_backend).id
         if payload.engine == current:
             return {"ok": True, "engine": current, "changed": False}
-        target = "dots" if payload.engine == "custom" else "classic"
+        # Write the engine id as the target; the root-side switcher resolves it
+        # to a unit/profile/backend through the same engine registry manifest.
+        target = payload.engine
         request_path = cfg.engine_switch_request_path
         body = json.dumps(
             {"target": target, "requestedAt": datetime.now().astimezone().isoformat()}
@@ -896,35 +915,6 @@ def create_app(
             ) from error
         logger.info("engine switch to %s requested", target)
         return {"ok": True, "engine": payload.engine, "changed": True}
-
-    @app.post("/v1/voices/custom", include_in_schema=False)
-    async def build_custom_voice(request: Request) -> dict:
-        """Relay a multipart "build voice" upload through to the dots service."""
-        base = get_settings().dots_stream_base_url
-        body = await request.body()
-        headers = {"content-type": request.headers.get("content-type", "")}
-        try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
-                response = await client.post(
-                    f"{base}/v1/voices", content=body, headers=headers
-                )
-        except httpx.HTTPError as error:
-            raise HTTPException(status_code=502, detail="dots.tts service unreachable") from error
-        if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
-
-    @app.delete("/v1/voices/custom/{voice_id}")
-    async def delete_custom_voice(voice_id: str) -> dict:
-        base = get_settings().dots_stream_base_url
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.delete(f"{base}/v1/voices/{voice_id}")
-        except httpx.HTTPError as error:
-            raise HTTPException(status_code=502, detail="dots.tts service unreachable") from error
-        if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return response.json()
 
     @app.post("/v1/multimodal/shares", status_code=201)
     async def create_multimodal_share(request: MultimodalShareApiRequest) -> dict:
@@ -1529,15 +1519,17 @@ def create_app(
         instruction = (
             voice.style_instruction() if voice is not None else "Natural conversational delivery."
         )
-        # The Custom engine self-warms for minutes after a (re)start; a probe
-        # here turns that window into an explicit "warming up" message instead
-        # of an opaque synthesis failure.
-        if getattr(runtime.tts, "engine", "classic") == "custom":
+        # Ready-gate engines (Custom, Trained) self-warm for minutes after a
+        # (re)start; a probe here turns that window into an explicit "warming
+        # up" message instead of an opaque synthesis failure. Classic has no
+        # warmup gate (health_style "http-200"), so it skips this probe.
+        resident_id = getattr(runtime.tts, "engine", "classic")
+        if engine_by_id(resident_id).health_style == "ready-gate":
             probe = await runtime.tts.health()
             if not probe.get("ok"):
                 reason = probe.get("error") or "engine unavailable"
                 raise HTTPException(
-                    status_code=503, detail=f"Custom voice engine is not ready: {reason}"
+                    status_code=503, detail=f"{resident_id} voice engine is not ready: {reason}"
                 )
         try:
             pcm16, sample_rate = await runtime.tts.synthesize(
@@ -1568,6 +1560,60 @@ def create_app(
             media_type="audio/wav",
             headers={"Cache-Control": "no-store"},
         )
+
+    # Registered after /v1/voices/preview: FastAPI matches routes in
+    # registration order, and /v1/voices/{engine_id} would otherwise swallow
+    # the literal "preview" as an engine_id.
+    @app.get("/v1/voices/{engine_id}")
+    async def list_engine_voices(engine_id: str) -> dict:
+        if _voices_base_url(engine_id) is None:
+            raise HTTPException(status_code=404, detail=f"engine has no voice catalogue: {engine_id!r}")
+        return {"voices": await _engine_voices(engine_id)}
+
+    @app.post("/v1/voices/{engine_id}", include_in_schema=False)
+    async def build_engine_voice(engine_id: str, request: Request) -> dict:
+        """Relay a multipart voice-catalogue upload through to the engine's service.
+
+        Generic across engines: for Custom this is raw sample clips the dots
+        service builds into a reference.wav (CPU ffmpeg); for Trained this is a
+        pre-built checkpoint bundle the trained service just stores. Either way
+        the dashboard's upload form posts multipart/form-data here unchanged and
+        this relays the body+content-type byte-for-byte, exactly as a user would
+        via the engine's own API.
+        """
+        base = _voices_base_url(engine_id)
+        if base is None:
+            raise HTTPException(status_code=404, detail=f"engine has no voice catalogue: {engine_id!r}")
+        body = await request.body()
+        headers = {"content-type": request.headers.get("content-type", "")}
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(
+                    f"{base}/v1/voices", content=body, headers=headers
+                )
+        except httpx.HTTPError as error:
+            raise HTTPException(
+                status_code=502, detail=f"{engine_id} voice service unreachable"
+            ) from error
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
+
+    @app.delete("/v1/voices/{engine_id}/{voice_id}")
+    async def delete_engine_voice(engine_id: str, voice_id: str) -> dict:
+        base = _voices_base_url(engine_id)
+        if base is None:
+            raise HTTPException(status_code=404, detail=f"engine has no voice catalogue: {engine_id!r}")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(f"{base}/v1/voices/{voice_id}")
+        except httpx.HTTPError as error:
+            raise HTTPException(
+                status_code=502, detail=f"{engine_id} voice service unreachable"
+            ) from error
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
 
     @app.post("/v1/settings/refresh")
     async def refresh_voice_settings() -> dict:
