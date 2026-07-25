@@ -244,10 +244,21 @@ class TrainingService:
                 f"bundle is incomplete (missing {', '.join(missing)}) -- train this set first"
             )
         target = Path(TRAINED_VOICES_DIR) / (voice_id or training_set.id)
-        target.mkdir(parents=True, exist_ok=True)
-        for item in bundle.iterdir():
-            if item.is_file():
-                shutil.copy2(item, target / item.name)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for item in bundle.iterdir():
+                if item.is_file():
+                    shutil.copy2(item, target / item.name)
+        except OSError as error:
+            # The catalogue belongs to the engine's service account while this
+            # copy runs as the orchestrator, so a permissions mismatch here is
+            # the likely cause -- say so instead of surfacing a bare errno as a
+            # 500 with nothing to act on.
+            raise TrainingError(
+                f"could not publish into {target.parent} ({error.strerror or error}). "
+                "Run ops/install-training.sh on the voice host, which grants the "
+                "orchestrator account write access to the trained-voices catalogue."
+            ) from error
         return {"ok": True, "voiceId": target.name, "path": str(target)}
 
     def delete(self, set_id: str) -> dict[str, Any]:

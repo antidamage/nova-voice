@@ -41,6 +41,20 @@ install -m 0644 "$SRC/deploy/systemd/nova-voice-training-switch.path" /etc/syste
 log "ensuring training-sets directory is writable by $ORCHESTRATOR_USER"
 install -d -o "$ORCHESTRATOR_USER" -g "$ORCHESTRATOR_USER" -m 0755 "$TRAINING_SETS_DIR"
 
+# Publishing a finished bundle copies it into the trained-voices catalogue. That
+# directory belongs to the engine's service account (which serves from it), but
+# the copy is performed by the orchestrator -- so it needs group write, or
+# "Publish as voice" fails with a bare PermissionError. Group-writable with
+# setgid, rather than a chown, so both accounts keep working.
+TRAINED_VOICES_DIR=${TRAINED_VOICES_DIR:-/opt/nova-voice/trained-voices}
+if [[ -d "$TRAINED_VOICES_DIR" ]]; then
+  log "making $TRAINED_VOICES_DIR group-writable for $ORCHESTRATOR_USER"
+  chgrp -R "$ORCHESTRATOR_USER" "$TRAINED_VOICES_DIR"
+  chmod g+rwxs "$TRAINED_VOICES_DIR"
+  find "$TRAINED_VOICES_DIR" -mindepth 1 -type d -exec chmod g+rwxs {} +
+  find "$TRAINED_VOICES_DIR" -mindepth 1 -type f -exec chmod g+rw {} +
+fi
+
 # GPT-SoVITS writes inside its own checkout at runtime -- most importantly it
 # lazily downloads the Faster-Whisper ASR model to a RELATIVE path,
 # tools/asr/models/, resolved against the repo root. The checkout belongs to the

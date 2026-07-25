@@ -151,6 +151,33 @@ def test_publish_copies_the_bundle(service: TrainingService, tmp_path: Path):
     assert (target_root / "done" / "gpt.ckpt").is_file()
 
 
+def test_publish_reports_a_permission_problem_actionably(service: TrainingService, tmp_path: Path):
+    """The catalogue belongs to the engine's account while publish runs as the
+    orchestrator, so a permissions mismatch must not surface as a bare 500."""
+    import nova_voice.training.service as service_module
+
+    service.create("blocked", "Blocked", "en")
+    live = service.store.get("blocked")
+    live.bundle_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("gpt.ckpt", "sovits.pth", "reference.wav"):
+        (live.bundle_dir / name).write_bytes(b"x")
+
+    original = service_module.TRAINED_VOICES_DIR
+    service_module.TRAINED_VOICES_DIR = str(tmp_path / "catalogue")
+
+    def deny(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    original_mkdir = Path.mkdir
+    Path.mkdir = deny  # type: ignore[method-assign]
+    try:
+        with pytest.raises(TrainingError, match="could not publish"):
+            service.publish("blocked")
+    finally:
+        Path.mkdir = original_mkdir  # type: ignore[method-assign]
+        service_module.TRAINED_VOICES_DIR = original
+
+
 def test_samples_cannot_change_mid_run(service: TrainingService):
     service.create("busy", "Busy", "en")
     service.store.get("busy").update_state(status="training")
