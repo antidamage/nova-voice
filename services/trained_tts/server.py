@@ -33,6 +33,13 @@ Environment:
     GPTSOVITS_API_PORT   port to launch/reach api_v2.py on (default: 9880,
                           api_v2.py's own default)
     GPTSOVITS_TTS_CONFIG optional -c/--tts_config path forwarded to api_v2.py
+    TRAINED_TEXT_SPLIT_METHOD  api_v2 cut method (default: cut0 -- no splitting;
+                          api_v2's own cut5 default splits on every comma)
+    TRAINED_FRAGMENT_INTERVAL  seconds of silence between fragments (default 0.15)
+    TRAINED_SENTENCE_SPLIT    1 to synthesize one request per sentence, so "." / "?"
+                          / "!" get a real rest while commas do not (default 1)
+    TRAINED_SENTENCE_PAUSE_MS  EXTRA silence between sentences on top of the ~325 ms
+                          the renders already carry (default 0 -- see note below)
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,10 +106,68 @@ GPTSOVITS_TTS_CONFIG = os.environ.get("GPTSOVITS_TTS_CONFIG", "")
 # verify against your installed version (see README-gptsovits.md) and set
 # NOVA_VOICE_TRAINED_SAMPLE_RATE (config.py) to match if it differs.
 SAMPLE_RATE = int(_env("TRAINED_SAMPLE_RATE", "32000"))
+# How api_v2.py chops the reply before synthesis. Its own default is "cut5",
+# which splits on EVERY comma (text_segmentation_method.py's punctuation set
+# includes ","), synthesizes each fragment as an independent inference, and
+# concatenates them. A vocative comma therefore turns a name into a standalone
+# one-word utterance with its own onset and pitch reset -- audibly a new
+# sentence rather than a short rest. "cut0" does not split at all and keeps the
+# text verbatim, so the model sees one contour and renders a comma as the short
+# rest it is. Note "cut4" is NOT the safer middle ground it looks like: it splits
+# on "." via re.split, which discards the periods, costing sentence-final
+# intonation. If a long reply ever drifts (GPT-SoVITS degrades over a long single
+# pass) prefer cut1/cut2, which batch by sentence/length and preserve punctuation.
+TEXT_SPLIT_METHOD = _env("TRAINED_TEXT_SPLIT_METHOD", "cut0")
+# Silence inserted between fragments. Moot under cut0 (there is only ever one
+# fragment) but set explicitly so switching TEXT_SPLIT_METHOD to a splitting
+# method does not silently reintroduce api_v2's 0.3 s seam.
+FRAGMENT_INTERVAL = float(_env("TRAINED_FRAGMENT_INTERVAL", "0.15"))
+# cut0 alone is the opposite extreme from cut5: no comma holes, but sentences run
+# together because a single pass under-renders the rest at "." / "?" / "!". None of
+# api_v2's stock methods split on sentence-final punctuation *while keeping it*
+# (cut4 discards the "."; cut1/cut2 group by a set that includes commas), so we
+# sentence-split here instead and synthesize one cut0 request per sentence. Each
+# sentence keeps its terminator, so the model still renders question intonation.
+SENTENCE_SPLIT = _env("TRAINED_SENTENCE_SPLIT", "1") not in {"0", "false", "False", ""}
+# EXTRA silence between sentences, on top of what the audio already carries. Each
+# sentence's own render comes with leading/trailing near-silence, which measured
+# ~325-365 ms of boundary gap by itself -- already a natural sentence rest. So this
+# defaults to 0: adding the obvious-looking 220 ms here pushed real boundary gaps to
+# 545-585 ms, i.e. back to roughly the cut5 hole this whole change set removed.
+# Raise only against a measurement (ffmpeg silencedetect on the /v1/audio/speech
+# output), never by feel, and keep intra-sentence comma rests (~60-100 ms) as the
+# contrast you are tuning against.
+SENTENCE_PAUSE_MS = int(_env("TRAINED_SENTENCE_PAUSE_MS", "0"))
+# Sentence-final punctuation, kept with the sentence it ends. The digit guard
+# stops decimals splitting; the orchestrator normalises most numbers to words
+# before they reach us, but not all.
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?…])(?<!\d\.)\s+(?=[^\s])")
 # GPT-SoVITS has no diffusion-step control (that's a dots.tts-specific knob);
 # sample_steps here is its own unrelated decoder quality/speed parameter,
 # left at api_v2.py's default unless overridden.
 API_STARTUP_TIMEOUT_S = float(_env("GPTSOVITS_API_STARTUP_TIMEOUT_S", "120"))
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split into sentences, keeping each terminator on its own sentence."""
+    if not SENTENCE_SPLIT:
+        return [text]
+    parts = [part.strip() for part in _SENTENCE_END_RE.split(text) if part.strip()]
+    # A "sentence" of pure punctuation would make api_v2 return no audio and fail
+    # the whole reply, so fold anything without a speakable character back into
+    # its predecessor.
+    merged: list[str] = []
+    for part in parts:
+        if merged and not any(character.isalnum() for character in part):
+            merged[-1] = f"{merged[-1]} {part}"
+        else:
+            merged.append(part)
+    return merged or [text]
+
+
+def _silence_bytes(milliseconds: int) -> bytes:
+    """PCM16 mono silence at the engine's native rate."""
+    return b"\x00" * (2 * int(SAMPLE_RATE * milliseconds / 1000))
 
 
 class SpeechRequest(BaseModel):
@@ -242,26 +308,44 @@ class TrainedService:
         # mirrors the same accepted risk in dots.tts's server.py.
         async with self._gpu_lock:
             await self._ensure_weights_loaded(selected)
-            request = {
-                "text": text,
-                "text_lang": _api_language(language or selected.language),
-                "ref_audio_path": str(selected.reference_path),
-                "prompt_lang": _api_language(selected.language),
-                "prompt_text": selected.reference_text,
-                "media_type": "raw",
-                "streaming_mode": 1,
-            }
-            async with self._client.stream("POST", f"{self._api_base}/tts", json=request) as response:
-                if response.status_code >= 400:
-                    detail = (await response.aread()).decode("utf-8", "replace")
-                    raise HTTPException(status_code=502, detail=f"GPT-SoVITS /tts failed: {detail}")
-                emitted = False
-                async for chunk in response.aiter_bytes():
-                    if chunk:
-                        emitted = True
-                        yield chunk
-                if not emitted:
-                    raise HTTPException(status_code=500, detail="no audio produced")
+            emitted = False
+            sentences = _split_sentences(text)
+            pause = (
+                _silence_bytes(SENTENCE_PAUSE_MS)
+                if len(sentences) > 1 and SENTENCE_PAUSE_MS > 0
+                else b""
+            )
+            for index, sentence in enumerate(sentences):
+                if index and pause:
+                    yield pause
+                async for chunk in self._stream_one(sentence, language, selected):
+                    emitted = True
+                    yield chunk
+            if not emitted:
+                raise HTTPException(status_code=500, detail="no audio produced")
+
+    async def _stream_one(self, text: str, language: str | None, selected) -> AsyncIterator[bytes]:
+        """Stream one sentence. Caller holds the lock and owns the emitted check."""
+        request = {
+            "text": text,
+            "text_lang": _api_language(language or selected.language),
+            "ref_audio_path": str(selected.reference_path),
+            "prompt_lang": _api_language(selected.language),
+            "prompt_text": selected.reference_text,
+            "media_type": "raw",
+            "streaming_mode": 1,
+            # Set explicitly: api_v2's defaults split on commas and pad the
+            # seams (see TEXT_SPLIT_METHOD above), which fragments vocatives.
+            "text_split_method": TEXT_SPLIT_METHOD,
+            "fragment_interval": FRAGMENT_INTERVAL,
+        }
+        async with self._client.stream("POST", f"{self._api_base}/tts", json=request) as response:
+            if response.status_code >= 400:
+                detail = (await response.aread()).decode("utf-8", "replace")
+                raise HTTPException(status_code=502, detail=f"GPT-SoVITS /tts failed: {detail}")
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    yield chunk
 
 
 service = TrainedService()
@@ -286,6 +370,10 @@ def health() -> JSONResponse:
             "ready": service.ready,
             "backend": "gpt-sovits",
             "sampleRate": service.sample_rate,
+            "textSplitMethod": TEXT_SPLIT_METHOD,
+            "fragmentInterval": FRAGMENT_INTERVAL,
+            "sentenceSplit": SENTENCE_SPLIT,
+            "sentencePauseMs": SENTENCE_PAUSE_MS,
             "streaming": True,
             "voices": [v.id for v in service.registry.list()],
             "loadError": service.load_error,
