@@ -1,0 +1,15 @@
+[Unit]
+# Root-side trigger for starting/stopping a training run.
+#
+# The orchestrator cannot do this itself: nova-voice.service runs with
+# NoNewPrivileges=yes, which blocks setuid entirely, so sudo is unavailable to it
+# by design. Same mechanism the TTS engine switch uses -- the unprivileged
+# service writes a request file it CAN write, and a root-side unit acts on it.
+Description=Watch for Nova voice-training start/stop requests
+
+[Path]
+PathExists=/var/lib/nova-voice/training-request.json
+Unit=nova-voice-training-switch.service
+
+[Install]
+WantedBy=multi-user.target

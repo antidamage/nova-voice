@@ -1,0 +1,12 @@
+# This repository is edited on Windows and deployed to Linux. Anything the voice
+# host executes or parses must have LF endings: a CRLF shell script fails at its
+# first line with `set: pipefail` (bash reads the \r as part of the option), and
+# systemd unit directives break the same way. Force LF regardless of the editing
+# platform's defaults.
+*.sh text eol=lf
+*.service text eol=lf
+*.path text eol=lf
+*.timer text eol=lf
+*.conf text eol=lf
+*.env text eol=lf
+*.py text eol=lf

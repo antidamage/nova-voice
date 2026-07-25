@@ -39,7 +39,15 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache
+# training-sets holds uploaded samples, extracted features and checkpoints for
+# voice fine-tuning; trained-voices receives a published bundle. Both are
+# written by the orchestrator (and by the training worker it spawns), so
+# ProtectSystem=strict has to be told about them explicitly.
+# /opt/nova-voice/gptsovits is writable because the GPT-SoVITS trainers write
+# temporary configs and caches inside their own checkout. Note ProtectHome=yes
+# below: /home is an empty tmpfs in this service's namespace, so nothing the
+# orchestrator or the training worker needs may live in a user home.
+ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache /opt/nova-voice/training-sets /opt/nova-voice/trained-voices /opt/nova-voice/gptsovits
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
