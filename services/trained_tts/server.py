@@ -57,6 +57,37 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+# api_v2.py validates text_lang/prompt_lang against a short per-version list and
+# rejects anything else outright ("text_lang: English is not supported in version
+# v2"), failing the request AFTER the response has started streaming. Callers
+# reasonably send whatever their own vocabulary uses -- "en", "en-NZ", "English",
+# or GPT-SoVITS's own Chinese display strings -- so normalise here rather than
+# requiring every caller to know api_v2's spelling.
+_LANGUAGE_ALIASES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("en", "eng", "english", "英文"), "en"),
+    (("zh", "cmn", "chinese", "mandarin", "中文"), "all_zh"),
+    (("ja", "jp", "japanese", "日文"), "all_ja"),
+    (("ko", "kor", "korean", "韩文"), "all_ko"),
+    (("yue", "cantonese", "粤语"), "all_yue"),
+)
+
+
+def _api_language(language: str | None) -> str:
+    """Map a caller's language to the code api_v2.py accepts.
+
+    Falls back to "auto" -- api_v2 detects the language itself -- because a
+    wrong-but-plausible guess is worse than letting it decide.
+    """
+    if not language:
+        return "auto"
+    token = language.strip().casefold().replace("_", "-")
+    base = token.split("-", 1)[0]
+    for aliases, code in _LANGUAGE_ALIASES:
+        if token in aliases or base in aliases:
+            return code
+    return "auto"
+
+
 VOICES_DIR = _env("TRAINED_VOICES_DIR", "/opt/nova-voice/trained-voices")
 GPTSOVITS_API_URL = os.environ.get("GPTSOVITS_API_URL", "").rstrip("/") or None
 GPTSOVITS_ROOT = _env("GPTSOVITS_ROOT", "")
@@ -117,8 +148,24 @@ class TrainedService:
         cmd = [GPTSOVITS_PYTHON, api_script, "-a", "127.0.0.1", "-p", str(GPTSOVITS_API_PORT)]
         if GPTSOVITS_TTS_CONFIG:
             cmd += ["-c", GPTSOVITS_TTS_CONFIG]
+        # GPT-SoVITS imports across its own tree from two roots -- the checkout
+        # (``from GPT_SoVITS... import``) and GPT_SoVITS/ itself (``import
+        # text``) -- and running a script by path puts only that script's
+        # directory on sys.path. Without both, api_v2.py dies during import and
+        # the engine never becomes ready.
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [GPTSOVITS_ROOT, os.path.join(GPTSOVITS_ROOT, "GPT_SoVITS")]
+                + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+            ),
+            "PYTHONUNBUFFERED": "1",
+        }
         try:
-            self._process = subprocess.Popen(cmd, cwd=GPTSOVITS_ROOT)
+            # Inherit stdout/stderr rather than discarding them: when the child
+            # exits during import, its traceback is the only useful diagnostic,
+            # and swallowing it leaves nothing but "exited early (code 1)".
+            self._process = subprocess.Popen(cmd, cwd=GPTSOVITS_ROOT, env=env)
         except OSError as error:
             self.load_error = f"failed to launch api_v2.py: {error}"
             return
@@ -197,9 +244,9 @@ class TrainedService:
             await self._ensure_weights_loaded(selected)
             request = {
                 "text": text,
-                "text_lang": language or selected.language,
+                "text_lang": _api_language(language or selected.language),
                 "ref_audio_path": str(selected.reference_path),
-                "prompt_lang": selected.language,
+                "prompt_lang": _api_language(selected.language),
                 "prompt_text": selected.reference_text,
                 "media_type": "raw",
                 "streaming_mode": 1,

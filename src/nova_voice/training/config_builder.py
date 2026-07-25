@@ -234,4 +234,15 @@ def training_env(plan: TrainingPlan, base: dict[str, str]) -> dict[str, str]:
         "CUDA_VISIBLE_DEVICES": plan.gpu_numbers,
         "hz": "25hz",
         "PYTHONUNBUFFERED": "1",
+        # RESUME depends on this. PyTorch >=2.6 defaults torch.load to
+        # weights_only=True, and the Lightning checkpoints these trainers write
+        # embed a pathlib.PosixPath in their hyperparameters -- so continuing a
+        # run fails with "Weights only load failed ... Unsupported global: GLOBAL
+        # pathlib.PosixPath". The restriction exists to stop untrusted
+        # checkpoints executing code on load; these are produced by this same
+        # pipeline, on this host, from the owner's own samples, so there is no
+        # untrusted input to protect against. Scoped to the training
+        # subprocesses -- it is not set for the serving stack, which does load
+        # third-party checkpoints.
+        "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1",
     }

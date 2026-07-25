@@ -5,26 +5,28 @@ model resident. They cannot coexist on one 11 GB card, so training mode stops
 the resident models for the duration and restores exactly what was running
 before.
 
-The restore path leans on systemd's own dependency graph rather than
-reconstructing state by hand. ``nova-voice.service``'s engine drop-in declares
-``Requires=nova-voice-llm.service nova-voice-<engine>-tts.service``, which means:
+Both halves of the handover are declared on the training unit rather than
+performed here, so no code path can skip them:
 
-* stopping either model unit cascade-stops ``nova-voice`` (this is why
-  restarting a model unit on its own is never safe -- see the deps note in
-  ops/), and
-* starting ``nova-voice`` alone pulls both model units back up, whichever engine
-  is selected at that moment.
+* ``Conflicts=`` against the orchestrator, the LLM and every engine unit, so
+  starting a run stops the resident models, and
+* ``OnSuccess=``/``OnFailure=nova-voice.service``, so finishing a run -- however
+  it finishes, including a crash -- starts the orchestrator again, whose
+  ``Requires=`` pulls the LLM and the selected engine back up.
 
-So entering training mode is "stop the orchestrator, then the models", and
-leaving it is simply "start the orchestrator". The snapshot exists to detect and
-report drift, and so a crash mid-training can be recovered from a file rather
-than from memory.
+That leaves this module two jobs. It records a snapshot so the dashboard can
+show that training mode is active and a crash is diagnosable from a file rather
+than from memory; and it provides :meth:`TrainingMode.wait_for_gpu`, because
+systemd stops the conflicting units *asynchronously* -- the run would otherwise
+start GPU work while several gigabytes are still resident and die immediately
+with a CUDA out-of-memory error.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +34,25 @@ from pathlib import Path
 ORCHESTRATOR = "nova-voice.service"
 LLM_UNIT = "nova-voice-llm.service"
 ENGINE_REGISTRY = Path("/etc/nova-voice/engine-registry.json")
+
+# Free VRAM below this means something is still resident and training would OOM
+# almost immediately. Sized for the smallest card this runs on (11 GB) with the
+# voice stack down.
+MIN_FREE_MIB = 6000
+
+
+def gpu_free_mib() -> int | None:
+    """Free VRAM in MiB, or None when it cannot be determined (no nvidia-smi)."""
+    result = _run(
+        ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
 
 
 def _run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -121,6 +142,42 @@ class TrainingMode:
 
         self._stop_stack()
         return snapshot
+
+    def wait_for_gpu(self, timeout: float = 180.0, poll: float = 3.0) -> bool:
+        """Block until the resident voice models have actually released the GPU.
+
+        Entering training mode is asynchronous: systemd begins stopping the
+        conflicting units when the training unit starts, but shutting down an LLM
+        and a TTS model takes seconds to tens of seconds, and the memory is not
+        free until those processes exit. Starting GPU work immediately races
+        them and loses -- the first pipeline step dies with a CUDA
+        out-of-memory naming the still-running processes.
+
+        Waits for the units to report inactive, which is the authoritative
+        signal, then confirms the card actually has memory free.
+        """
+        units = [ORCHESTRATOR, LLM_UNIT]
+        registry_unit = selected_engine_unit()
+        if registry_unit:
+            units.append(registry_unit)
+        # The engine units are mutually exclusive but any of them could be up.
+        if ENGINE_REGISTRY.is_file():
+            try:
+                for entry in json.loads(ENGINE_REGISTRY.read_text(encoding="utf-8")):
+                    if entry["unit"] not in units:
+                        units.append(entry["unit"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not any(_is_active(unit) for unit in units):
+                # Units are down; give the driver a moment to reclaim, then check.
+                time.sleep(poll)
+                if gpu_free_mib() is None or (gpu_free_mib() or 0) >= MIN_FREE_MIB:
+                    return True
+            time.sleep(poll)
+        return False
 
     def _stop_stack(self) -> None:
         """No-op by design: systemd already stopped the stack.
