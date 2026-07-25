@@ -122,7 +122,12 @@ default_channels:
   - conda-forge
 CONDARC
 
-sudo -u "$SERVICE_USER" bash -lc "
+# TERM=xterm because GPT-SoVITS's install.sh draws progress with `tput cuu1`
+# (cursor-up). Over a TTY-less SSH command TERM is unset or "unknown", tput
+# errors, and upstream's own error trap aborts the install -- after the 4.4 GB
+# model download has already succeeded. xterm is the cheapest terminfo entry
+# that actually has the cuu1 capability (TERM=dumb does not).
+sudo -u "$SERVICE_USER" TERM=xterm bash -lc "
   set -e
   eval \"\$('$CONDA_BIN' shell.bash hook)\"
   conda activate '$CONDA_ENV_NAME'
