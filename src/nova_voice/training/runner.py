@@ -236,6 +236,13 @@ class TrainingRunner:
 
         # The GPU handover happens as late as possible and is always undone.
         self.mode.enter()
+        self._stage("gpu", "Waiting for the voice stack to release the GPU")
+        if not self.mode.wait_for_gpu():
+            raise RuntimeError(
+                "the voice stack did not release the GPU within the timeout -- something is "
+                "still holding VRAM. Check `systemctl status nova-voice.service` and nvidia-smi "
+                "on the voice host."
+            )
         self.log("training mode: voice stack stopped, GPU released")
         try:
             self.prepare(env)
@@ -376,6 +383,24 @@ def _wav_seconds(path: Path) -> float:
         return 0.0
 
 
+def _reference_score(text: str) -> float:
+    """Rank a candidate prompt transcript. Higher is better.
+
+    Counts DISTINCT words, not total. Faster-Whisper loops on some inputs and
+    emits the same phrase over and over ("guess it's your lucky day" x7), which a
+    plain word count actively prefers -- and a transcript that does not match its
+    audio degrades every generation, since GPT-SoVITS uses this text as the
+    prompt. A heavily repeated transcript is also a signal the audio itself is
+    unusual, so such clips are pushed down rather than merely tied.
+    """
+    words = text.split()
+    if not words:
+        return 0.0
+    unique = len(set(word.casefold() for word in words))
+    repetition = unique / len(words)
+    return unique * (1.0 if repetition >= 0.5 else repetition)
+
+
 def _choose_reference(sliced_dir: Path, transcript: Path | None) -> tuple[Path | None, str]:
     """Pick the clip that will prompt every future generation.
 
@@ -401,15 +426,15 @@ def _choose_reference(sliced_dir: Path, transcript: Path | None) -> tuple[Path |
     fallback: tuple[float, Path, str] | None = None
     for wav in sorted(sliced_dir.glob("*.wav")):
         seconds = _wav_seconds(wav)
-        words = len(texts.get(wav.name, "").split())
-        candidate = (float(words), wav, texts.get(wav.name, ""))
+        text = texts.get(wav.name, "")
+        score = _reference_score(text)
         if REFERENCE_MIN_SECONDS <= seconds <= REFERENCE_MAX_SECONDS:
-            if best is None or candidate[0] > best[0]:
-                best = candidate
+            if best is None or score > best[0]:
+                best = (score, wav, text)
         elif fallback is None or seconds > fallback[0]:
             # Nothing in band: keep the longest clip we saw, so a set of very
             # short samples still yields the best available prompt.
-            fallback = (seconds, wav, texts.get(wav.name, ""))
+            fallback = (seconds, wav, text)
 
     if best is not None:
         return best[1], best[2]

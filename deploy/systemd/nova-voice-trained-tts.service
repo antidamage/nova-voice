@@ -52,7 +52,12 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 # Trained-voice registry writes (upload/delete) and the model cache read.
-ReadWritePaths=/opt/nova-voice/trained-voices /home/antidamage/.cache
+# The GPT-SoVITS checkout is writable because its code saves to paths relative
+# to the working directory (process_ckpt.my_save writes "<timestamp>.pth" into
+# the cwd before moving it) and caches inside its own tree. With
+# ProtectSystem=strict and the checkout read-only, api_v2.py exits during startup
+# and the engine never becomes ready.
+ReadWritePaths=/opt/nova-voice/trained-voices /opt/nova-voice/gptsovits /home/antidamage/.cache
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK

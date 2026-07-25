@@ -209,6 +209,37 @@ class TestTrainingMode:
         assert again.orchestrator_active is True
         assert mode.read_snapshot().entered_at == "t0"
 
+    def test_wait_for_gpu_blocks_until_the_models_are_gone(self, tmp_path: Path, monkeypatch):
+        """systemd stops the conflicting units asynchronously, so a run that
+        starts GPU work immediately OOMs against models that are still resident."""
+        import nova_voice.training.mode as mode_module
+
+        mode = TrainingMode(tmp_path / "mode.json")
+        calls = {"n": 0}
+
+        def fake_is_active(unit: str) -> bool:
+            calls["n"] += 1
+            # Still shutting down for the first few polls, then gone.
+            return calls["n"] < 4
+
+        monkeypatch.setattr(mode_module, "_is_active", fake_is_active)
+        monkeypatch.setattr(mode_module, "gpu_free_mib", lambda: 9000)
+        monkeypatch.setattr(mode_module.time, "sleep", lambda _: None)
+        monkeypatch.setattr(mode_module, "selected_engine_unit", lambda: None)
+
+        assert mode.wait_for_gpu(timeout=30, poll=0) is True
+        assert calls["n"] >= 4, "must keep polling while a unit is still active"
+
+    def test_wait_for_gpu_gives_up_rather_than_hanging(self, tmp_path: Path, monkeypatch):
+        import nova_voice.training.mode as mode_module
+
+        mode = TrainingMode(tmp_path / "mode.json")
+        monkeypatch.setattr(mode_module, "_is_active", lambda unit: True)
+        monkeypatch.setattr(mode_module, "selected_engine_unit", lambda: None)
+        monkeypatch.setattr(mode_module.time, "sleep", lambda _: None)
+
+        assert mode.wait_for_gpu(timeout=0.01, poll=0) is False
+
     def test_leave_is_a_noop_when_not_active(self, tmp_path: Path):
         mode = TrainingMode(tmp_path / "mode.json")
         mode.leave()  # must not raise
@@ -260,6 +291,18 @@ def test_feature_shards_are_merged_with_the_semantic_header(tmp_path: Path):
     assert merged.read_text(encoding="utf-8").splitlines() == [
         "item_name\tsemantic_audio", "one\t1", "two\t2",
     ]
+
+
+def test_reference_scoring_rejects_whisper_repetition():
+    """Faster-Whisper loops on some clips and repeats a phrase; a plain word
+    count prefers exactly those, and a prompt whose text does not match its
+    audio degrades every generation."""
+    from nova_voice.training.runner import _reference_score
+
+    varied = "the sun came up over the badlands and nobody said a word"
+    looped = " ".join(["guess it's your lucky day"] * 7)
+    assert _reference_score(varied) > _reference_score(looped)
+    assert _reference_score("") == 0.0
 
 
 def test_speaker_verification_step_is_v2pro_only(tmp_path: Path):
@@ -366,6 +409,19 @@ class TestConfigBuilder:
         assert s2["train"]["batch_size"] == 6
         assert s2["train"]["save_every_epoch"] == 2
         assert s2["data"]["exp_dir"] == str(plan.exp_dir)
+
+    def test_training_env_enables_resume_from_our_own_checkpoints(self, tmp_path: Path):
+        """torch>=2.6 defaults weights_only=True, which rejects the PosixPath in
+        a Lightning checkpoint -- so without this, resume is impossible."""
+        from nova_voice.training.config_builder import training_env
+
+        root = self._templates(tmp_path)
+        plan = TrainingPlan(exp_name="j", exp_dir=tmp_path / "exp", gptsovits_root=root)
+        env = training_env(plan, {})
+        assert env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
+        # Both roots must be importable; only one gets you through the slicer.
+        assert str(root) in env["PYTHONPATH"]
+        assert str(root / "GPT_SoVITS") in env["PYTHONPATH"]
 
     def test_non_half_halves_batch_size(self, tmp_path: Path):
         root = self._templates(tmp_path)
