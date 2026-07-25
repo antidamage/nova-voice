@@ -16,3 +16,7 @@ inventory.local.json
 benchmark-results/
 output/
 .playwright-cli/
+
+# Cygwin/Git-Bash crash dumps (created anywhere a bash tool crashes).
+bash.exe.stackdump
+**/bash.exe.stackdump
