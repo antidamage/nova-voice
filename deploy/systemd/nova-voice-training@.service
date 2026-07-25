@@ -1,0 +1,64 @@
+[Unit]
+# One fine-tuning run, instanced by training-set id (%i).
+#
+# Deliberately its OWN unit rather than a child process of nova-voice.service.
+# Training mode stops the orchestrator to free the GPU, and nova-voice.service
+# uses the default KillMode=control-group -- so a worker spawned from inside it
+# would be killed by the very step that is supposed to make room for it. A
+# separate unit means a separate cgroup, and the run survives the voice stack
+# going down and coming back up around it.
+Description=Nova Voice training run (%i)
+After=network-online.target
+
+# Training mode, expressed declaratively so it needs no privileges at runtime.
+# Starting this unit makes systemd stop the resident voice stack (they cannot
+# share the GPU), and finishing it -- successfully, by a stop request, or by
+# crashing -- starts nova-voice.service again, whose Requires= pulls the LLM and
+# whichever TTS engine is selected back up. The restore therefore cannot be
+# skipped by a code path that failed to run.
+Conflicts=nova-voice.service nova-voice-llm.service nova-voice-tts.service nova-voice-dots-tts.service nova-voice-trained-tts.service
+OnSuccess=nova-voice.service
+OnFailure=nova-voice.service
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice/current
+Environment=PYTHONPATH=/opt/nova-voice/current/src
+Environment=PYTHONUNBUFFERED=1
+Environment=NOVA_TRAINING_ROOT=/opt/nova-voice/training-sets
+Environment=GPTSOVITS_ROOT=/opt/nova-voice/gptsovits/GPT-SoVITS
+Environment=GPTSOVITS_PYTHON=/opt/nova-voice/gptsovits/conda/bin/python
+Environment=TRAINED_VOICES_DIR=/opt/nova-voice/trained-voices
+# The ASR step lazily downloads a ~3 GB Whisper model through huggingface_hub,
+# which caches under $HOME/.cache by default -- i.e. /opt/nova-voice/.cache,
+# which ProtectSystem=strict makes read-only. Point HOME and every cache
+# convention at the one directory that IS writable, or the download dies with
+# "Read-only file system" after the slicing step has already succeeded.
+Environment=HOME=/opt/nova-voice/cache
+Environment=XDG_CACHE_HOME=/opt/nova-voice/cache
+Environment=HF_HOME=/opt/nova-voice/cache/huggingface
+EnvironmentFile=-/etc/nova-voice/nova-voice.env
+EnvironmentFile=-/etc/nova-voice/training.env
+
+ExecStart=/opt/nova-voice/venv/bin/python -m nova_voice.training.worker %i
+
+# A run is hours long and its work is checkpointed; never restart it
+# automatically, or a crash loop would silently redo the same failing stage.
+Restart=no
+
+# Generous stop timeout: a stop request is honoured at the next checkpoint, and
+# the runner still has to package a bundle afterwards.
+TimeoutStopSec=600
+
+# Same sandbox as the orchestrator. ProtectHome matters here for the same
+# reason: nothing this run needs may live in a user's home directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nova-voice /opt/nova-voice/cache /opt/nova-voice/training-sets /opt/nova-voice/trained-voices /opt/nova-voice/gptsovits
+
+[Install]
+WantedBy=multi-user.target

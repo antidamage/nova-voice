@@ -1,0 +1,7 @@
+[Unit]
+Description=Nova voice-training run switcher
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nova-training-switch
