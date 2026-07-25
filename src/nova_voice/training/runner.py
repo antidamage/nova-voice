@@ -123,11 +123,30 @@ class TrainingRunner:
 
     # --- pipeline ----------------------------------------------------------
     def prepare(self, env: dict[str, str]) -> None:
-        """Slice + transcribe. Skipped when a dataset already exists (resume)."""
+        """Slice + transcribe, unless the existing dataset still matches the samples.
+
+        Reusing the dataset is what makes a resume fast, but it must be keyed on
+        the SAMPLES, not merely on a dataset existing: otherwise adding new
+        recordings and pressing Resume silently trains on the old set again, with
+        nothing in the UI to suggest the new audio was ignored.
+        """
         transcripts = list(self.set.asr_dir.glob("*.list"))
-        if transcripts and any(self.set.sliced_dir.iterdir()):
-            self.log("dataset already prepared -- reusing it (resume)")
+        prepared = bool(transcripts) and any(self.set.sliced_dir.iterdir())
+        if prepared and self.set.dataset_matches_samples():
+            self.log("dataset already prepared and samples unchanged -- reusing it (resume)")
             return
+        if prepared:
+            # Samples changed. The sliced audio, transcripts and extracted
+            # features all describe a dataset that no longer exists, and the
+            # checkpoints were trained on it -- with the epoch budget already
+            # spent, resuming would train nothing and quietly republish the old
+            # voice. Start over: that is what ingesting new audio means.
+            self.log("samples changed since this dataset was built -- starting a fresh run")
+            self._stage("slice", "Samples changed; rebuilding the dataset from scratch")
+            shutil.rmtree(self.set.sliced_dir, ignore_errors=True)
+            shutil.rmtree(self.set.asr_dir, ignore_errors=True)
+            shutil.rmtree(self.set.exp_dir, ignore_errors=True)
+            self.set.ensure_dirs()
 
         self._stage("slice", "Slicing samples into training segments")
         self._run([
@@ -142,6 +161,10 @@ class TrainingRunner:
             "-i", str(self.set.sliced_dir), "-o", str(self.set.asr_dir),
             "-l", self.set.language, "-p", "float16",
         ], env, stoppable=False)
+
+        # Recorded only once the dataset is actually built, so an interrupted
+        # prepare is retried rather than mistaken for a matching dataset.
+        self.set.record_dataset_fingerprint()
 
     def extract_features(self, env: dict[str, str], plan: TrainingPlan) -> None:
         transcripts = list(self.set.asr_dir.glob("*.list"))

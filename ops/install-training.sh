@@ -38,6 +38,12 @@ install -m 0755 "$SRC/ops/training-switch.sh" /usr/local/bin/nova-training-switc
 install -m 0644 "$SRC/deploy/systemd/nova-voice-training-switch.service" /etc/systemd/system/
 install -m 0644 "$SRC/deploy/systemd/nova-voice-training-switch.path" /etc/systemd/system/
 
+# The control API. Separate from the voice orchestrator on purpose: training
+# stops the voice stack, so hosting start/status/stop there meant a run switched
+# off its own control surface.
+log "installing the training control API"
+install -m 0644 "$SRC/deploy/systemd/nova-voice-training-api.service" /etc/systemd/system/
+
 log "ensuring training-sets directory is writable by $ORCHESTRATOR_USER"
 install -d -o "$ORCHESTRATOR_USER" -g "$ORCHESTRATOR_USER" -m 0755 "$TRAINING_SETS_DIR"
 
@@ -92,4 +98,7 @@ rm -f /etc/sudoers.d/nova-voice-training
 
 systemctl daemon-reload
 systemctl enable --now nova-voice-training-switch.path
+systemctl enable nova-voice-training-api.service
+# Restart rather than start: a deploy replaces the service code underneath it.
+systemctl restart nova-voice-training-api.service
 log "done. Training runs launch as nova-voice-training@<set-id>.service"
