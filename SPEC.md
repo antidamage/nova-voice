@@ -123,7 +123,11 @@ stays scoped independently of who actually played:
   barge-in.
 - Indium is an input-only CoreAudio capture client.  It reports playback state
   and uses the shared server reference; macOS's native voice-processing/AEC is
-  deliberately not claimed for that device.
+  deliberately not claimed for that device, because the Voice-Processing I/O
+  aggregate seizes and ducks the Mac's default output for as long as it is
+  connected, silencing everything else on that host.  Declining the *aggregate*
+  is not the same as declining cancellation — see "Echo defence is layered"
+  below for the reference-based AEC this satellite is still required to grow.
 - Nocturnium uses a PipeWire WebRTC echo-canceller graph.  Its virtual source
   `nova_voice_aec` is the default capture source and its virtual sink
   `nova_voice_aec_sink` is the default playback sink.  The capture process
@@ -137,6 +141,81 @@ stays scoped independently of who actually played:
 The room echo guard is defence in depth, not a substitute for correctly routed
 hardware AEC.  A satellite must never advertise AEC merely because a PipeWire
 device exists; the process must actually capture the virtual AEC source.
+
+### Echo defence is layered: cancellation first, interception last
+
+Self-echo is handled in two distinct stages, and they are not interchangeable.
+Cancellation removes the assistant's voice from the audio; interception discards
+an utterance after the fact.  Only the first can support barge-in, and only the
+first prevents the assistant's speech from ever becoming a transcript.
+
+**Stage 1 — real AEC at the satellite (primary).**  Every satellite that plays
+audio is expected to cancel its own playback out of its own microphone locally.
+This is tractable on every client because the satellite already holds the exact
+far-end signal: the server streams it the precise PCM it is about to play, and
+the satellite reports CoreAudio's real render lifecycle (`playbackEvents`), so
+the reference and the capture can be time-aligned without guessing from TTS
+generation or network delivery.  A satellite that genuinely cancels advertises
+`capabilities.echoCancellation = true`, which retires the server's half-duplex
+policy for it and allows true full-duplex barge-in.
+
+- Nocturnium satisfies this through the PipeWire WebRTC echo-canceller graph
+  described above.
+- **Indium does not yet satisfy this and is required to.**  It must run a
+  software echo canceller (WebRTC AEC3 is the reference choice) *inside the
+  satellite process*, fed by the server-supplied playback PCM as the far-end
+  reference and by the existing plain input-only HAL unit as the near end.
+  Because the canceller is in-process, this must be achieved without adopting
+  the Voice-Processing I/O aggregate, so the Mac's default output is never
+  seized or ducked — that constraint is why local AEC was declined originally,
+  and it is a constraint on *how* to cancel, not a reason not to.  Until this
+  lands, Indium is a raw-microphone capture client and Stage 2 is doing work it
+  was never meant to carry alone.
+
+**Stage 2 — late-stage transcript interception (backstop).**  After STT, a
+transcript that is substantially a repeat of what the assistant just said is the
+assistant's own voice returning through the room, and is dropped
+(`self_echo_transcript`).  This is the last line, deliberately placed after
+recognition so it can catch echo that survived every acoustic measure.  It must
+be robust against ASR mangling of the echo rather than requiring literal token
+equality, because the echo is re-recognised speech and is reliably garbled.
+Required properties:
+
+- Compare on **normalised, phonetically keyed** tokens, not raw words:
+  contractions expanded (`don't` / `do not`), and near-homophone ASR
+  substitutions collapsed (`chillin` / `chilling`, `tail` / `tale`).
+- Combine **independent signals** and reject on any of them, because each fails
+  differently: stopword-free **content coverage** of the heard text by the
+  spoken text; the **longest common contiguous token run** (order-sensitive, so
+  filler words the assistant never said cannot dilute it); and an overall
+  **sequence similarity** ratio.
+- Guard **short transcripts**: a brief genuine reply that happens to reuse the
+  assistant's common words (a user answering "yeah I'm good" to "I am good,
+  just hanging out") must survive, so coverage alone may not condemn a
+  transcript with too few content words.
+- Be **tunable and observable**: thresholds surfaced in `/health` alongside the
+  acoustic `correlationThreshold`, and the deciding signal logged on every drop
+  so the bar can be moved from evidence.
+
+Bag-of-words overlap on literal tokens is *not* sufficient and must not be
+reintroduced: measured against real garbled echoes from this household it scored
+0.545–0.786, straddling its own 0.6 threshold, so it both leaked echo and sat
+one ASR error away from discarding genuine speech.
+
+**Why Stage 2 cannot be the primary defence.**  The earlier acoustic layers are
+bypassed by design in exactly the situation where echo is most likely:
+
+- The playback-tag drop is skipped while a conversation is active, so that a
+  user can interrupt without repeating the wake word.
+- The acoustic envelope check is skipped whenever a wake word was detected, so
+  that a genuine barge-in containing the wake word is never suppressed.
+- The wake words include the agent's own name, so the assistant routinely says
+  them; its own echo therefore trips the wake bypass and reaches Stage 2 with
+  both acoustic layers already skipped.
+
+That combination leaves a single post-STT heuristic defending the pipeline, and
+it can only ever reject whole utterances after paying for recognition.  Stage 2
+must be strong, but Stage 1 is what makes the design correct.
 
 ## Runtime and interpretation
 
