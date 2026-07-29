@@ -1620,6 +1620,40 @@ def create_app(
     # switched off its own status and stop endpoints. They are served by
     # services/training_api, which holds no models and stays up throughout.
 
+    @app.post("/v1/classify-icon")
+    async def classify_reminder_icon(payload: dict) -> dict:
+        """Pick a reminder sigil for the dashboard's reminder icon bar.
+
+        The dashboard cannot call the LLM directly: llama-server runs with
+        ``--host 127.0.0.1`` and ``IPAddressAllow=localhost``, deliberately, so
+        the model is not reachable from the LAN. This proxies one small,
+        bounded classification over that boundary without widening it.
+
+        ``icons`` is the caller's allow-list. It becomes the response schema's
+        enum AND is re-checked here, so an answer this endpoint cannot vouch
+        for comes back as ``null`` rather than as an id the dashboard would
+        fail to render.
+        """
+
+        name = payload.get("name")
+        icons = payload.get("icons")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        if not isinstance(icons, list) or not icons:
+            raise HTTPException(status_code=400, detail="icons must be a non-empty list")
+
+        allowed = [icon for icon in icons if isinstance(icon, str) and icon]
+        if not allowed:
+            raise HTTPException(status_code=400, detail="icons must contain strings")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        classify = getattr(interpreter, "classify_icon", None)
+        if not callable(classify):
+            return {"icon": None}
+
+        icon = await classify(name, allowed)
+        return {"icon": icon if icon in allowed else None}
+
     @app.post("/v1/settings/refresh")
     async def refresh_voice_settings() -> dict:
         try:
@@ -1644,6 +1678,18 @@ def create_app(
             "agent": agent.model_dump(mode="json", by_alias=True),
             "voice": voice.model_dump(mode="json", by_alias=True),
         }
+
+    @app.delete("/v1/conversations")
+    async def end_conversations() -> dict:
+        """End every open conversation and drop the frozen context behind it.
+
+        Called when the dashboard's transcript log is cleared, so clearing the
+        visible record also clears what the assistant is still reasoning from.
+        """
+
+        if selected_audio is None:
+            return {"ok": True, "endedConversations": 0}
+        return {"ok": True, "endedConversations": selected_audio.end_conversations()}
 
     @app.get("/diagnostics", response_class=HTMLResponse, include_in_schema=False)
     async def diagnostics_page() -> HTMLResponse:

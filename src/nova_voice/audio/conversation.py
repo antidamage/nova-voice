@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +14,94 @@ def _estimate_tokens(text: str) -> int:
     """Rough token estimate (no tokenizer round-trip) for a soft context budget."""
 
     return max(1, len(text) // _CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _estimate_value_tokens(value: Any) -> int:
+    """Estimate the prompt cost of an arbitrary JSON-serialisable value."""
+
+    if isinstance(value, str):
+        return _estimate_tokens(value)
+    try:
+        return _estimate_tokens(json.dumps(value, separators=(",", ":"), default=str))
+    except (TypeError, ValueError):
+        return _estimate_tokens(str(value))
+
+
+# Every bulky prompt input is bounded by a drop-oldest token budget, because a
+# prompt that fills the interpretation model's whole context window leaves no
+# room for the model's own structured JSON reply — it gets truncated mid-object
+# and the turn fails outright (silent assistant). The frozen conversation-open
+# snapshot below is the largest such input and, unlike conversation history, it
+# grows with the household rather than with the conversation.
+#
+# These budgets are ceilings, not routine trimming: they are set well above a
+# normal household snapshot so they bite only in the pathological case that
+# would otherwise take the whole turn down. Nothing here can touch the system
+# prompt or the callable tool schemas — dropping those would change what the
+# assistant is and what it can do, which is never an acceptable way to save
+# tokens. Only data entries are shed, oldest/first-listed first.
+INITIAL_STATE_TOKEN_BUDGET = 5000
+INITIAL_MEMORY_TOKEN_BUDGET = 800
+
+
+def compact_memory_to_budget(
+    memory: list[Any], budget: int = INITIAL_MEMORY_TOKEN_BUDGET
+) -> list[Any]:
+    """Drop selected memories from the start until the estimate fits ``budget``.
+
+    Retrieval returns memories with the most relevant last, so shedding from the
+    front sacrifices the weakest matches first. At least one memory always
+    survives: a single oversized memory is still better context than none.
+    """
+
+    trimmed = list(memory)
+    total = sum(_estimate_value_tokens(entry) for entry in trimmed)
+    while total > budget and len(trimmed) > 1:
+        total -= _estimate_value_tokens(trimmed.pop(0))
+    return trimmed
+
+
+def compact_state_to_budget(
+    state: dict[str, Any], budget: int = INITIAL_STATE_TOKEN_BUDGET
+) -> dict[str, Any]:
+    """Bound a household snapshot by trimming its list fields from the start.
+
+    Keys are never dropped and scalars are never touched: the system prompt
+    refers to specific fields (``indoorTemperatureC``, ``climateControls`` and
+    friends) by name, so a missing key breaks the prompt contract, whereas a
+    shorter list is merely less complete. Entries are shed from the front of
+    whichever list is currently largest, so one runaway collection cannot
+    starve every other field, and each list keeps at least one entry so the
+    model can still see that the category exists.
+
+    Trimmed fields are reported in ``truncatedFields`` so the model knows a
+    listing is partial rather than authoritative.
+    """
+
+    compacted = {key: (list(value) if isinstance(value, list) else value)
+                 for key, value in state.items()}
+    total = sum(_estimate_value_tokens(value) for value in compacted.values())
+    if total <= budget:
+        return compacted
+    trimmed_counts: dict[str, int] = {}
+    while total > budget:
+        candidates = [
+            key
+            for key, value in compacted.items()
+            if isinstance(value, list) and len(value) > 1
+        ]
+        if not candidates:
+            break
+        largest = max(candidates, key=lambda key: _estimate_value_tokens(compacted[key]))
+        removed = compacted[largest].pop(0)
+        total -= _estimate_value_tokens(removed)
+        trimmed_counts[largest] = trimmed_counts.get(largest, 0) + 1
+    if trimmed_counts:
+        compacted["truncatedFields"] = {
+            key: f"{count} older entries omitted to fit the context window"
+            for key, count in sorted(trimmed_counts.items())
+        }
+    return compacted
 
 
 @dataclass(frozen=True)
@@ -142,8 +231,15 @@ class ConversationTracker:
             session.initial_environment = dict(environment)
             session.personality = personality
             session.persona_prompt = persona_prompt
-            session.initial_state = dict(state) if state is not None else None
-            session.initial_memory = list(memory) if memory is not None else None
+            # Bound the snapshot as it is frozen. This is the one choke point
+            # both prompt passes read from (interpretation and render_response),
+            # so capping here caps every downstream use of it.
+            session.initial_state = (
+                compact_state_to_budget(state) if state is not None else None
+            )
+            session.initial_memory = (
+                compact_memory_to_budget(memory) if memory is not None else None
+            )
         return self._snapshot(session)
 
     def snapshot(self, room_id: str) -> ConversationSnapshot | None:
@@ -265,6 +361,11 @@ class ConversationTracker:
         """Close every open conversation at once (e.g. the voice killswitch)."""
 
         self._rooms.clear()
+
+    def open_room_count(self) -> int:
+        """Number of conversation windows currently open, for reporting."""
+
+        return len(self._rooms)
 
     def active(self, room_id: str) -> bool:
         return self._active_session(room_id) is not None

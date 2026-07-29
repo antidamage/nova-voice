@@ -27,6 +27,18 @@ class Interpreter(ABC):
 
         return None
 
+    async def classify_icon(self, name: str, icons: list[str]) -> str | None:
+        """Pick the sigil that best represents a reminder's name.
+
+        Used by the dashboard's reminder icon bar, which cannot reach the LLM
+        itself: llama-server is bound to loopback and firewalled to localhost,
+        so the orchestrator proxies. ``icons`` is a closed vocabulary and the
+        return value must be one of it, or None when nothing fits. Default
+        returns None so deterministic/test interpreters opt out cleanly.
+        """
+
+        return None
+
     async def confirm_objective(
         self,
         utterance: Utterance,
