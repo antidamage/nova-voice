@@ -9,7 +9,12 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from nova_voice.audio.conversation import ConversationMessage, ConversationSnapshot
+from nova_voice.audio.conversation import (
+    ConversationMessage,
+    ConversationSnapshot,
+    compact_memory_to_budget,
+    compact_state_to_budget,
+)
 from nova_voice.domain import (
     ActiveGoal,
     Interpretation,
@@ -358,6 +363,72 @@ class LlamaCppInterpreter(Interpreter):
             logger.warning("identity disclosure extraction unavailable: %s", error)
             return None
 
+    async def classify_icon(self, name: str, icons: list[str]) -> str | None:
+        """Choose a reminder sigil from a closed vocabulary.
+
+        The allow-list is compiled straight into the response schema as an
+        enum, so the sampler is constrained to a valid id and cannot invent
+        one. The caller still re-checks: a schema is a strong guarantee, not a
+        substitute for validating input that crossed a network.
+
+        Cheap by construction — a handful of input tokens and one output
+        token — because the dashboard calls this once per newly-seen reminder
+        name and must not compete with a live voice turn for the GPU.
+        """
+
+        candidates = [icon for icon in icons if isinstance(icon, str) and icon]
+        if not name.strip() or not candidates:
+            return None
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You label household reminders with an icon. "
+                        "Given a reminder's name, answer with the single icon id "
+                        "that best represents it. Judge by what the reminder is "
+                        "ABOUT, not by shared words. If nothing fits well, "
+                        "answer with an empty string."
+                    ),
+                },
+                {"role": "user", "content": name.strip()},
+            ],
+            "temperature": 0,
+            "max_tokens": 16,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_reminder_icon",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "icon": {"type": "string", "enum": [*candidates, ""]},
+                        },
+                        "required": ["icon"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            icon = json.loads(content).get("icon")
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Decoration. The dashboard already has a keyword fallback.
+            logger.warning("reminder icon classification unavailable: %s", error)
+            return None
+
+        return icon if icon in candidates else None
+
     async def confirm_objective(
         self,
         utterance: Utterance,
@@ -426,10 +497,13 @@ class LlamaCppInterpreter(Interpreter):
             household_state = conversation.initial_state
             selected_memory = list(conversation.initial_memory)
         else:
-            selected_memory = relevant_state.get("selectedMemory", [])
-            household_state = {
-                key: value for key, value in relevant_state.items() if key != "selectedMemory"
-            }
+            # No frozen snapshot yet (opening turn or preview): the same budgets
+            # apply, so an oversized live state cannot fill the context window
+            # on the very first turn of a conversation either.
+            selected_memory = compact_memory_to_budget(relevant_state.get("selectedMemory", []))
+            household_state = compact_state_to_budget(
+                {key: value for key, value in relevant_state.items() if key != "selectedMemory"}
+            )
         # The conversation-stable inputs — callable tools, the frozen household
         # snapshot, and selected memory — are sent once as a pinned block ahead
         # of the turn history so the model (and llama.cpp's prefix cache) treats
@@ -664,12 +738,16 @@ class LlamaCppInterpreter(Interpreter):
             frozen_state = conversation.initial_state
             frozen_memory = list(conversation.initial_memory)
         else:
-            frozen_state = {
-                key: value
-                for key, value in (relevant_state or {}).items()
-                if key != "selectedMemory"
-            }
-            frozen_memory = (relevant_state or {}).get("selectedMemory", [])
+            frozen_state = compact_state_to_budget(
+                {
+                    key: value
+                    for key, value in (relevant_state or {}).items()
+                    if key != "selectedMemory"
+                }
+            )
+            frozen_memory = compact_memory_to_budget(
+                (relevant_state or {}).get("selectedMemory", [])
+            )
         facts = {
             "utterance": utterance.transcript,
             "speaker": utterance.speaker.model_dump(mode="json"),
