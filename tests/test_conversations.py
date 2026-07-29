@@ -206,3 +206,99 @@ def test_household_key_shares_one_conversation_across_rooms() -> None:
     conversations.end("office")
 
     assert not conversations.active("lounge")
+
+
+def _snapshot_state(tracker: ConversationTracker, room: str = "lounge") -> dict:
+    snapshot = tracker.snapshot(room)
+    assert snapshot is not None
+    assert snapshot.initial_state is not None
+    return snapshot.initial_state
+
+
+def test_frozen_state_is_bounded_by_dropping_oldest_list_entries() -> None:
+    clock = FakeClock()
+    conversations = ConversationTracker(idle_seconds=60, monotonic=clock)
+    conversations.start("lounge")
+    # A pathological household: far more devices than the context window can
+    # hold alongside the system prompt and tool schemas.
+    oversized = {
+        "room": "lounge",
+        "indoorTemperatureC": 19.5,
+        "nearbyTargets": [
+            {"name": f"device-{index}", "room": "lounge", "domain": "light", "state": "off"}
+            for index in range(2000)
+        ],
+    }
+    conversations.initialize_prompt(
+        "lounge",
+        environment={},
+        personality="",
+        persona_prompt="",
+        state=oversized,
+        memory=[],
+    )
+
+    state = _snapshot_state(conversations)
+    # Scalars and the key set survive: the system prompt names these fields.
+    assert state["room"] == "lounge"
+    assert state["indoorTemperatureC"] == 19.5
+    assert "nearbyTargets" in state
+    # The list was trimmed from the START, so the newest entries survive.
+    assert len(state["nearbyTargets"]) < 2000
+    assert state["nearbyTargets"][-1]["name"] == "device-1999"
+    assert state["truncatedFields"]["nearbyTargets"].endswith("fit the context window")
+
+
+def test_frozen_state_within_budget_is_untouched() -> None:
+    clock = FakeClock()
+    conversations = ConversationTracker(idle_seconds=60, monotonic=clock)
+    conversations.start("lounge")
+    modest = {
+        "room": "lounge",
+        "nearbyTargets": [{"name": "lamp", "domain": "light", "state": "on"}],
+    }
+    conversations.initialize_prompt(
+        "lounge",
+        environment={},
+        personality="",
+        persona_prompt="",
+        state=modest,
+        memory=[],
+    )
+
+    state = _snapshot_state(conversations)
+    assert state == modest
+    assert "truncatedFields" not in state
+
+
+def test_frozen_memory_sheds_weakest_matches_first() -> None:
+    clock = FakeClock()
+    conversations = ConversationTracker(idle_seconds=60, monotonic=clock)
+    conversations.start("lounge")
+    memories = [f"memory {index}: " + ("x" * 400) for index in range(40)]
+    conversations.initialize_prompt(
+        "lounge",
+        environment={},
+        personality="",
+        persona_prompt="",
+        state={},
+        memory=memories,
+    )
+
+    snapshot = conversations.snapshot("lounge")
+    assert snapshot is not None
+    retained = list(snapshot.initial_memory)
+    assert 0 < len(retained) < len(memories)
+    # Retrieval puts the strongest match last, so the tail is what survives.
+    assert retained[-1] == memories[-1]
+
+
+def test_open_room_count_tracks_live_conversations() -> None:
+    clock = FakeClock()
+    conversations = ConversationTracker(idle_seconds=60, monotonic=clock)
+    assert conversations.open_room_count() == 0
+    conversations.start("lounge")
+    conversations.start("office")
+    assert conversations.open_room_count() == 2
+    conversations.clear()
+    assert conversations.open_room_count() == 0

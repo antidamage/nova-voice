@@ -795,6 +795,22 @@ class SatelliteAudioRuntime:
         task.add_done_callback(self._speech_lifecycle_tasks.discard)
         return task
 
+    def end_conversations(self) -> int:
+        """Close every open conversation window and drop its frozen context.
+
+        Used when the household clears the transcript log: the visible record
+        and the model's working context are one thing to the person clearing
+        it, so wiping the panel while the assistant silently keeps replying
+        from the old conversation would be a lie about what it remembers. The
+        next utterance must start with the wake word and a fresh snapshot.
+        """
+
+        if self._conversations is None:
+            return 0
+        open_rooms = self._conversations.open_room_count()
+        self._conversations.clear()
+        return open_rooms
+
     async def apply_voice_settings(self, settings: VoiceSettings) -> None:
         # System-wide killswitch: when voice is turned off, close every open
         # conversation immediately so re-enabling requires the wake word again.
