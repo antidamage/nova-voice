@@ -1159,7 +1159,21 @@ class NovaProvider(CapabilityProvider):
             returned_state = await self.client.zone_action(body)
         else:
             body = self._entity_body(target, requested_action, args)
-            returned_state = await self.client.entity_action(body)
+            target_text = f"{target.id} {target.name}".casefold()
+            is_aircon = (target.domain or "").casefold() == "climate" and not _PANEL_HEATER_RE.search(target_text)
+            if is_aircon:
+                intent: dict[str, Any] = {"room": "lounge"}
+                if requested_action == "turn_on":
+                    intent["mode"] = "auto"
+                elif requested_action == "turn_off":
+                    intent["mode"] = "off"
+                elif requested_action == "set_temperature":
+                    intent["temperature"] = float(args["value"])
+                elif requested_action == "set_mode":
+                    intent.update({"mode": "manual", "direction": str(args["value"])})
+                returned_state = await self.client.climate_control(intent)
+            else:
+                returned_state = await self.client.entity_action(body)
 
         # Some dashboard builds return only an operation acknowledgement. Keep
         # the pre-action snapshot as the initial (almost certainly stale) check;

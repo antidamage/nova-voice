@@ -70,6 +70,20 @@ async def test_dashboard_client_collects_voice_settings_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dashboard_client_routes_climate_intents_to_the_owned_controller() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/climate-control"
+        assert json.loads(request.content) == {"room": "lounge", "mode": "auto"}
+        return httpx.Response(200, json={"climateControl": {"lounge": {"mode": "auto"}}})
+
+    client = NovaDashboardClient("http://nova.test", transport=httpx.MockTransport(handler))
+    result = await client.climate_control({"room": "lounge", "mode": "auto"})
+    assert result["climateControl"]["lounge"]["mode"] == "auto"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_extended_operational_queries_are_read_only_and_state_bound() -> None:
     state = {
         "generatedAt": "2026-07-22T00:00:00Z",
