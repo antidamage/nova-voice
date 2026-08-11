@@ -84,6 +84,9 @@ class NovaDashboardClient:
     async def entity_action(self, body: dict) -> dict:
         return await self._json("POST", "/api/entity", json=body)
 
+    async def climate_control(self, body: dict) -> dict:
+        return await self._json("POST", "/api/climate-control", json=body)
+
     async def lighting_shortcut(self, scope: str, action: str) -> str:
         prefixes = {
             "indoors": "/api/lights",
