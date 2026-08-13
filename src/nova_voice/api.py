@@ -318,7 +318,18 @@ def _diagnostic_turn_payload(
         "results": [item.model_dump(mode="json") for item in result.results],
         "responseText": result.response_text,
         "responseToneInstruction": result.response_tone_instruction,
+        # Every stage and phase of the turn in one map: the audio-side stages
+        # (denoise/speaker/stt/service/tts) and the service-side phases inside
+        # `service` (providerContext/interpretation/policy/execution/response).
+        # The suite asserts on these so a slow turn is attributed to a layer
+        # rather than guessed at, and `stageMs` adds the turn machine's own
+        # view so a stage that never ran is visible as absent rather than zero.
         "timingsMs": {**result.timings_ms, **turn.timings_ms},
+        "stageMs": (
+            {record.stage.value: record.elapsed_ms for record in result.turn_trace.stages}
+            if result.turn_trace is not None
+            else {}
+        ),
         "responseAudioWavBase64": (
             pcm16_wav_base64(turn.response_pcm16, turn.response_sample_rate)
             if include_audio

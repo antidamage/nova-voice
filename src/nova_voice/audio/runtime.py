@@ -260,6 +260,41 @@ def is_usable_transcript(transcript: str) -> bool:
     return any(token not in _FILLER_TOKENS for token in tokens)
 
 
+def _format_timings(timings: dict[str, float]) -> str:
+    """Render a timing map compactly, largest first, omitting the trivial.
+
+    Sorted by cost rather than by name because the point of reading one of
+    these lines is finding where the time went, and near-zero phases are noise
+    that pushes the interesting ones off the end.
+    """
+
+    entries = [
+        (name, value)
+        for name, value in timings.items()
+        if isinstance(value, (int, float)) and value >= 0.5
+    ]
+    entries.sort(key=lambda item: item[1], reverse=True)
+    return " ".join(f"{name}={value:.1f}" for name, value in entries)
+
+
+def _slowest_stage(*timings: dict[str, float]) -> str:
+    """The single costliest stage, excluding aggregates that contain others."""
+
+    # ``service`` is the audio-side measurement of the whole service call, and
+    # ``total`` covers everything; naming either would say nothing useful.
+    aggregates = {"service", "total", "audioTotal", "prefetchHit"}
+    candidates = [
+        (name, value)
+        for mapping in timings
+        for name, value in mapping.items()
+        if name not in aggregates and isinstance(value, (int, float))
+    ]
+    if not candidates:
+        return "none"
+    name, value = max(candidates, key=lambda item: item[1])
+    return f"{name}:{value:.1f}"
+
+
 def _transcript_outcome(result: HandleResult) -> str:
     """What actually became of this turn, for the dashboard transcript.
 
@@ -2273,14 +2308,36 @@ class SatelliteAudioRuntime:
         turn_machine.finish(terminal)
         result = result.model_copy(update={"turn_trace": turn_machine.snapshot()})
         total_ms = round((time.perf_counter() - turn_started) * 1000, 3)
+        audio_stages = {
+            "denoise": denoise_ms,
+            "speaker": speaker_ms,
+            "stt": stt_ms,
+            "service": service_ms,
+            "tts": tts_ms,
+            "ttsFirstChunk": tts_first_chunk_ms,
+        }
+        # One line carrying every stage and phase of the turn. The suite reads
+        # these back to attribute a slow turn to a layer instead of guessing,
+        # and `slowest` is called out because that attribution is the whole
+        # reason to log it — `service` being large only says the answer is
+        # further down, and the service phases say where.
         logger.info(
-            "audio turn timing satellite=%s room=%s stt_ms=%s service_ms=%s tts_ms=%s total_ms=%s",
+            "voice turn timings satellite=%s room=%s total_ms=%s audio={%s} service={%s} "
+            "stages={%s} slowest=%s",
             satellite_id,
             room_id,
-            stt_ms,
-            service_ms,
-            tts_ms,
             total_ms,
+            _format_timings(audio_stages),
+            _format_timings(result.timings_ms),
+            _format_timings(
+                {
+                    record.stage.value: record.elapsed_ms
+                    for record in (
+                        result.turn_trace.stages if result.turn_trace is not None else ()
+                    )
+                }
+            ),
+            _slowest_stage(audio_stages, result.timings_ms),
         )
         turn = ProcessedAudioTurn(
             transcript=spoken_transcript,

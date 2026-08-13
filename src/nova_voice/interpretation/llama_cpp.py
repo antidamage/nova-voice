@@ -81,17 +81,60 @@ _HOUSEHOLD_STATE_RELEVANCE = re.compile(
     r"turn(?:ed|ing)?|switch(?:ed|ing)?|"
     r"temperature|degrees?|thermostat|set(?:ting)?|"
     r"aircon|air\s*con(?:ditioner)?|heater|heating|cooling|"
-    r"lights?|lamp|fan|door|lock|blinds?|curtains?|plug|heat|"
+    r"lights?|lighting|lamp|fan|door|lock|blinds?|curtains?|plug|heat|"
+    # Brightness is how people actually ask for lights without saying "light":
+    # "make it brighter", "a bit dimmer", "too dark".
+    #
+    # Colour and scene words are deliberately NOT here. "What's your favourite
+    # colour" is chit-chat, and this gate exists to keep household state out of
+    # turns like that. A genuine colour command plans a household action, and
+    # ``turn_concerns_household`` picks it up from the interpretation instead —
+    # which is the more reliable signal anyway.
+    r"bright(?:er|ness)?|dim(?:mer|med|ming)?|dark(?:er)?|"
     r"what'?s\s+on|what'?s\s+off|is\s+it\s+(?:on|off)|"
     r"how\s+(?:warm|cold|hot|cool))\b",
     re.IGNORECASE,
 )
 
+# Providers whose actions mean this turn is about the household itself, rather
+# than about the web, a reminder, or a conversation.
+_HOUSEHOLD_PROVIDERS = frozenset({"nova", "household_digital_twin"})
+
 
 def household_state_is_relevant(transcript: str) -> bool:
-    """Gate retained dashboard data to turns that plausibly concern devices."""
+    """Gate retained dashboard data to turns that plausibly concern devices.
+
+    Lexical only, and therefore the weakest of the two signals — it is all that
+    is available before the turn has been interpreted. Once an interpretation
+    exists, prefer :func:`turn_concerns_household`.
+    """
 
     return bool(_HOUSEHOLD_STATE_RELEVANCE.search(transcript))
+
+
+def turn_concerns_household(
+    transcript: str,
+    interpretation: Interpretation | None = None,
+) -> bool:
+    """Whether the reply pass should be told the household's state.
+
+    The interpretation is the authoritative signal and the transcript regex is
+    the fallback, not the other way round. Deciding this from words alone was a
+    real defect: the interpretation pass always receives ``relevantState``,
+    while the reply pass received it only on a keyword match — so a turn like
+    "make it brighter in here" could be planned correctly against every zone
+    and then *spoken* by a model that had been told nothing about any lights,
+    which is exactly how the assistant ended up denying it knew about them.
+
+    Any planned action against a household provider settles it, whatever words
+    were used to ask.
+    """
+
+    if interpretation is not None and any(
+        action.call.provider in _HOUSEHOLD_PROVIDERS for action in interpretation.actions
+    ):
+        return True
+    return household_state_is_relevant(transcript)
 
 
 def select_environment_context(
@@ -217,6 +260,12 @@ Decision mapping:
   indoor temperature is unknown rather than substituting the outdoor value.
 - relevantState.indoorRooms contains only physical rooms inside the home. Outside weather
   is separate; Home, Climate, and Network are organisational zones, not rooms.
+- relevantState.roomDevices lists this satellite's own room; relevantState.deviceStates
+  lists the rest of the house. Both are controllable: copy an entry's name into
+  nova.control's `target`. A domain of "group" is a whole-room light group ("Lounge
+  lights") — use it when the request is about a room's lights rather than one named lamp.
+- A directive naming any listed device or group is a command: decision execute, with the
+  nova.control action for it.
 - Named whole-house modes ("house party") are nova.mode, never nova.control: they are
   house-wide behaviours, not devices, and have no entity to name. relevantState.modes
   reports which are currently on.
@@ -844,7 +893,9 @@ class LlamaCppInterpreter(Interpreter):
             "conversationContinuity": (relevant_state or {}).get("conversationContinuity"),
             "discussionMode": (relevant_state or {}).get("discussionMode"),
             "relevantState": (
-                frozen_state if household_state_is_relevant(utterance.transcript) else None
+                frozen_state
+                if turn_concerns_household(utterance.transcript, interpretation)
+                else None
             ),
             "responseInstruction": response_instruction,
         }
@@ -964,7 +1015,7 @@ greet briefly and offer help. Return only the response JSON schema."""
         if (
             conversation is not None
             and conversation.observations
-            and household_state_is_relevant(utterance.transcript)
+            and turn_concerns_household(utterance.transcript, interpretation)
         ):
             system += (
                 "\nDashboard data retrieved earlier this conversation (may be stale; use it to "

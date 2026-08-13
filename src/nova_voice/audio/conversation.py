@@ -256,6 +256,25 @@ class ConversationTracker:
         session = self._active_session(room_id)
         return self._snapshot(session) if session is not None else None
 
+    def refresh_state_values(self, room_id: str, values: dict[str, Any]) -> None:
+        """Replace named fields of the frozen household snapshot.
+
+        The snapshot is frozen so follow-up turns reuse a stable, cacheable
+        prompt prefix — worth it for the bulky, slow-moving parts. The device
+        manifest is neither. Which devices exist, and what they are called, is
+        what decides whether an utterance is a command at all, and freezing it
+        meant a conversation opened before a device appeared could never be
+        told to use it. Worse, a conversation opened before a deployment kept
+        that deployment's whole prompt contract out of reach.
+
+        Only the keys named here are replaced; everything else stays frozen.
+        """
+
+        session = self._rooms.get(self._key(room_id))
+        if session is None or session.initial_state is None:
+            return
+        session.initial_state.update(values)
+
     def set_environment_value(self, room_id: str, key: str, value: Any) -> None:
         """Replace one frozen environment fact on an open conversation.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -508,7 +509,11 @@ async def test_dashboard_outage_keeps_interpretation_and_retention_available(utt
 
     result = await service.handle(spoken)
 
-    assert result.response_text == "Reply"
+    # "Turn the lounge light on" is a household command that did not run, so it
+    # says nothing: a command speaks when it succeeds. What this test is
+    # actually about — that interpretation, context degradation and retention
+    # all survive a dashboard outage — is asserted below and unaffected.
+    assert result.response_text is None
     packet = interpreter.contexts[0]
     assert packet == {
         "room": "lounge",
@@ -519,6 +524,10 @@ async def test_dashboard_outage_keeps_interpretation_and_retention_available(utt
     assert store.saved == [(spoken, value)]
     assert set(result.timings_ms) == {
         "providerContext",
+        # Recorded whenever the household context could not be fetched, so a
+        # turn that answered with no household state is identifiable after the
+        # fact rather than silently indistinguishable from a working one.
+        "providerContextFailed",
         "interpretation",
         "retention",
         "policy",
@@ -528,6 +537,41 @@ async def test_dashboard_outage_keeps_interpretation_and_retention_available(utt
         "total",
     }
     assert all(value >= 0 for value in result.timings_ms.values())
+
+
+@pytest.mark.asyncio
+async def test_dashboard_outage_is_logged_not_silent(utterance, caplog) -> None:
+    """An empty zone list makes the model deny knowing about any lights.
+
+    A turn that lands here sounds broken to a listener, so it must never be
+    invisible in the logs — that silence is what made the live symptom so hard
+    to attribute.
+    """
+
+    interpreter = _Interpreter(interpretation(decision=Decision.REPLY))
+    service = _service(Settings(), interpreter, _Provider(unavailable=True), _Store())
+
+    with caplog.at_level(logging.WARNING, logger="nova_voice.service"):
+        await service.handle(utterance.model_copy(update={"wake_detected": True}))
+
+    warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("household context unavailable" in record.getMessage() for record in warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_dashboard_logs_no_context_warning(utterance, caplog) -> None:
+    interpreter = _Interpreter(interpretation(decision=Decision.REPLY))
+    service = _service(Settings(), interpreter, _Provider(), _Store())
+
+    with caplog.at_level(logging.WARNING, logger="nova_voice.service"):
+        result = await service.handle(utterance.model_copy(update={"wake_detected": True}))
+
+    assert "providerContextFailed" not in result.timings_ms
+    assert not [
+        record
+        for record in caplog.records
+        if "household context unavailable" in record.getMessage()
+    ]
 
 
 @pytest.mark.asyncio
