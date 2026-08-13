@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from nova_voice.dry_run import current_dry_run
+
 
 class NovaDashboardError(RuntimeError):
     pass
@@ -69,6 +71,33 @@ class NovaDashboardClient:
             raise NovaDashboardError(f"dashboard request failed: {method} {path}") from error
         return response.text.strip()
 
+    async def _mutate_json(self, method: str, path: str, body: dict | None = None) -> dict:
+        """Send a household mutation, unless this turn is a dry run.
+
+        Every state-changing dashboard call goes through here (or its text
+        sibling) so a dry run is enforced at one choke point instead of relying
+        on each provider path to remember. Reads deliberately bypass it — a dry
+        run still needs live state to resolve targets and report the "before"
+        side of the diff.
+        """
+
+        recorder = current_dry_run()
+        if recorder is not None:
+            recorder.record(method, path, body)
+            return {}
+        if body is None:
+            return await self._json(method, path)
+        return await self._json(method, path, json=body)
+
+    async def _mutate_text(self, method: str, path: str) -> str | None:
+        """Text-returning mutation. Returns None when withheld by a dry run."""
+
+        recorder = current_dry_run()
+        if recorder is not None:
+            recorder.record(method, path, None)
+            return None
+        return await self._text(method, path)
+
     async def version(self) -> dict:
         return await self._json("GET", "/api/version")
 
@@ -79,15 +108,18 @@ class NovaDashboardClient:
         return await self._json("GET", "/api/voice")
 
     async def zone_action(self, body: dict) -> dict:
-        return await self._json("POST", "/api/zone", json=body)
+        return await self._mutate_json("POST", "/api/zone", body)
 
     async def entity_action(self, body: dict) -> dict:
-        return await self._json("POST", "/api/entity", json=body)
+        return await self._mutate_json("POST", "/api/entity", body)
 
     async def climate_control(self, body: dict) -> dict:
-        return await self._json("POST", "/api/climate-control", json=body)
+        return await self._mutate_json("POST", "/api/climate-control", body)
 
-    async def lighting_shortcut(self, scope: str, action: str) -> str:
+    async def mode_action(self, body: dict) -> dict:
+        return await self._mutate_json("POST", "/api/modes", body)
+
+    async def lighting_shortcut(self, scope: str, action: str) -> str | None:
         prefixes = {
             "indoors": "/api/lights",
             "all": "/api/all-lights",
@@ -95,22 +127,22 @@ class NovaDashboardClient:
         }
         if scope not in prefixes or action not in {"on", "off"}:
             raise ValueError("unsupported lighting shortcut")
-        return await self._text("GET", f"{prefixes[scope]}/{action}")
+        return await self._mutate_text("GET", f"{prefixes[scope]}/{action}")
 
     async def aircon_timer(self, body: dict) -> dict:
-        return await self._json("POST", "/api/aircon/timer", json=body)
+        return await self._mutate_json("POST", "/api/aircon/timer", body)
 
     async def panel_heater_timer(self, body: dict) -> dict:
-        return await self._json("POST", "/api/panel-heater/timer", json=body)
+        return await self._mutate_json("POST", "/api/panel-heater/timer", body)
 
     async def desktop_action(self, operation: str, body: dict | None = None) -> dict:
         if operation not in {"wake", "sleep"}:
             raise ValueError("unsupported desktop operation")
-        return await self._json("POST", f"/api/desktop/{operation}", json=body or {})
+        return await self._mutate_json("POST", f"/api/desktop/{operation}", body or {})
 
     async def tasks(self, operation: str, body: dict) -> dict:
         payload = {**body, "command": operation}
-        return await self._json("POST", "/api/tasks", json=payload)
+        return await self._mutate_json("POST", "/api/tasks", payload)
 
     async def list_tasks(self) -> dict:
         return await self._json("GET", "/api/tasks?command=list")

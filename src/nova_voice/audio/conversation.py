@@ -187,6 +187,16 @@ class ConversationTracker:
 
         self.idle_seconds = max(1.0, float(idle_seconds))
 
+    def set_max_seconds(self, max_seconds: float | None) -> None:
+        """Apply a new absolute ceiling live; existing sessions adopt it.
+
+        The idle window alone cannot bound a conversation: a room with enough
+        continuous engaged speech refreshes it forever. The ceiling is the
+        backstop that guarantees the wake word is eventually required again.
+        """
+
+        self.max_seconds = None if max_seconds is None else max(1.0, float(max_seconds))
+
     def start(self, room_id: str) -> bool:
         """Open or refresh a room conversation; return true only for a new one."""
 
@@ -245,6 +255,21 @@ class ConversationTracker:
     def snapshot(self, room_id: str) -> ConversationSnapshot | None:
         session = self._active_session(room_id)
         return self._snapshot(session) if session is not None else None
+
+    def set_environment_value(self, room_id: str, key: str, value: Any) -> None:
+        """Replace one frozen environment fact on an open conversation.
+
+        Most of the environment snapshot is deliberately frozen at conversation
+        open so follow-up turns reuse a stable, cacheable prompt prefix. The
+        clock cannot be: a conversation may run for minutes, and answering "what
+        time is it" with the time the conversation started is simply wrong. Only
+        the caller knows which facts are cheap enough to keep live.
+        """
+
+        session = self._rooms.get(self._key(room_id))
+        if session is None or session.initial_environment is None:
+            return
+        session.initial_environment[key] = value
 
     # Recent-turn window kept in the prompt. A conversation that stays open a
     # long time must not accrete unbounded "old, old" history; only the most
@@ -336,10 +361,20 @@ class ConversationTracker:
     def refresh(self, room_id: str) -> None:
         # A known in-flight turn may take longer than the idle window to render
         # and play.  Refreshing that turn must not expire it before the user has
-        # had their full follow-up window.
-        session = self._rooms.get(self._key(room_id))
-        if session is not None:
-            session.last_turn_monotonic = self._monotonic()
+        # had their full follow-up window, so the idle clock is deliberately not
+        # applied here.  The absolute ceiling still is: no in-flight turn is a
+        # reason to carry a conversation past its hard lifetime, and without
+        # this check a refresh can silently resurrect a window the ceiling has
+        # already closed.
+        key = self._key(room_id)
+        session = self._rooms.get(key)
+        if session is None:
+            return
+        now = self._monotonic()
+        if self.max_seconds is not None and now - session.started_monotonic >= self.max_seconds:
+            self._rooms.pop(key, None)
+            return
+        session.last_turn_monotonic = now
 
     def speaker_template(self, room_id: str) -> str | None:
         """Return the voice template currently bound to this live conversation."""

@@ -1,0 +1,21 @@
+{
+  "type": "personal_result",
+  "callId": "pc-8b2e15d0",
+  "ok": true,
+  "code": "ok",
+  "message": "2 events",
+  "sensitivity": "personal",
+  "items": [
+    {
+      "id": "opaque-1",
+      "startsAt": "2026-08-13T09:00:00Z",
+      "allDay": false
+    },
+    {
+      "id": "opaque-2",
+      "startsAt": "2026-08-13T14:30:00Z",
+      "allDay": false
+    }
+  ],
+  "truncated": false
+}

@@ -5,6 +5,9 @@ from nova_voice.authority import HouseholdAuthority
 from nova_voice.automation import AutomationManager
 from nova_voice.briefings import BriefingManager
 from nova_voice.capabilities.registry import CapabilityRegistry
+from nova_voice.companion.router import CompanionWorkloadRouter
+from nova_voice.companion.session import CompanionSessionManager
+from nova_voice.companion.tiers import TierThresholds
 from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import (
     CommunicationManager,
@@ -207,6 +210,28 @@ def build_service(settings: Settings) -> NovaVoiceService:
         match_margin=settings.speaker_match_margin,
         cluster_threshold=settings.speaker_cluster_threshold,
     )
+    # Constructed unconditionally so the administration surface can always
+    # report "no companion" rather than 500ing on a missing attribute. Nothing
+    # is offered to it while ``companion_enabled`` is false.
+    companion_sessions = CompanionSessionManager(
+        thresholds=TierThresholds(
+            off_below=settings.companion_tier_off_below,
+            advisory_below=settings.companion_tier_advisory_below,
+            reduced_below=settings.companion_tier_reduced_below,
+            hysteresis=settings.companion_tier_hysteresis,
+            dwell_seconds=settings.companion_tier_dwell_seconds,
+            stale_after_seconds=settings.companion_telemetry_stale_seconds,
+        ),
+        callback_cap=settings.companion_callback_cap,
+        accept_timeout_seconds=settings.companion_accept_timeout_seconds,
+    )
+    companion_router = CompanionWorkloadRouter(
+        companion_sessions,
+        enabled=settings.companion_enabled,
+        force_local=settings.companion_force_local,
+        failure_budget=settings.companion_failure_budget,
+        breaker_pause_seconds=settings.companion_breaker_pause_seconds,
+    )
     persona = Persona.load(settings.persona_path)
     conversations = ConversationTracker(
         idle_seconds=settings.conversation_idle_seconds,
@@ -236,4 +261,6 @@ def build_service(settings: Settings) -> NovaVoiceService:
         continuity=continuity,
         dialogue=dialogue,
         optimizers=optimizers,
+        companion_sessions=companion_sessions,
+        companion_router=companion_router,
     )

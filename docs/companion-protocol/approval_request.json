@@ -1,0 +1,10 @@
+{
+  "type": "approval_request",
+  "approvalId": "ap-3f7c9d21",
+  "jobId": "5f2b9c1d4e8a47c0",
+  "summary": "Create a reminder \"Collect prescription\" due tomorrow at 9:00 am.",
+  "provider": "companion_personal",
+  "tool": "reminders.create",
+  "sensitivity": "mutation",
+  "expiresAt": "2026-08-13T09:05:00Z"
+}

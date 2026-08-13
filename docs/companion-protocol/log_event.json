@@ -1,0 +1,7 @@
+{
+  "type": "log_event",
+  "level": "info",
+  "event": "tier_changed",
+  "detail": "reduced: battery 43% is below half",
+  "traceId": "trace-9c81f0a2"
+}

@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     audio_enabled: bool = False
     diagnostics_enabled: bool = False
     diagnostics_max_audio_seconds: int = Field(default=30, ge=1, le=120)
+    # Opens the voice test harness surface (POST /v1/test/turn): synthesized
+    # speech clips injected as PCM through the real satellite path, with an
+    # optional per-turn dry run and a speaker override so the suite can run
+    # from a voice the household has never heard. Off unless deliberately
+    # enabled on the voice host.
+    test_harness_enabled: bool = False
 
     @property
     def effective_durable_database_path(self) -> Path:
@@ -233,9 +239,12 @@ class Settings(BaseSettings):
     # Unaddressed speech (no wake word, no open conversation) shorter than
     # this many words is ambient noise: dropped without handling or logging.
     ambient_min_words: int = Field(default=2, ge=1, le=5)
-    # An active exchange continues as long as turns arrive inside the idle
-    # window.  Set an explicit ceiling only as an operator safety override.
-    conversation_max_seconds: float | None = Field(default=None, ge=10, le=3600)
+    # Absolute lifetime of one conversation, measured from the wake word that
+    # opened it.  The idle window alone cannot bound a conversation — a room
+    # with enough continuous engaged speech refreshes it indefinitely — so this
+    # is the backstop that guarantees the wake word is eventually required
+    # again.  Overridden live by the dashboard's conversationMaxSeconds.
+    conversation_max_seconds: float | None = Field(default=300.0, ge=10, le=3600)
 
     # Voice dashboard announcements: speaking state and the bounded two-sided
     # transcript are POSTed to Nova without delaying the spoken turn.
@@ -255,6 +264,58 @@ class Settings(BaseSettings):
     # first chunk has gone out. Below this, TCP/WS overhead per frame starts
     # to matter; above it, chunk-to-chunk latency grows.
     tts_frame_ms: int = Field(default=100, ge=20, le=200)
+
+    # Companion agent host (optional). A device holding the companion role is a
+    # second, independent inference host that does not contend for Iridium's
+    # GPU or its single llama.cpp slot. Everything here is off by default: the
+    # single-host deployment is the supported baseline, and no companion
+    # identity, address or certificate path belongs in this file.
+    # Rollback switches, in order of bluntness. companion_enabled=false
+    # restores the previous Iridium-only behaviour exactly; force_local leaves
+    # personal tools working but stops the phone replacing Iridium's reasoning;
+    # the two role switches are independent, so muting the microphone and
+    # disabling the companion are separate acts.
+    companion_enabled: bool = False
+    companion_force_local: bool = False
+    companion_satellite_enabled: bool = True
+    companion_personal_provider_enabled: bool = True
+    # Empty means "any identity the household CA issued whose certificate
+    # matches the id it announces". Naming identities here is an additional
+    # restriction, not the mechanism that makes the socket safe — and keeping
+    # it configurable is what keeps deployment names out of tracked files.
+    companion_allowed_identities: list[str] = Field(default_factory=list)
+    # Locality is derived from the peer address, never from what the device
+    # claims. Empty home subnets means no route can ever qualify as home_lan,
+    # which is the correct failure direction for an unconfigured deployment.
+    companion_home_subnets: list[str] = Field(default_factory=list)
+    companion_tailnet_subnets: list[str] = Field(default_factory=list)
+    companion_auth_nonce_ttl_seconds: float = Field(default=30.0, gt=0, le=300)
+    # Migration only: accept satellite hellos that carry no identity proof.
+    # Removed once every native client has been upgraded (NPT-910).
+    companion_allow_unbound_satellites: bool = True
+    companion_tier_off_below: float = Field(default=0.15, ge=0, le=1)
+    companion_tier_advisory_below: float = Field(default=0.25, ge=0, le=1)
+    companion_tier_reduced_below: float = Field(default=0.50, ge=0, le=1)
+    # Headroom required to climb back into a tier, and how long an improvement
+    # must hold before it is believed. Degradations are never delayed.
+    companion_tier_hysteresis: float = Field(default=0.05, ge=0, le=0.5)
+    companion_tier_dwell_seconds: float = Field(default=60.0, ge=0, le=3600)
+    # Telemetry older than this stops the companion being offered work at all.
+    companion_telemetry_stale_seconds: float = Field(default=180.0, gt=0, le=3600)
+    # Ceilings, not per-job values: a job may ask for less and never for more.
+    companion_callback_cap: int = Field(default=12, ge=0, le=64)
+    # How long an offer waits to be accepted. Kept short and separate from the
+    # completion deadline: before acceptance, falling back costs one round trip.
+    companion_accept_timeout_seconds: float = Field(default=1.5, gt=0, le=30)
+    # Consecutive failures before a workload stops being offered, and for how
+    # long. A failing phone must not add its timeout to every turn.
+    companion_failure_budget: int = Field(default=3, ge=1, le=50)
+    companion_breaker_pause_seconds: float = Field(default=120.0, gt=0, le=3600)
+    companion_approval_timeout_seconds: float = Field(default=300.0, gt=0, le=86_400)
+    # A phone microphone beats a room microphone on raw SNR, which is the wrong
+    # outcome for the energy-envelope election: the fixed satellite in the room
+    # the speaker is standing in should win. This penalty restores that.
+    companion_election_penalty: float = Field(default=0.15, ge=0, le=1)
 
     persona_path: Path = Path("config/persona.example.yaml")
     skills_path: Path = Path("skills")

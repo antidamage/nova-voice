@@ -1,0 +1,8 @@
+{
+  "type": "hello_ack",
+  "protocolVersion": 1,
+  "authenticatedId": "companion-1",
+  "locality": "home_lan",
+  "sessionId": "0d5b7c1a9e2f4836",
+  "heartbeatSeconds": 20.0
+}

@@ -1,0 +1,14 @@
+{
+  "type": "tool_result",
+  "jobId": "5f2b9c1d4e8a47c0",
+  "attemptId": "a41d7e93b0f5426d",
+  "callId": "c0a71f2e",
+  "ok": true,
+  "code": "ok",
+  "message": "Lounge set to 40%.",
+  "observed": {
+    "zoneId": "lounge",
+    "brightness": 40
+  },
+  "sensitivity": "ordinary"
+}

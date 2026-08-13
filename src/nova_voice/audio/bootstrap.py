@@ -118,4 +118,5 @@ def build_audio_runtime(settings: Settings, service: NovaVoiceService) -> Satell
             similarity=settings.dedup_similarity,
         ),
         ambient_min_words=settings.ambient_min_words,
+        addressed_threshold=settings.active_addressed_threshold,
     )

@@ -1,0 +1,15 @@
+{
+  "type": "personal_call",
+  "callId": "pc-8b2e15d0",
+  "tool": "calendar.events",
+  "arguments": {
+    "from": "2026-08-13",
+    "to": "2026-08-14",
+    "fields": [
+      "id",
+      "startsAt"
+    ]
+  },
+  "maxItems": 50,
+  "deadlineSeconds": 15.0
+}
