@@ -45,7 +45,10 @@ class SatelliteHello(BaseModel):
     # dashboard's mTLS proxy (browsers cannot present a client cert), captures
     # via getUserMedia, and has no OS supervisor. Push-to-talk browsers open a
     # turn with a CONTROL "begin_turn" frame instead of a spoken wake word.
-    client: Literal["linux-native", "macos-native", "browser"]
+    # "ios-native" is a companion device holding the satellite role. iOS has no
+    # OS supervisor in the systemd/launchd sense — the process is kept resident
+    # by its audio session and relaunched by the system, so it declares "none".
+    client: Literal["linux-native", "macos-native", "browser", "ios-native"]
     supervisor: Literal["systemd", "launchd", "none"]
     capture_policy: str = Field(alias="capturePolicy")
     dashboard_foreground: bool | None = Field(default=None, alias="dashboardForeground")
@@ -70,6 +73,21 @@ class SatelliteHello(BaseModel):
                 raise ValueError("browser satellites must use always or push-to-talk capture")
             if self.supervisor != "none":
                 raise ValueError("browser satellites have no OS supervisor")
+            return
+        if self.client == "ios-native":
+            # Continuous capture, like the other native clients: wake handling
+            # in this stack is transcript-first, so no on-device wake model is
+            # required or assumed. Push-to-talk stays available for a device
+            # that is deliberately conserving battery.
+            if self.capture_policy not in ("always", "push-to-talk"):
+                raise ValueError("iOS satellites must use always or push-to-talk capture")
+            if self.supervisor != "none":
+                raise ValueError("iOS satellites have no OS supervisor")
+            # The microphone role is home-LAN only; full-duplex playback needs
+            # the device to actually do echo cancellation, which VoiceProcessingIO
+            # provides. A client that cannot must not claim always-on capture.
+            if self.capture_policy == "always" and not self.capabilities.echo_cancellation:
+                raise ValueError("always-capture iOS satellites must advertise echo cancellation")
             return
         if self.capture_policy != "always":
             raise ValueError("native v1 satellites must use always capture")

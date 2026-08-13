@@ -288,6 +288,17 @@ class VoiceSettings(BaseModel):
     # Learn local biometric voice templates and use confidently recognized
     # household profiles for conversational personalization.
     speaker_recognition_enabled: bool = True
+    # Voice training. ON: an unrecognized voice may still use the wake word and
+    # issue commands, and each accepted turn refines the household's voice
+    # templates — the mode to be in when enrolling someone, adding a microphone
+    # or room, or when a familiar voice is sounding different today. OFF: only
+    # recognized household voices are heard at all; anyone else is ignored.
+    #
+    # Defaults ON so a fresh installation can enrol its first voice. It is
+    # bypassed entirely when speaker recognition is unavailable — identity that
+    # cannot be computed cannot be gated on, and the alternative is locking the
+    # household out of its own house.
+    voice_training_enabled: bool = True
     # Speaker-matching tuning (TitaNet cosine similarity of L2-normalized voice
     # embeddings, range 0-1). These make recognition "fuzzier" or "stricter" so
     # one household voice is matched across different microphones, rooms,
@@ -382,6 +393,10 @@ class VoiceSettings(BaseModel):
     # How long a wake-opened conversation stays open without another usable
     # turn before context clears and the wake word is required again.
     conversation_idle_seconds: int = Field(default=60, ge=10, le=300, multiple_of=5)
+    # Absolute lifetime of a conversation from the wake word that opened it,
+    # regardless of how much usable speech keeps arriving. The idle window is
+    # not a bound on its own: continuous engaged speech refreshes it forever.
+    conversation_max_seconds: int = Field(default=300, ge=60, le=1800, multiple_of=30)
     # The satellite holds this much streamed PCM before starting its player,
     # absorbing short TTS/network scheduling bursts. Lower values start audio
     # sooner at the cost of headroom against a stutter; live health reports

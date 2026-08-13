@@ -1,0 +1,24 @@
+{
+  "type": "job_offer",
+  "envelope": {
+    "jobId": "5f2b9c1d4e8a47c0",
+    "attemptId": "a41d7e93b0f5426d",
+    "idempotencyKey": "a1f0c3d29b6e4f7583c1d0e2a4b6c8d9",
+    "workload": "interpret",
+    "inputRevision": "8c1f0a2b3d4e5f60",
+    "schemaVersion": 1,
+    "resultSchema": "interpret.v1",
+    "sensitivity": "ordinary",
+    "locality": "home_lan",
+    "traceId": "trace-9c81f0a2",
+    "createdAt": "2026-08-13T09:00:00Z",
+    "acceptDeadline": "2026-08-13T09:00:02Z",
+    "completeDeadline": "2026-08-13T09:00:06Z"
+  },
+  "payload": {
+    "transcript": "turn the lounge lights down a bit",
+    "roomId": "lounge"
+  },
+  "callbackBudget": 12,
+  "contextTokens": 4096
+}

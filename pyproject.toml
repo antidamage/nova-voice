@@ -11,6 +11,9 @@ requires-python = ">=3.12,<3.13"
 license = { text = "Private" }
 dependencies = [
   "beautifulsoup4>=4.12,<5",
+  # Companion channel proof-of-possession: chain validation and signature
+  # verification over the server nonce (src/nova_voice/companion/auth.py).
+  "cryptography>=43,<47",
   "ddgs>=9,<10",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
@@ -48,6 +51,8 @@ dev = [
   "pytest-asyncio>=0.25,<2",
   "respx>=0.22,<1",
   "ruff>=0.11,<1",
+  # Voice-suite case tables.
+  "pyyaml>=6,<7",
 ]
 
 [project.scripts]
@@ -61,9 +66,16 @@ packages = ["src/nova_voice"]
 "src/nova_voice/monitor/index.html" = "nova_voice/monitor/index.html"
 
 [tool.pytest.ini_options]
-addopts = "-q"
+# The voice suite needs a live host with a resident model stack and takes real
+# seconds per case, so it is deselected from the ordinary run and asked for by
+# name: pytest -m voice_suite --voice-host=...
+addopts = "-q -m 'not voice_suite'"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "voice_suite: end-to-end spoken cases against a live nova-voice host",
+  "slow: asserts a multi-minute behaviour in real time",
+]
 
 [tool.ruff]
 line-length = 100

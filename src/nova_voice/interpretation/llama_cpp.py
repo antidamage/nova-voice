@@ -20,6 +20,7 @@ from nova_voice.domain import (
     Interpretation,
     SelfProfileUpdate,
     ToolResult,
+    TurnGrade,
     Utterance,
     VerificationVerdict,
 )
@@ -183,7 +184,13 @@ Critical distinctions:
 - In each action, copy call.tool exactly from semanticTools.function.name, including namespace,
   and set call.provider to the part of that name before the first dot (e.g. tool "nova.query"
   has provider "nova"; tool "web.ask" has provider "web").
-- Return zero to four actions. Dependencies refer only to earlier action IDs.
+- Return zero to six actions. Dependencies refer only to earlier action IDs.
+- One turn may chain several instructions ("tell me the weather and then turn on the
+  kitchen lights, and turn the bedroom heater off"). Plan an action for every clause,
+  in the order spoken. Never drop a later clause, never merge two targets into one
+  action, and never answer only the first part. This applies equally inside an open
+  conversation: a conversational turn that also contains an instruction must still
+  carry that instruction as an action.
 - Non-execute decisions have no actions.
 - The response plan must not claim an action worked; execution happens later.
 
@@ -210,9 +217,18 @@ Decision mapping:
   indoor temperature is unknown rather than substituting the outdoor value.
 - relevantState.indoorRooms contains only physical rooms inside the home. Outside weather
   is separate; Home, Climate, and Network are organisational zones, not rooms.
+- Named whole-house modes ("house party") are nova.mode, never nova.control: they are
+  house-wide behaviours, not devices, and have no entity to name. relevantState.modes
+  reports which are currently on.
+- A colour in nova.control set_color may be a plain colour name ("blue", "warm white").
+  Prefer the name the speaker used over inventing an RGB triple.
 - relevantState.climateControls is the authoritative climate interface. Offer only power
   on/off and target temperature. Raw heat/cool/manual HVAC modes are implementation details,
   never separate controls. Use turn_on/turn_off for power and set_temperature for a target.
+- "Warmer", "colder", "cool the room", "warm the bedroom" are relative: there is no relative
+  climate action, so read the room's current targetTemperatureC from relevantState.
+  climateControls and set_temperature to two degrees above (warmer) or below (colder) it.
+  Clarify only when that room has no climate control at all.
 - clarify an addressed household request only when a required target or value is missing.
 - ignore only ambient/unaddressed speech, quoted/media speech, third-party speech, explicit
   self-intention, or abandoned/negated requests. Never ignore an addressed social turn or
@@ -477,6 +493,65 @@ class LlamaCppInterpreter(Interpreter):
             # Objective confirmation is best-effort; the loop's own deterministic
             # checks remain authoritative if this pass is ever unavailable.
             logger.warning("objective confirmation unavailable: %s", error)
+            return None
+
+    async def grade_turn(
+        self,
+        *,
+        rubric: str,
+        context: str,
+        evidence: dict[str, Any],
+    ) -> TurnGrade | None:
+        """Judge one turn against a rubric, for the voice test suite.
+
+        Deliberately built from an *empty* base prompt. Every other pass here
+        carries Nova's persona, household state and operating rules, and a judge
+        that inherits those is arguing with itself: it would grade the reply it
+        would have given rather than the rubric it was handed. So the system
+        message is only the case's own context, and the assistant's own
+        instructions never enter it.
+
+        Only reached for the questions that have no assertable form — whether a
+        spoken answer is *true*. Everything decidable from the structured result
+        is checked before this is called, and a failure here is inconclusive
+        rather than fatal.
+        """
+
+        system = context.strip()
+        payload = {
+            "model": self.model,
+            "messages": [
+                *([{"role": "system", "content": system}] if system else []),
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"rubric": rubric.strip(), "turn": evidence},
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 200,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_turn_grade",
+                    "strict": True,
+                    "schema": TurnGrade.model_json_schema(),
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            return TurnGrade.model_validate_json(content)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            logger.warning("turn grading unavailable: %s", error)
             return None
 
     async def interpret(

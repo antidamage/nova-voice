@@ -10,7 +10,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -28,10 +28,33 @@ from nova_voice.audio.runtime import (
     SatelliteAudioRuntime,
 )
 from nova_voice.automation import AutomationLifecycleError, AutomationManager
+from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
+from nova_voice.companion.auth import CompanionAuthenticator
+from nova_voice.companion.locality import LocalityClassifier
+from nova_voice.companion.protocol import (
+    SUPPORTED_PROTOCOL_VERSIONS,
+    ApprovalResponse,
+    AuthChallenge,
+    AuthResponse,
+    CompanionHello,
+    Heartbeat,
+    HelloAck,
+    JobAccept,
+    JobFailed,
+    JobProgress,
+    JobReject,
+    JobResult,
+    LogEvent,
+    PersonalResult,
+    TelemetryMessage,
+    ToolCall,
+)
+from nova_voice.companion.protocol import parse_client_message as parse_companion_message
+from nova_voice.companion.protocol import serialize as serialize_companion
 from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
-from nova_voice.domain import HandleResult, Utterance
+from nova_voice.domain import HandleResult, SpeakerIdentity, Utterance
 from nova_voice.durable.models import (
     AutomationRecord,
     BriefingRecord,
@@ -303,6 +326,17 @@ def _diagnostic_turn_payload(
             and turn.response_sample_rate is not None
             else None
         ),
+        "speaker": (result.speaker.model_dump(mode="json") if result.speaker else None),
+        "dryRun": result.dry_run,
+        # The exact household requests this turn built and withheld. A test
+        # asserts on these rather than on the spoken text, because they are what
+        # would actually have happened.
+        "dryRunRequests": [item.model_dump(mode="json") for item in result.dry_run_requests],
+        "turnTrace": (
+            result.turn_trace.model_dump(mode="json", by_alias=True)
+            if result.turn_trace is not None
+            else None
+        ),
     }
 
 
@@ -320,6 +354,20 @@ def create_app(
     )
     janitor_task: asyncio.Task | None = None
     monitor = VoiceMonitor()
+    # The companion channel reuses the household CA the mTLS listener already
+    # trusts. With no CA configured the authenticator refuses every peer, which
+    # is the correct direction to fail.
+    companion_authenticator = CompanionAuthenticator(
+        selected_settings.tls_ca_path.read_bytes()
+        if selected_settings.tls_ca_path and selected_settings.tls_ca_path.exists()
+        else None,
+        nonce_ttl_seconds=selected_settings.companion_auth_nonce_ttl_seconds,
+        allowed_identities=frozenset(selected_settings.companion_allowed_identities),
+    )
+    companion_locality = LocalityClassifier.from_settings(
+        selected_settings.companion_home_subnets,
+        selected_settings.companion_tailnet_subnets or None,
+    )
     structural_telemetry = StructuralTelemetry(selected_settings.structural_telemetry_path)
     multimodal_inputs = LocalMultimodalInputProvider(
         selected_settings.multimodal_data_path,
@@ -1759,6 +1807,83 @@ def create_app(
             raise HTTPException(status_code=422, detail="No transcript was produced")
         return _diagnostic_turn_payload(turn)
 
+    @app.post("/v1/test/turn", include_in_schema=False)
+    async def test_turn(
+        request: Request,
+        satellite_id: str = "test-harness",
+        room_id: str = "lounge",
+        wake_detected: bool = False,
+        dry_run: bool = True,
+        speaker_name: str | None = None,
+    ) -> dict:
+        """Inject a synthesized speech clip as if a satellite had captured it.
+
+        The voice test suite drives this: it plays no audio and opens no
+        microphone, but the PCM goes through exactly the path a real satellite's
+        audio takes — STT, wake matching, echo defence, dedup, speaker
+        recognition, interpretation, policy, execution, rendering. Only the
+        outbound household mutation is withheld, and only when ``dry_run``.
+
+        ``speaker_name`` is the test-voice override: it pins the turn's identity
+        to a recognized household speaker so the suite can run from a
+        synthesized voice the profile store has never heard, in either training
+        mode.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+        if selected_audio is None:
+            raise HTTPException(status_code=503, detail="Audio inference is disabled")
+        for label, value in (("satellite", satellite_id), ("room", room_id)):
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value.strip()) is None:
+                raise HTTPException(status_code=422, detail=f"Invalid test {label} identifier")
+        content_type = request.headers.get("content-type", "").casefold()
+        if not (
+            content_type.startswith("audio/l16")
+            or content_type.startswith("application/octet-stream")
+        ):
+            raise HTTPException(status_code=415, detail="Expected mono 16 kHz PCM16 audio")
+        maximum_bytes = selected_settings.diagnostics_max_audio_seconds * SAMPLE_RATE * 2
+        payload = bytearray()
+        async for chunk in request.stream():
+            payload.extend(chunk)
+            if len(payload) > maximum_bytes:
+                raise HTTPException(status_code=413, detail="Test clip is too long")
+        if len(payload) < SAMPLE_RATE * 2 // 5 or len(payload) % 2:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide at least 200 ms of complete PCM16 samples",
+            )
+        override: SpeakerIdentity | None = None
+        if speaker_name:
+            override = SpeakerIdentity(
+                status="recognized",
+                template_id="test-harness",
+                person_id=f"test:{speaker_name}",
+                display_name=speaker_name,
+                confidence=1.0,
+            )
+        try:
+            turn = await selected_audio.process_pcm(
+                satellite_id=satellite_id.strip(),
+                room_id=room_id.strip(),
+                pcm16=bytes(payload),
+                wake_detected=wake_detected,
+                dashboard_foreground=False,
+                dry_run=dry_run,
+                speaker_override=override,
+            )
+        except InterpretationError as error:
+            raise HTTPException(
+                status_code=503, detail="Local interpretation model unavailable"
+            ) from error
+        if turn is None:
+            # A dropped turn is a legitimate, assertable outcome — the negative
+            # cases in the suite expect exactly this — so report why rather than
+            # failing the request.
+            return {"ok": True, "dropped": True, "dryRun": dry_run}
+        return _diagnostic_turn_payload(turn, include_audio=False)
+
     @app.websocket("/v1/diagnostics/stream")
     async def diagnostics_stream(websocket: WebSocket) -> None:
         """Stream microphone PCM into NeMo and return turn events/audio.
@@ -1926,6 +2051,168 @@ def create_app(
                 pass
         finally:
             await selected_audio.stt.cancel_stream(stream_id)
+
+    def dispatch_companion_message(sessions, session, message) -> None:
+        """Fan one parsed client frame out to the session manager.
+
+        Deliberately synchronous: nothing here may block the receive loop, so
+        the one message that does real work (a tool call) is handed off as a
+        task rather than awaited inline.
+        """
+
+        if isinstance(message, TelemetryMessage):
+            sessions.handle_telemetry(session, message.telemetry)
+        elif isinstance(message, Heartbeat):
+            sessions.handle_heartbeat(session)
+        elif isinstance(message, JobAccept):
+            sessions.handle_accept(session, message.job_id, message.attempt_id)
+        elif isinstance(message, JobReject):
+            sessions.handle_reject(
+                session,
+                message.job_id,
+                message.attempt_id,
+                message.reason,
+                message.retry_after_seconds,
+            )
+        elif isinstance(message, JobProgress):
+            sessions.handle_progress(session, message)
+        elif isinstance(message, JobResult):
+            sessions.handle_result(
+                session, message.job_id, message.attempt_id, message.result
+            )
+        elif isinstance(message, JobFailed):
+            sessions.handle_failed(
+                session, message.job_id, message.attempt_id, message.reason, message.detail
+            )
+        elif isinstance(message, ToolCall):
+            sessions.dispatch_tool_call(session, message)
+        elif isinstance(message, PersonalResult):
+            sessions.handle_personal_result(session, message)
+        elif isinstance(message, ApprovalResponse):
+            sessions.handle_approval_response(
+                session, message.approval_id, message.approved
+            )
+        elif isinstance(message, LogEvent):
+            # Structural only by contract; logged at the client's level without
+            # being interpreted as state.
+            logger.log(
+                {"debug": 10, "info": 20, "warning": 30, "error": 40}[message.level],
+                "companion event=%s detail=%s",
+                message.event,
+                message.detail,
+            )
+
+    @app.websocket("/v1/companion")
+    async def companion_socket(websocket: WebSocket) -> None:
+        """The companion channel: jobs out, results and tool requests back.
+
+        Authentication happens *before* the session is registered. Until the
+        peer has proved it holds the key for the identity it announced, it can
+        do nothing except answer the challenge — no hello, no telemetry, no
+        job traffic. Locality is then derived from the peer address rather
+        than from anything the device says about itself.
+        """
+
+        sessions = selected_service.companion_sessions
+        if sessions is None or not selected_settings.companion_enabled:
+            await websocket.close(code=1013, reason="Companion channel is disabled")
+            return
+        await websocket.accept()
+        session = None
+        stage = "authenticating"
+        try:
+            async def send(payload: dict) -> None:
+                await websocket.send_text(json.dumps(payload))
+
+            nonce = companion_authenticator.issue_nonce()
+            await send(
+                serialize_companion(
+                    AuthChallenge(
+                        nonce=nonce,
+                        supportedVersions=list(SUPPORTED_PROTOCOL_VERSIONS),
+                        expiresAt=datetime.now(UTC)
+                        + timedelta(seconds=selected_settings.companion_auth_nonce_ttl_seconds),
+                    )
+                )
+            )
+            auth = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+            if not isinstance(auth, AuthResponse):
+                await websocket.close(code=4003, reason="Expected an auth response")
+                return
+            if auth.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+                await websocket.close(code=4004, reason="Unsupported protocol version")
+                return
+            try:
+                identity = companion_authenticator.authenticate(
+                    nonce=nonce,
+                    protocol_version=auth.protocol_version,
+                    announced_id=auth.announced_id,
+                    roles=list(auth.roles),
+                    certificate_chain=list(auth.certificate_chain),
+                    signature=auth.signature,
+                )
+            except CompanionAuthenticationError as error:
+                logger.warning("companion authentication rejected: %s", error)
+                await websocket.close(code=4003, reason="Authentication failed")
+                return
+
+            stage = "awaiting hello"
+            hello = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+            if not isinstance(hello, CompanionHello):
+                await websocket.close(code=4005, reason="Expected a hello")
+                return
+            locality = companion_locality.classify(
+                websocket.client.host if websocket.client else None
+            )
+            session = sessions.register(
+                identity=identity, hello=hello, locality=locality, send=send
+            )
+            await send(
+                serialize_companion(
+                    HelloAck(
+                        protocolVersion=auth.protocol_version,
+                        authenticatedId=identity.identity,
+                        locality=locality,
+                        sessionId=session.session_id,
+                    )
+                )
+            )
+            monitor.record(
+                "companion_connected",
+                identity=identity.identity,
+                locality=locality,
+                roles=list(identity.roles),
+            )
+
+            stage = "connected"
+            while True:
+                raw = await websocket.receive_text()
+                if not sessions.is_current(session):
+                    await websocket.close(code=4001, reason="companion session superseded")
+                    return
+                try:
+                    message = parse_companion_message(raw)
+                except ValueError as error:
+                    # A malformed frame is a protocol error, not something to
+                    # guess at: it never reaches a model or a provider.
+                    logger.warning("companion frame rejected: %s", error)
+                    await websocket.close(code=1003, reason="Malformed companion frame")
+                    return
+                dispatch_companion_message(sessions, session, message)
+        except (WebSocketDisconnect, TimeoutError, ValueError) as error:
+            logger.info(
+                "companion socket closed stage=%s error=%s",
+                stage,
+                type(error).__name__,
+            )
+            return
+        finally:
+            if session is not None and sessions.release(session):
+                monitor.record("companion_disconnected", stage=stage)
 
     @app.websocket("/v1/satellites")
     async def satellite_socket(websocket: WebSocket) -> None:

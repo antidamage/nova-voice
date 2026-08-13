@@ -1,0 +1,45 @@
+{
+  "type": "hello",
+  "protocolVersion": 1,
+  "schemaVersions": [
+    1
+  ],
+  "displayName": "Companion",
+  "roles": [
+    "companion",
+    "satellite"
+  ],
+  "appVersion": "1.0.0",
+  "osVersion": "26.0",
+  "workloads": [
+    "interpret",
+    "render_response",
+    "confirm_objective",
+    "extract_self_profile_update",
+    "classify_icon"
+  ],
+  "personalTools": [
+    "calendar.events",
+    "reminders.list"
+  ],
+  "telemetry": {
+    "battery": 0.82,
+    "charging": false,
+    "lowPowerMode": false,
+    "thermalState": "nominal",
+    "appState": "background",
+    "models": {
+      "hotAvailable": true,
+      "hotContextTokens": 4096,
+      "deepAvailable": false,
+      "deepModelId": null
+    },
+    "permissions": {
+      "calendar": "available",
+      "reminders": "available",
+      "location": "partial",
+      "health": "denied"
+    },
+    "reportedNetwork": "home-wifi"
+  }
+}

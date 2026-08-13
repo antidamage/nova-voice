@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nova_voice.dry_run import DryRunRequest
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -92,6 +94,10 @@ class Utterance(StrictModel):
     # follow-up turns are treated as addressed without repeating the wake word.
     conversation_active: bool = False
     dashboard_foreground: bool | None = None
+    # Plan and authorize this turn for real, build every request body, then
+    # withhold the final household mutation. Used by the voice test suite so a
+    # command can be driven end to end without changing the house.
+    dry_run: bool = False
     acoustic: AcousticFeatures = Field(default_factory=AcousticFeatures)
     speaker: SpeakerIdentity = Field(default_factory=SpeakerIdentity)
 
@@ -103,6 +109,7 @@ class Utterance(StrictModel):
         room_id: str = "unknown",
         satellite_id: str = "cli",
         wake_detected: bool = False,
+        dry_run: bool = False,
     ) -> Utterance:
         import uuid
 
@@ -115,6 +122,7 @@ class Utterance(StrictModel):
             ended_at=now,
             transcript=transcript,
             wake_detected=wake_detected,
+            dry_run=dry_run,
         )
 
 
@@ -164,7 +172,10 @@ class Interpretation(StrictModel):
     decision: Decision
     confidence: float = Field(ge=0, le=1)
     active_goal: ActiveGoal
-    actions: list[PlannedAction] = Field(default_factory=list, max_length=4)
+    # One spoken turn can legitimately chain several instructions ("tell me the
+    # weather, turn on the kitchen lights, and turn the bedroom heater off").
+    # The cap bounds a runaway plan; it is not a licence to drop later clauses.
+    actions: list[PlannedAction] = Field(default_factory=list, max_length=6)
     response_plan: ResponsePlan = Field(default_factory=ResponsePlan)
     self_profile_update: SelfProfileUpdate | None = None
 
@@ -218,6 +229,10 @@ ToolResultCode = Literal[
     "unverified",
     "backend_error",
     "shadowed",
+    # The action was fully planned and its request body built, then deliberately
+    # withheld by a per-turn dry run. Unlike "shadowed" it carries the exact
+    # request that would have been sent, so a test can assert on it.
+    "dry_run",
     "cancelled",
 ]
 
@@ -325,6 +340,18 @@ class TurnTrace(ImmutableTraceModel):
     terminal_reason: str | None = None
 
 
+class TurnGrade(StrictModel):
+    """A model's verdict on one turn, for the voice test suite.
+
+    Deliberately tiny and schema-constrained: the judge answers a rubric, it
+    does not narrate. ``reason`` exists so a failure is actionable without
+    re-running the case.
+    """
+
+    passed: bool
+    reason: str = Field(min_length=1, max_length=300)
+
+
 class HandleResult(StrictModel):
     utterance_id: str
     interpretation: Interpretation
@@ -333,6 +360,11 @@ class HandleResult(StrictModel):
     speaker: SpeakerIdentity | None = None
     executed: bool
     shadowed: bool
+    # True when the turn ran as a dry run: everything below happened for real
+    # except the outbound household mutations, which are listed verbatim in
+    # ``dry_run_requests`` instead of being sent.
+    dry_run: bool = False
+    dry_run_requests: list[DryRunRequest] = Field(default_factory=list)
     policy_reason: str
     results: list[ToolResult] = []
     response_text: str | None = None

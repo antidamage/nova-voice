@@ -1,0 +1,166 @@
+# Direct commands: one spoken phrase, one turn, no conversation history.
+#
+# `expect` is deterministic and checked first. `judge` is only consulted when
+# the deterministic checks cannot settle the case — an answer's correctness
+# ("is that actually the time?") has no assertable form.
+#
+# `mode: record` means we do not yet know what the stack should do. The first
+# run captures the behaviour, we look at it, and then the expectation is
+# written here. It is not a pass, and it never fails.
+
+- id: lights-on
+  phrase: "Turn on the lights"
+  expect:
+    decision: execute
+    tools: ["nova.lighting_shortcut"]
+    requests: ["/api/lights/on"]
+
+- id: lights-off
+  phrase: "Turn off the lights"
+  expect:
+    decision: execute
+    tools: ["nova.lighting_shortcut"]
+    requests: ["/api/lights/off"]
+
+- id: all-lights-on
+  phrase: "Turn on all the lights"
+  expect:
+    decision: execute
+    tools: ["nova.lighting_shortcut"]
+    requests: ["/api/all-lights/on"]
+
+- id: all-lights-off
+  phrase: "Turn off all the lights"
+  expect:
+    decision: execute
+    tools: ["nova.lighting_shortcut"]
+    requests: ["/api/all-lights/off"]
+
+# The negative case. "I need to" assigns the action to the speaker, so nothing
+# may happen at all — and in particular the stack must not invert the phrasing
+# and turn lights ON.
+- id: self-intention-lights
+  phrase: "I need to turn off the lights"
+  expect:
+    executes: false
+    requests: []
+
+- id: brighter
+  phrase: "Make it brighter"
+  mode: record
+  judge:
+    context: "The speaker asked for more light in the room they are in."
+    rubric: >
+      Pass if the turn either raised a light level in that room or asked which
+      light to brighten. Fail if it changed something unrelated, turned
+      something off, or claimed to have done something it did not do.
+
+- id: aircon-on
+  phrase: "Turn on the air conditioner"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    requests: ["/api/climate-control"]
+
+- id: aircon-off
+  phrase: "Turn off the air conditioner"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    requests: ["/api/climate-control"]
+
+- id: warmer
+  phrase: "Make it warmer"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    temperature_direction: up
+
+- id: colder
+  phrase: "Make it colder"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    temperature_direction: down
+
+- id: cool-the-room
+  phrase: "Cool the room"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    temperature_direction: down
+
+- id: warm-the-bedroom
+  phrase: "Warm the bedroom"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    temperature_direction: up
+    room: bedroom
+
+- id: warm-the-lounge
+  phrase: "Warm the lounge"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    temperature_direction: up
+    room: lounge
+
+- id: light-the-kitchen
+  phrase: "Light the kitchen"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    target_contains: kitchen
+
+- id: kitchen-lights-on
+  phrase: "Turn on the lights in the kitchen"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    target_contains: kitchen
+
+- id: weather
+  phrase: "Tell me the weather"
+  expect:
+    executes: false
+  judge:
+    context_from: weather
+    rubric: >
+      Pass if the spoken answer agrees with the household's own weather reading
+      given above — same conditions, and any temperature within two degrees.
+      Fail if it reports a different sky or temperature, reports the indoor
+      temperature as the outdoor one, or declines to answer.
+
+- id: time
+  phrase: "Tell me the time"
+  expect:
+    executes: false
+  judge:
+    context_from: clock
+    rubric: >
+      Pass if the spoken time is within two minutes of the household time given
+      above. Fail otherwise, including a refusal or a date without a time.
+
+- id: lounge-lights-blue
+  phrase: "Set the lounge lights to blue"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    color: [40, 90, 255]
+
+- id: house-party-on
+  phrase: "Turn on house party"
+  expect:
+    decision: execute
+    tools: ["nova.mode"]
+    requests: ["/api/modes"]
+    body: { mode: house-party, enabled: true }
+
+- id: house-party-off
+  phrase: "Turn off house party"
+  expect:
+    decision: execute
+    tools: ["nova.mode"]
+    requests: ["/api/modes"]
+    body: { mode: house-party, enabled: false }
