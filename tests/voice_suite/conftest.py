@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.voice_suite.judge import Judge
-from tests.voice_suite.runner import VoiceHarness
+from .judge import Judge
+from .runner import VoiceHarness
 
 CASES_DIR = Path(__file__).parent / "cases"
 

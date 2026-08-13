@@ -214,6 +214,36 @@ _FOLLOW_UP_REFERENCE_RE = re.compile(
 )
 
 
+# Said when the household addressed the assistant but the turn produced no
+# words of its own. Kept deliberately vague about the cause: from the room, a
+# misheard phrase and a failed rendering are the same event, and inviting a
+# repeat is the useful response to both.
+UNPARSED_REQUEST_REPLY = "Sorry, I didn't catch that."
+
+
+def addressed_directive_needs_an_answer(
+    utterance: Utterance,
+    interpretation: Interpretation,
+    outcome: PolicyOutcome,
+) -> bool:
+    """Was this a turn the household expects an audible answer to?
+
+    Narrow on purpose. Ambient speech must stay silent — that is the whole
+    point of the addressing model — so this fires only when the assistant was
+    unambiguously spoken to (a wake word, or an open conversation), it did not
+    act, and nothing else produced words.
+
+    A shadowed turn is excluded: it is deliberately not acting, and announcing
+    that would be noise rather than help.
+    """
+
+    if outcome.shadowed or outcome.execute or interpretation.actions:
+        return False
+    if not (utterance.wake_detected or utterance.conversation_active):
+        return False
+    return interpretation.decision in {Decision.REPLY, Decision.CLARIFY}
+
+
 def command_word_count(transcript: str, wake_words: Iterable[str]) -> int:
     """Count command words after one leading wake phrase, if present."""
 
@@ -1667,6 +1697,32 @@ class NovaVoiceService:
             response_text = rendered or response_text
             if rendered:
                 turn_machine.record_response("model", response_text)
+
+        if (
+            response_text is None
+            # An unplanned command's silence is deliberate and argued for above:
+            # a command speaks when it succeeds, and explaining a failure it
+            # does not understand reads as a considered refusal. That decision
+            # is not this one's to overturn.
+            and not unplanned_command
+            and addressed_directive_needs_an_answer(utterance, interpretation, outcome)
+        ):
+            # What is left is a turn that fell silent for no deliberate reason —
+            # most often because rendering failed and returned nothing. From the
+            # room that is indistinguishable from the assistant being broken.
+            #
+            # Deliberately not a model call: the model is either unavailable or
+            # has just failed to produce something usable, and this reply has to
+            # work in exactly that case.
+            response_text = UNPARSED_REQUEST_REPLY
+            turn_machine.record_response("deterministic", response_text)
+            logger.info(
+                "addressed turn produced no reply; using the deterministic "
+                "acknowledgement id=%s decision=%s actions=%d",
+                utterance.id,
+                interpretation.decision,
+                len(interpretation.actions),
+            )
 
         fallback_started = time.perf_counter()
         fallback = await self._recover_knowledge_failure(

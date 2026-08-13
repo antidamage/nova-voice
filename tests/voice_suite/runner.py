@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from tests.voice_suite.clips import ClipCache
+from .clips import ClipCache
 
 
 @dataclass(frozen=True)

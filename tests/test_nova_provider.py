@@ -360,7 +360,13 @@ def test_device_states_separate_raw_devices_from_canonical_climate_controls() ->
             "power": "on",
             "targetTemperatureC": 22.0,
             "roomTemperatureC": 24.0,
-            "supportedActions": ["turn_on", "turn_off", "set_temperature"],
+            "supportedActions": [
+                "turn_on",
+                "turn_off",
+                "set_temperature",
+                "warm_up",
+                "cool_down",
+            ],
         }
     ]
     assert NovaProvider._indoor_rooms(state) == ["lounge", "bedroom"]
@@ -843,7 +849,13 @@ async def test_panel_heater_waits_for_published_power_state_and_returns_canonica
         "power": "on",
         "targetTemperatureC": 22.0,
         "roomTemperatureC": 21.0,
-        "supportedActions": ["turn_on", "turn_off", "set_temperature"],
+        "supportedActions": [
+            "turn_on",
+            "turn_off",
+            "set_temperature",
+            "warm_up",
+            "cool_down",
+        ],
     }
     assert polls == 3
     await provider.close()

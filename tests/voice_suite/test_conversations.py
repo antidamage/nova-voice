@@ -13,8 +13,8 @@ import asyncio
 
 import pytest
 
-from tests.voice_suite.assertions import MUTATION_PATHS
-from tests.voice_suite.runner import TurnRequest
+from .assertions import MUTATION_PATHS
+from .runner import TurnRequest
 
 pytestmark = pytest.mark.voice_suite
 

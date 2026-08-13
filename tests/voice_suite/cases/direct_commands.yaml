@@ -45,15 +45,63 @@
     executes: false
     requests: []
 
+# Relative light commands. The model only has to name the verb it heard —
+# brighten/dim — and the provider resolves it against the target's current
+# reading. Before those verbs existed the model was asked to read the level,
+# do the arithmetic and emit an absolute call, and it answered by returning
+# execute with an empty plan, which the household heard as silence.
 - id: brighter
   phrase: "Make it brighter"
-  mode: record
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    brightness_direction: up
   judge:
     context: "The speaker asked for more light in the room they are in."
     rubric: >
       Pass if the turn either raised a light level in that room or asked which
       light to brighten. Fail if it changed something unrelated, turned
       something off, or claimed to have done something it did not do.
+      Fail if the reply says it does not know about the lights, cannot see any
+      lights, or has no information about the room's devices.
+      Fail if the turn did nothing and said nothing: silently ignoring a direct
+      request is not a pass.
+
+- id: dimmer
+  phrase: "Make it dimmer"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    brightness_direction: down
+
+- id: turn-the-lights-down
+  phrase: "Turn the lights down a bit"
+  expect:
+    decision: execute
+    tools: ["nova.control"]
+    brightness_direction: down
+
+# The regression case. This phrase contains no word the household-state regex
+# matches, so the reply pass used to be handed no household state and would deny
+# knowing about any lights — while the planning pass had seen every zone. The
+# point of this case is the denial, not which light gets chosen.
+#
+# The phrase has to survive STT to be worth anything: an earlier attempt used
+# "cosier", which came back as "C O Zero" and made the case assert on nonsense.
+# Prefer ordinary words the recognizer handles reliably.
+- id: no-device-words-still-knows-the-lights
+  phrase: "Can you make the lounge more relaxing"
+  judge:
+    context: >
+      The speaker asked for a more relaxing lounge. Nova has lighting zones in
+      the lounge and was given the household state for this turn.
+    rubric: >
+      Fail if the reply claims not to know about the lights, says it has no
+      information about the room, says it cannot see any devices, or otherwise
+      denies knowledge of the household. Fail if the reply is empty or the turn
+      did nothing and said nothing. Pass if it adjusted the lighting, offered a
+      specific option, or asked a sensible clarifying question about which
+      light or level.
 
 - id: aircon-on
   phrase: "Turn on the air conditioner"

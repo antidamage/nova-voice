@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.voice_suite.runner import TurnRequest
+from .runner import TurnRequest
 
 pytestmark = pytest.mark.voice_suite
 
