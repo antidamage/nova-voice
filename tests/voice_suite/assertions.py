@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from tests.voice_suite.runner import TurnOutcome
+from .runner import TurnOutcome
 
 MUTATION_PATHS = (
     "/api/zone",
@@ -87,7 +87,60 @@ def check(outcome: TurnOutcome, expect: dict[str, Any]) -> CheckResult:
     if "temperature_direction" in expect:
         failures.extend(_check_temperature(outcome, str(expect["temperature_direction"])))
 
+    if "brightness_direction" in expect:
+        failures.extend(_check_brightness(outcome, str(expect["brightness_direction"])))
+
     return CheckResult(not failures, failures)
+
+
+def _check_brightness(outcome: TurnOutcome, direction: str) -> list[str]:
+    """"Brighter" is only correct relative to how bright it already was.
+
+    The provider resolves the relative verb into an absolute percentage, so the
+    request alone cannot be judged — 40% is a rise from 15 and a fall from 80.
+    Comparing it against the target's pre-action reading is the only honest
+    check, and it is the same shape as the climate one below.
+    """
+
+    requested: float | None = None
+    for body in _bodies(outcome):
+        value = body.get("brightnessPct")
+        if value is None:
+            value = (body.get("data") or {}).get("brightness_pct")
+        if value is not None:
+            requested = float(value)
+            break
+    if requested is None:
+        return [f"no brightness request: {_bodies(outcome)}"]
+
+    current = _observed_brightness(outcome)
+    if current is None:
+        return [f"could not read the target's previous brightness: {outcome.results}"]
+    # A target already at the end of the scale has nowhere further to go, and
+    # the provider clamps rather than refusing. The suite runs against whatever
+    # state the house is actually in, so this is an ordinary outcome rather than
+    # a regression — assert the clamp instead of a movement that cannot happen.
+    if direction == "up" and current >= 100:
+        return [] if requested >= 100 else [f"already at full but requested {requested}"]
+    if direction == "down" and current <= 0:
+        return [] if requested <= 0 else [f"already off but requested {requested}"]
+    if direction == "up" and requested <= current:
+        return [f"asked for brighter but requested {requested} <= current {current}"]
+    if direction == "down" and requested >= current:
+        return [f"asked for dimmer but requested {requested} >= current {current}"]
+    return []
+
+
+def _observed_brightness(outcome: TurnOutcome) -> float | None:
+    for result in outcome.results:
+        observed = result.get("observed") or {}
+        value = observed.get("brightnessPct")
+        if value is not None:
+            return float(value)
+        raw = (observed.get("attributes") or {}).get("brightness")
+        if raw is not None:
+            return round(float(raw) * 100 / 255)
+    return None
 
 
 def _check_temperature(outcome: TurnOutcome, direction: str) -> list[str]:

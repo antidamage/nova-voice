@@ -26,6 +26,7 @@ from nova_voice.interpretation.base import Interpreter
 from nova_voice.memory import MemoryRecord, MemoryType
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.service import (
+    UNPARSED_REQUEST_REPLY,
     NovaVoiceService,
     command_word_count,
     explicit_self_profile_update,
@@ -510,9 +511,11 @@ async def test_dashboard_outage_keeps_interpretation_and_retention_available(utt
     result = await service.handle(spoken)
 
     # "Turn the lounge light on" is a household command that did not run, so it
-    # says nothing: a command speaks when it succeeds. What this test is
-    # actually about — that interpretation, context degradation and retention
-    # all survive a dashboard outage — is asserted below and unaffected.
+    # says nothing: a command speaks when it succeeds. That silence is the
+    # deliberate `unplanned_command` behaviour, and the deterministic
+    # "didn't catch that" fallback explicitly does not override it. What this
+    # test is actually about — that interpretation, context degradation and
+    # retention all survive a dashboard outage — is asserted below.
     assert result.response_text is None
     packet = interpreter.contexts[0]
     assert packet == {
@@ -1267,3 +1270,92 @@ async def test_verified_dashboard_command_always_gets_persona_aware_confirmation
     assert render_call["persona"] == "fixture persona"
     assert render_call["environment"] is None
     assert render_call["results"][0].observed == {"isOn": True}
+
+
+@pytest.mark.asyncio
+async def test_an_addressed_turn_never_answers_with_silence(utterance) -> None:
+    """A misheard command must not produce nothing at all.
+
+    "Make it brighter" was transcribed as "Naked brighter", so the planner
+    correctly declined to act on nonsense — and then the turn said nothing,
+    which from the room reads as the assistant being broken.
+
+    ``_Persona`` renders nothing for a CLARIFY decision, so this is the shape
+    of a turn that reaches the end with no words of its own.
+    """
+
+    interpreter = _Interpreter(interpretation(decision=Decision.CLARIFY), rendered=None)
+    service = _service(Settings(shadow_mode=False), interpreter, _Provider(), _Store())
+
+    result = await service.handle(utterance.model_copy(update={"wake_detected": True}))
+
+    assert result.response_text == UNPARSED_REQUEST_REPLY
+
+
+@pytest.mark.asyncio
+async def test_a_rendered_reply_is_left_alone(utterance) -> None:
+    interpreter = _Interpreter(interpretation(decision=Decision.CLARIFY), rendered="It's nine.")
+    service = _service(Settings(shadow_mode=False), interpreter, _Provider(), _Store())
+
+    result = await service.handle(utterance.model_copy(update={"wake_detected": True}))
+
+    assert result.response_text == "It's nine."
+
+
+@pytest.mark.asyncio
+async def test_ambient_speech_never_reaches_the_fallback(utterance) -> None:
+    """The addressing model is the whole point; this must not make Nova chatty."""
+
+    interpreter = _Interpreter(interpretation(decision=Decision.CLARIFY), rendered=None)
+    service = _service(Settings(shadow_mode=False), interpreter, _Provider(), _Store())
+
+    result = await service.handle(
+        utterance.model_copy(update={"wake_detected": False, "conversation_active": False})
+    )
+
+    assert result.response_text != UNPARSED_REQUEST_REPLY
+
+
+def test_the_fallback_predicate_is_narrow(utterance) -> None:
+    """Deciding not to answer is different from failing to produce an answer.
+
+    Exercised directly rather than through ``handle``: an addressed IGNORE with
+    no actions is promoted to REPLY upstream, so the whole-pipeline version of
+    this test would assert on a state that cannot occur.
+    """
+
+    from nova_voice.policy import PolicyOutcome
+    from nova_voice.service import addressed_directive_needs_an_answer
+
+    allowed = PolicyOutcome(execute=False, shadowed=False, reason="test")
+    addressed = utterance.model_copy(update={"wake_detected": True})
+    ambient = utterance.model_copy(
+        update={"wake_detected": False, "conversation_active": False}
+    )
+
+    assert addressed_directive_needs_an_answer(
+        addressed, interpretation(decision=Decision.CLARIFY), allowed
+    )
+    assert addressed_directive_needs_an_answer(
+        addressed, interpretation(decision=Decision.REPLY), allowed
+    )
+    # Chose not to answer, rather than failed to produce one.
+    assert not addressed_directive_needs_an_answer(
+        addressed, interpretation(decision=Decision.IGNORE), allowed
+    )
+    # Not addressed at all: ambient speech stays silent.
+    assert not addressed_directive_needs_an_answer(
+        ambient, interpretation(decision=Decision.REPLY), allowed
+    )
+    # Shadowed turns are deliberately not acting; announcing that is noise.
+    assert not addressed_directive_needs_an_answer(
+        addressed,
+        interpretation(decision=Decision.REPLY),
+        PolicyOutcome(execute=False, shadowed=True, reason="shadow"),
+    )
+    # A turn that planned work is not a turn with nothing to say.
+    assert not addressed_directive_needs_an_answer(
+        addressed,
+        interpretation(decision=Decision.EXECUTE, actions=[_action()]),
+        allowed,
+    )

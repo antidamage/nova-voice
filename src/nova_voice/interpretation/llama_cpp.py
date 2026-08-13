@@ -274,10 +274,18 @@ Decision mapping:
 - relevantState.climateControls is the authoritative climate interface. Offer only power
   on/off and target temperature. Raw heat/cool/manual HVAC modes are implementation details,
   never separate controls. Use turn_on/turn_off for power and set_temperature for a target.
-- "Warmer", "colder", "cool the room", "warm the bedroom" are relative: there is no relative
-  climate action, so read the room's current targetTemperatureC from relevantState.
-  climateControls and set_temperature to two degrees above (warmer) or below (colder) it.
-  Clarify only when that room has no climate control at all.
+- Relative requests have their own actions, and you must use them rather than working out a
+  number yourself. "Brighter"/"turn it up" is brighten; "dimmer"/"turn it down" is dim;
+  "warmer"/"warm the bedroom" is warm_up; "colder"/"cool the room" is cool_down. Send the
+  target and the action and omit value — Nova reads the target's current level or temperature
+  and moves it one step. Never read a current value out of relevantState and do the
+  arithmetic yourself, and never answer a relative request with reply or clarify because no
+  number was given: the missing number is the point of these actions. Include value only when
+  the speaker sized the change themselves ("turn it up by ten").
+- A relative request still needs a target. Name the device, group, or climate control the
+  speaker meant — for a bare "make it brighter" that is the lights of the room the satellite
+  is in, from relevantState.roomDevices. Clarify only when the room genuinely has nothing of
+  that kind to adjust.
 - clarify an addressed household request only when a required target or value is missing.
 - ignore only ambient/unaddressed speech, quoted/media speech, third-party speech, explicit
   self-intention, or abandoned/negated requests. Never ignore an addressed social turn or
@@ -1067,7 +1075,13 @@ greet briefly and offer help. Return only the response JSON schema."""
                     rendered, max_sentences=5 if requested_depth == "deep" else 3
                 )
             return rendered
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Silent here means silent to the household: the caller treats None
+            # as "no reply", and a turn with nothing to say says nothing at all.
+            # That made a rendering failure indistinguishable from the assistant
+            # deciding not to answer, which is exactly the wrong thing to have
+            # to guess at from a room.
+            logger.warning("response rendering failed: %s", error)
             return None
 
     async def close(self) -> None:

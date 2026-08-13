@@ -30,24 +30,14 @@ from nova_voice.audio.runtime import (
 from nova_voice.automation import AutomationLifecycleError, AutomationManager
 from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
 from nova_voice.companion.auth import CompanionAuthenticator
+from nova_voice.companion.dispatch import dispatch_companion_message
 from nova_voice.companion.locality import LocalityClassifier
 from nova_voice.companion.protocol import (
     SUPPORTED_PROTOCOL_VERSIONS,
-    ApprovalResponse,
     AuthChallenge,
     AuthResponse,
     CompanionHello,
-    Heartbeat,
     HelloAck,
-    JobAccept,
-    JobFailed,
-    JobProgress,
-    JobReject,
-    JobResult,
-    LogEvent,
-    PersonalResult,
-    TelemetryMessage,
-    ToolCall,
 )
 from nova_voice.companion.protocol import parse_client_message as parse_companion_message
 from nova_voice.companion.protocol import serialize as serialize_companion
@@ -1048,6 +1038,62 @@ def create_app(
         if selected_service.durable_store is None or selected_service.authority is None:
             raise HTTPException(status_code=503, detail="Durable agent administration is disabled")
         return selected_service.durable_store, selected_service.authority
+
+    @app.get("/v1/companion/status")
+    async def companion_status() -> dict:
+        """Everything an operator needs to explain the companion's behaviour.
+
+        Deliberately carries no certificate material, no prompt, and no job
+        payload — only structural facts. A companion may be handling personal
+        context, and a status endpoint is exactly the sort of thing that ends
+        up proxied to a browser and logged.
+
+        Reports a complete, honest answer when nothing is connected rather than
+        erroring, because "no companion" is the normal state.
+        """
+
+        sessions = selected_service.companion_sessions
+        router = selected_service.companion_router
+        snapshot = sessions.snapshot() if sessions is not None else None
+        payload: dict = {
+            "enabled": selected_settings.companion_enabled,
+            "forceLocal": selected_settings.companion_force_local,
+            "connected": bool(snapshot and snapshot.connected),
+            "localityConfigured": companion_locality.configured,
+            "authConfigured": companion_authenticator.configured,
+        }
+        if snapshot is not None and snapshot.connected:
+            payload |= {
+                "identity": snapshot.identity,
+                "roles": list(snapshot.roles),
+                "locality": snapshot.locality,
+                "tier": snapshot.tier.value,
+                "tierReason": snapshot.tier_reason,
+                "appVersion": snapshot.app_version,
+                "osVersion": snapshot.os_version,
+                "protocolSchemas": list(snapshot.schema_versions),
+                "workloads": sorted(snapshot.workloads),
+                "personalTools": sorted(snapshot.personal_tools),
+                "telemetryAgeSeconds": snapshot.telemetry_age_seconds,
+                "lastHeartbeatAgeSeconds": snapshot.last_heartbeat_age_seconds,
+                "activeAttempts": snapshot.active_attempts,
+                "contextTokens": snapshot.hot_context_tokens,
+            }
+        if router is not None:
+            payload["routes"] = {
+                workload: {
+                    "mode": route.mode,
+                    "locality": route.locality,
+                    "minTier": route.min_tier.value,
+                    "deadlineSeconds": route.deadline_seconds,
+                    # Why this workload would or would not be offered right
+                    # now, in the operator's words rather than as a flag.
+                    "eligibility": router.eligibility(workload).reason,
+                }
+                for workload, route in router.routes().items()
+            }
+            payload["counters"] = router.counters()
+        return payload
 
     @app.get("/v1/agent/administration")
     async def agent_administration(audit_limit: int = 100) -> dict:
@@ -2062,56 +2108,6 @@ def create_app(
                 pass
         finally:
             await selected_audio.stt.cancel_stream(stream_id)
-
-    def dispatch_companion_message(sessions, session, message) -> None:
-        """Fan one parsed client frame out to the session manager.
-
-        Deliberately synchronous: nothing here may block the receive loop, so
-        the one message that does real work (a tool call) is handed off as a
-        task rather than awaited inline.
-        """
-
-        if isinstance(message, TelemetryMessage):
-            sessions.handle_telemetry(session, message.telemetry)
-        elif isinstance(message, Heartbeat):
-            sessions.handle_heartbeat(session)
-        elif isinstance(message, JobAccept):
-            sessions.handle_accept(session, message.job_id, message.attempt_id)
-        elif isinstance(message, JobReject):
-            sessions.handle_reject(
-                session,
-                message.job_id,
-                message.attempt_id,
-                message.reason,
-                message.retry_after_seconds,
-            )
-        elif isinstance(message, JobProgress):
-            sessions.handle_progress(session, message)
-        elif isinstance(message, JobResult):
-            sessions.handle_result(
-                session, message.job_id, message.attempt_id, message.result
-            )
-        elif isinstance(message, JobFailed):
-            sessions.handle_failed(
-                session, message.job_id, message.attempt_id, message.reason, message.detail
-            )
-        elif isinstance(message, ToolCall):
-            sessions.dispatch_tool_call(session, message)
-        elif isinstance(message, PersonalResult):
-            sessions.handle_personal_result(session, message)
-        elif isinstance(message, ApprovalResponse):
-            sessions.handle_approval_response(
-                session, message.approval_id, message.approved
-            )
-        elif isinstance(message, LogEvent):
-            # Structural only by contract; logged at the client's level without
-            # being interpreted as state.
-            logger.log(
-                {"debug": 10, "info": 20, "warning": 30, "error": 40}[message.level],
-                "companion event=%s detail=%s",
-                message.event,
-                message.detail,
-            )
 
     @app.websocket("/v1/companion")
     async def companion_socket(websocket: WebSocket) -> None:

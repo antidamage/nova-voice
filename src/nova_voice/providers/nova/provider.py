@@ -108,6 +108,33 @@ def resolve_color(value: Any) -> list[int]:
     raise ValueError("colour must be a name or an RGB triple")
 
 
+BRIGHTNESS_BOUNDS = (0, 100)
+TEMPERATURE_BOUNDS_C = (5.0, 35.0)
+
+# How far a relative adjustment travels when the speaker does not size it. "Make
+# it brighter" carries no number, so the step is ours to pick: a quarter of the
+# scale is a change you can see from across the room and still takes four moves
+# to cross the range. Two degrees is the climate equivalent — one is inside the
+# noise of most thermostats.
+BRIGHTNESS_STEP_PCT = 25
+TEMPERATURE_STEP_C = 2.0
+
+# Relative verb -> (absolute action it resolves to, direction of travel).
+#
+# These exist because the alternative is asking the planning model to resolve a
+# target, find its current value in the household state, do the arithmetic and
+# emit an absolute call — four inferences in one shot. The compact local model
+# answered that by returning ``execute`` with an empty plan, which is silence.
+# The provider already holds the state the arithmetic needs, so the provider
+# does the arithmetic and the model only has to name the verb it heard.
+_RELATIVE_ACTIONS: dict[str, tuple[str, int]] = {
+    "brighten": ("set_level", 1),
+    "dim": ("set_level", -1),
+    "warm_up": ("set_temperature", 1),
+    "cool_down": ("set_temperature", -1),
+}
+
+
 def _describe_objective(target_name: str, action: str, args: dict[str, Any]) -> str:
     """Short, human-readable "done" statement for the LLM confirmation pass."""
 
@@ -317,7 +344,12 @@ NOVA_TOOLS = [
         "type": "function",
         "function": {
             "name": "nova.control",
-            "description": "Control an allowlisted Nova household target using friendly names.",
+            "description": (
+                "Control an allowlisted Nova household target using friendly names. "
+                "brighten/dim and warm_up/cool_down are relative: they need no value, "
+                "because Nova reads the target's current level or temperature and "
+                "moves it one step for you."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -330,6 +362,10 @@ NOVA_TOOLS = [
                             "set_temperature",
                             "set_color",
                             "set_timer",
+                            "brighten",
+                            "dim",
+                            "warm_up",
+                            "cool_down",
                             "wake",
                             "sleep",
                         ]
@@ -845,7 +881,13 @@ class NovaProvider(CapabilityProvider):
                     "power": power,
                     "targetTemperatureC": cls._numeric_value(target),
                     "roomTemperatureC": indoor.get(room),
-                    "supportedActions": ["turn_on", "turn_off", "set_temperature"],
+                    "supportedActions": [
+                        "turn_on",
+                        "turn_off",
+                        "set_temperature",
+                        "warm_up",
+                        "cool_down",
+                    ],
                 }
             )
         return controls
@@ -1288,11 +1330,11 @@ class NovaProvider(CapabilityProvider):
         room = str(args.get("room") or "") or None
         if requested_action == "set_level":
             level = int(args["value"])
-            if not 0 <= level <= 100:
+            if not BRIGHTNESS_BOUNDS[0] <= level <= BRIGHTNESS_BOUNDS[1]:
                 raise ValueError("brightness must be between 0 and 100")
         if requested_action == "set_temperature":
             temperature = float(args["value"])
-            if not 5 <= temperature <= 35:
+            if not TEMPERATURE_BOUNDS_C[0] <= temperature <= TEMPERATURE_BOUNDS_C[1]:
                 raise ValueError("temperature is outside the configured 5-35C bound")
         if requested_action in {"wake", "sleep"}:
             target = target_name or "desktop"
@@ -1314,6 +1356,26 @@ class NovaProvider(CapabilityProvider):
         if len(candidates) != 1:
             return self._resolution_failure(action, candidates)
         target = candidates[0]
+
+        # A relative verb becomes the absolute action it always was, here, while
+        # the target's current reading is in hand. Everything downstream — body
+        # building, the spoken objective, verification — then sees an ordinary
+        # set_level/set_temperature and needs to know nothing about "brighter".
+        if requested_action in _RELATIVE_ACTIONS:
+            resolved = self._resolve_relative(target, requested_action, args)
+            if resolved is None:
+                absolute, _ = _RELATIVE_ACTIONS[requested_action]
+                reading = "brightness" if absolute == "set_level" else "target temperature"
+                return self._result(
+                    action,
+                    False,
+                    "blocked",
+                    f"{target.name} reports no current {reading}, so there is nothing "
+                    "to adjust relative to",
+                    target=target.name,
+                    requested=dict(args),
+                )
+            requested_action, args = resolved
 
         if requested_action == "set_timer":
             body = {
@@ -1619,6 +1681,90 @@ class NovaProvider(CapabilityProvider):
             None,
         )
 
+    def _resolve_relative(
+        self,
+        target: AliasTarget,
+        requested_action: str,
+        args: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Turn a relative verb into an absolute action against the live reading.
+
+        Returns ``None`` when the target publishes no value to move from.
+        Inventing a baseline would drive a real device to an absolute setting
+        nobody asked for, so an unknown reading is refused instead of assumed.
+        """
+
+        absolute, direction = _RELATIVE_ACTIONS[requested_action]
+        step = self._relative_step(absolute, args)
+        if absolute == "set_level":
+            current = self._observed_brightness_pct(self._observed_target(self._state, target))
+            if current is None:
+                return None
+            low, high = BRIGHTNESS_BOUNDS
+            value: Any = int(min(high, max(low, round(current + direction * step))))
+        else:
+            current_c = self._observed_temperature_c(target)
+            if current_c is None:
+                return None
+            low_c, high_c = TEMPERATURE_BOUNDS_C
+            value = float(min(high_c, max(low_c, current_c + direction * step)))
+        # Copied, never mutated in place: the planned action is reported verbatim
+        # in results and dry runs and is the plan's dedup signature, so it has to
+        # keep the verb the model actually chose.
+        return absolute, {**args, "value": value}
+
+    @staticmethod
+    def _relative_step(absolute_action: str, args: dict[str, Any]) -> float:
+        """One adjustment's magnitude, sized by the speaker when they said so.
+
+        The verb owns the direction, so a supplied magnitude is taken absolute:
+        ``dim`` with ``-30`` means thirty dimmer, not thirty brighter.
+        """
+
+        default = BRIGHTNESS_STEP_PCT if absolute_action == "set_level" else TEMPERATURE_STEP_C
+        try:
+            requested = abs(float(args["value"]))
+        except (KeyError, TypeError, ValueError):
+            return default
+        return requested or default
+
+    @staticmethod
+    def _observed_brightness_pct(observed: dict[str, Any] | None) -> int | None:
+        """Current brightness as a percentage, or None when the target is unknown.
+
+        A target that exists but reports no brightness is off, and zero is the
+        honest baseline for it: "brighter" from off should light the room rather
+        than refuse.
+        """
+
+        if not observed:
+            return None
+        if "brightnessPct" in observed:
+            return int(observed.get("brightnessPct") or 0)
+        attributes = observed.get("attributes")
+        raw = attributes.get("brightness") if isinstance(attributes, dict) else None
+        return round(int(raw or 0) * 100 / 255)
+
+    def _observed_temperature_c(self, target: AliasTarget) -> float | None:
+        """The target temperature a relative climate adjustment moves from.
+
+        The canonical climate control wins because it already prefers the
+        dashboard's remembered aircon target over the appliance's own attribute.
+        That is the number the household sees, so it is the one "two degrees
+        warmer" has to be two degrees from.
+        """
+
+        canonical = self._canonical_climate_observed(self._state, target)
+        if canonical is not None:
+            current = self._numeric_value(canonical.get("targetTemperatureC"))
+            if current is not None:
+                return current
+        observed = self._observed_target(self._state, target)
+        attributes = observed.get("attributes") if isinstance(observed, dict) else None
+        if isinstance(attributes, dict):
+            return self._numeric_value(attributes.get("temperature"))
+        return None
+
     @staticmethod
     def _verify(action: str, args: dict[str, Any], observed: dict[str, Any] | None) -> bool:
         if not observed:
@@ -1637,13 +1783,8 @@ class NovaProvider(CapabilityProvider):
             return state in {"on", "off"}
         if action == "set_level":
             expected = int(args["value"])
-            if "brightnessPct" in observed:
-                actual = int(observed.get("brightnessPct") or 0)
-            else:
-                actual = round(
-                    int(observed.get("attributes", {}).get("brightness") or 0) * 100 / 255
-                )
-            return abs(actual - expected) <= 2
+            actual = NovaProvider._observed_brightness_pct(observed)
+            return actual is not None and abs(actual - expected) <= 2
         if action == "set_temperature":
             actual = observed.get("attributes", {}).get("temperature")
             return actual is not None and abs(float(actual) - float(args["value"])) <= 0.5

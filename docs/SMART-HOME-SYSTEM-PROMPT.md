@@ -112,7 +112,7 @@ embedded in the system message:
         "power": "on",
         "targetTemperatureC": 25.0,
         "roomTemperatureC": 23.8,
-        "supportedActions": ["turn_on", "turn_off", "set_temperature"]
+        "supportedActions": ["turn_on", "turn_off", "set_temperature", "warm_up", "cool_down"]
       },
       {
         "name": "Panel Heater",
@@ -120,7 +120,7 @@ embedded in the system message:
         "power": "off",
         "targetTemperatureC": 22.0,
         "roomTemperatureC": 21.0,
-        "supportedActions": ["turn_on", "turn_off", "set_temperature"]
+        "supportedActions": ["turn_on", "turn_off", "set_temperature", "warm_up", "cool_down"]
       }
     ]
   },

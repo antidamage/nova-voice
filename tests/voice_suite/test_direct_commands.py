@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.voice_suite.assertions import check
-from tests.voice_suite.conftest import load_cases
-from tests.voice_suite.runner import TurnRequest
+from .assertions import check
+from .conftest import load_cases
+from .runner import TurnRequest
 
 pytestmark = pytest.mark.voice_suite
 
@@ -63,7 +63,7 @@ async def test_direct_command(harness, judge_spec, case, satellite, room, record
     if "judge" not in case:
         return
 
-    from tests.voice_suite.judge import Judge
+    from .judge import Judge
 
     if not judge_spec["llm_base_url"]:
         pytest.skip("no --llm-url configured; this case needs the household language model")
