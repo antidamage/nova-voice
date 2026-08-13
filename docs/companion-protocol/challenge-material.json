@@ -1,0 +1,31 @@
+[
+  {
+    "nonce": "Yk9wS3ZQdV9tSFhyM0pMYmNEZ0FzTnhFdDJRaFcxUGo",
+    "protocolVersion": 1,
+    "announcedId": "companion-1",
+    "roles": [
+      "companion"
+    ],
+    "material": "nova-companion-auth-v1|Yk9wS3ZQdV9tSFhyM0pMYmNEZ0FzTnhFdDJRaFcxUGo|1|companion-1|companion"
+  },
+  {
+    "nonce": "bm9uY2UtdHdvLXNhbXBsZS12YWx1ZS1mb3ItdGVzdHM",
+    "protocolVersion": 1,
+    "announcedId": "companion-1",
+    "roles": [
+      "Satellite",
+      "companion"
+    ],
+    "material": "nova-companion-auth-v1|bm9uY2UtdHdvLXNhbXBsZS12YWx1ZS1mb3ItdGVzdHM|1|companion-1|companion,satellite"
+  },
+  {
+    "nonce": "dGhpcmQtbm9uY2UtZm9yLWNyb3NzLWxhbmd1YWdlLXQ",
+    "protocolVersion": 1,
+    "announcedId": "  Companion-1  ",
+    "roles": [
+      "companion",
+      "satellite"
+    ],
+    "material": "nova-companion-auth-v1|dGhpcmQtbm9uY2UtZm9yLWNyb3NzLWxhbmd1YWdlLXQ|1|companion-1|companion,satellite"
+  }
+]

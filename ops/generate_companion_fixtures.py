@@ -257,9 +257,43 @@ INVALID = {
 }
 
 
+def _challenge_vectors() -> list[dict]:
+    """Cross-language vectors for the signed challenge material.
+
+    A mismatch between the Python and Swift constructions is not a decoding
+    error — it is a signature that silently never verifies, which is a
+    miserable thing to debug from a phone. Pinning the exact bytes makes a
+    divergence a failing test on whichever side moved.
+    """
+
+    from nova_voice.companion.auth import challenge_material
+
+    cases = [
+        {"nonce": "Yk9wS3ZQdV9tSFhyM0pMYmNEZ0FzTnhFdDJRaFcxUGo", "protocolVersion": 1,
+         "announcedId": IDENTITY, "roles": ["companion"]},
+        # Role order and case must not change the signed bytes: both sides sort
+        # and lowercase before joining.
+        {"nonce": "bm9uY2UtdHdvLXNhbXBsZS12YWx1ZS1mb3ItdGVzdHM", "protocolVersion": 1,
+         "announcedId": IDENTITY, "roles": ["Satellite", "companion"]},
+        {"nonce": "dGhpcmQtbm9uY2UtZm9yLWNyb3NzLWxhbmd1YWdlLXQ", "protocolVersion": 1,
+         "announcedId": "  Companion-1  ", "roles": ["companion", "satellite"]},
+    ]
+    for case in cases:
+        case["material"] = challenge_material(
+            nonce=case["nonce"],
+            protocol_version=case["protocolVersion"],
+            announced_id=case["announcedId"],
+            roles=list(case["roles"]),
+        ).decode("utf-8")
+    return cases
+
+
 def main() -> int:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     (OUTPUT / "invalid").mkdir(exist_ok=True)
+    (OUTPUT / "challenge-material.json").write_text(
+        json.dumps(_challenge_vectors(), indent=2) + "\n", encoding="utf-8"
+    )
     for name, message in MESSAGES.items():
         path = OUTPUT / f"{name}.json"
         path.write_text(json.dumps(serialize(message), indent=2) + "\n", encoding="utf-8")

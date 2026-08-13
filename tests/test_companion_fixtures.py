@@ -23,7 +23,11 @@ from nova_voice.companion.protocol import (
 from nova_voice.companion.sensitivity import MESSAGE_SENSITIVITY
 
 FIXTURES = Path(__file__).resolve().parent.parent / "docs" / "companion-protocol"
-VALID = sorted(path for path in FIXTURES.glob("*.json"))
+# Cross-language signing vectors, not a protocol message. It lives alongside
+# the message fixtures because it is part of the same frozen contract, but it
+# has no `type` and must not be validated as a frame.
+CHALLENGE_VECTORS = FIXTURES / "challenge-material.json"
+VALID = sorted(path for path in FIXTURES.glob("*.json") if path != CHALLENGE_VECTORS)
 INVALID = sorted((FIXTURES / "invalid").glob("*.json"))
 
 
@@ -112,3 +116,42 @@ def test_timestamps_are_utc_with_an_explicit_offset():
         for line in path.read_text(encoding="utf-8").splitlines():
             if "At\":" in line or "Deadline\":" in line:
                 assert "Z" in line or "+00:00" in line, f"{path.name}: {line.strip()}"
+
+
+def test_challenge_vectors_match_the_current_implementation():
+    """The Swift client signs these exact bytes (NovaCompanionKit).
+
+    Regenerating the fixtures is a deliberate act; if `challenge_material`
+    changes without it, the committed vectors stop matching and this fails —
+    rather than the handshake failing later with a signature that simply never
+    verifies.
+    """
+
+    from nova_voice.companion.auth import challenge_material
+
+    vectors = json.loads(CHALLENGE_VECTORS.read_text(encoding="utf-8"))
+    assert vectors, "no challenge vectors committed"
+    for vector in vectors:
+        produced = challenge_material(
+            nonce=vector["nonce"],
+            protocol_version=vector["protocolVersion"],
+            announced_id=vector["announcedId"],
+            roles=list(vector["roles"]),
+        ).decode("utf-8")
+        assert produced == vector["material"]
+
+
+def test_challenge_vectors_cover_normalisation():
+    """Role order, role case and surrounding whitespace must not matter."""
+
+    vectors = json.loads(CHALLENGE_VECTORS.read_text(encoding="utf-8"))
+    assert any(
+        role != role.lower() for vector in vectors for role in vector["roles"]
+    ), "no vector exercises role case normalisation"
+    assert any(
+        vector["roles"] != sorted(role.lower() for role in vector["roles"])
+        for vector in vectors
+    ), "no vector exercises role ordering"
+    assert any(
+        vector["announcedId"] != vector["announcedId"].strip() for vector in vectors
+    ), "no vector exercises whitespace trimming"
