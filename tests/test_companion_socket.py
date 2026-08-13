@@ -22,6 +22,7 @@ import pytest
 from conftest import issue_certificate
 from cryptography.hazmat.primitives import serialization
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from nova_voice.api import create_app
 from nova_voice.companion.reference import ReferenceCompanion
@@ -102,7 +103,7 @@ def test_a_certificate_may_not_announce_another_identity(household_ca, sessions)
 
     with TestClient(_app(ca_path, sessions)).websocket_connect("/v1/companion") as websocket:
         peer = _peer(websocket, key, certificate_pem, announced_id="companion-1")
-        with pytest.raises(Exception):
+        with pytest.raises((WebSocketDisconnect, RuntimeError)):
             asyncio.run(peer.authenticate())
 
     assert sessions.snapshot().connected is False
@@ -118,7 +119,7 @@ def test_a_foreign_certificate_is_refused(household_ca, sessions, tmp_path):
 
     with TestClient(_app(ca_path, sessions)).websocket_connect("/v1/companion") as websocket:
         peer = _peer(websocket, key, pem)
-        with pytest.raises(Exception):
+        with pytest.raises((WebSocketDisconnect, RuntimeError)):
             asyncio.run(peer.authenticate())
 
     assert sessions.snapshot().connected is False
@@ -164,7 +165,7 @@ def test_a_malformed_frame_closes_the_socket(household_ca, sessions):
     with TestClient(_app(ca_path, sessions)).websocket_connect("/v1/companion") as websocket:
         asyncio.run(_peer(websocket, key, certificate_pem).authenticate())
         websocket.send_text(json.dumps({"type": "definitely_not_a_message"}))
-        with pytest.raises(Exception):
+        with pytest.raises((WebSocketDisconnect, RuntimeError)):
             websocket.receive_text()
 
     assert sessions.snapshot().connected is False
@@ -178,7 +179,7 @@ def test_the_channel_is_closed_when_the_feature_is_off(household_ca, sessions):
     service = SimpleNamespace(companion_sessions=sessions, companion_router=None)
     client = TestClient(create_app(settings, service=service))
 
-    with pytest.raises(Exception):
+    with pytest.raises((WebSocketDisconnect, RuntimeError)):
         with client.websocket_connect("/v1/companion"):
             pass
 

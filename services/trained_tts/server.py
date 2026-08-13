@@ -97,6 +97,14 @@ def _api_language(language: str | None) -> str:
 
 
 VOICES_DIR = _env("TRAINED_VOICES_DIR", "/opt/nova-voice/trained-voices")
+# Which voice to preload at startup. Written whenever weights are swapped, so
+# the service comes back hot on the voice the household is actually using
+# rather than cold on whichever one it is asked for first.
+LAST_VOICE_PATH = os.path.join(VOICES_DIR, ".last-voice")
+# Spoken by nobody: synthesized into a discarded buffer to prove the loaded
+# weights can generate. Short, so a warm costs a fraction of a second once the
+# checkpoints are in.
+WARM_TEXT = "Standing by."
 GPTSOVITS_API_URL = os.environ.get("GPTSOVITS_API_URL", "").rstrip("/") or None
 GPTSOVITS_ROOT = _env("GPTSOVITS_ROOT", "")
 GPTSOVITS_PYTHON = _env("GPTSOVITS_PYTHON", "python")
@@ -201,6 +209,22 @@ class TrainedService:
         # safe without this, mirroring dots.tts's single-GPU-session lock.
         self._gpu_lock = asyncio.Lock()
         self._loaded_voice_id: str | None = None
+        # Weights loaded AND a synthesis proven through them. Distinct from
+        # `ready`, which only means api_v2.py is answering: the two were
+        # conflated, and the gap between them is a ~20 s first reply that every
+        # health check called fine.
+        self._warm_voice_id: str | None = None
+        self._warming = False
+
+    @property
+    def warm_voice(self) -> str | None:
+        """The voice whose weights are loaded and proven, if any."""
+
+        return self._warm_voice_id
+
+    @property
+    def warming(self) -> bool:
+        return self._warming
 
     async def start(self) -> None:
         if GPTSOVITS_API_URL:
@@ -274,6 +298,9 @@ class TrainedService:
     async def _ensure_weights_loaded(self, voice) -> None:
         if self._loaded_voice_id == voice.id:
             return
+        # A swap invalidates warmth before it establishes it: the outgoing
+        # voice's weights are gone the moment the first set_* call lands.
+        self._warm_voice_id = None
         for endpoint, path in (
             ("/set_gpt_weights", voice.gpt_checkpoint),
             ("/set_sovits_weights", voice.sovits_checkpoint),
@@ -285,6 +312,71 @@ class TrainedService:
                     detail=f"GPT-SoVITS {endpoint} failed for voice {voice.id!r}: {response.text}",
                 )
         self._loaded_voice_id = voice.id
+        self._remember_voice(voice.id)
+
+    def _remember_voice(self, voice_id: str) -> None:
+        """Persist which voice was last loaded, so a restart can preload it.
+
+        This service has no access to the household's configured voice — the
+        dashboard holds that, and it reaches this process only as the ``voice``
+        field of a synthesis request. The last voice actually used is the best
+        available stand-in, and it is right in every case that matters: the
+        voice only changes when someone changes it, and the change itself
+        rewrites this file.
+        """
+
+        try:
+            os.makedirs(VOICES_DIR, exist_ok=True)
+            tmp = os.path.join(VOICES_DIR, ".last-voice.tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(voice_id)
+            os.replace(tmp, LAST_VOICE_PATH)
+        except OSError as error:
+            # A read-only voices directory costs the startup preload, nothing
+            # more; synthesis still works and still swaps weights on demand.
+            print(f"[trained] could not record last voice: {error}", flush=True)
+
+    def _recall_voice(self) -> str | None:
+        try:
+            with open(LAST_VOICE_PATH, encoding="utf-8") as handle:
+                return normalize_voice_id(handle.read().strip()) or None
+        except (OSError, ValueError):
+            return None
+
+    async def warm(self, voice_id: str | None = None) -> bool:
+        """Load a voice's weights and prove them with one throwaway synthesis.
+
+        Both halves matter. ``/set_*_weights`` is the ~20 s part, but the first
+        generation after a load still builds CUDA state, so warming without
+        synthesizing leaves a second, smaller hitch for the household to find.
+        The audio is discarded.
+        """
+
+        target = voice_id or self._recall_voice()
+        if target is None:
+            candidates = self.registry.list()
+            if not candidates:
+                return False
+            target = candidates[0].id
+        try:
+            voice = self._resolve_voice(target)
+        except HTTPException:
+            print(f"[trained] cannot warm unknown voice {target!r}", flush=True)
+            return False
+        self._warming = True
+        try:
+            async with self._gpu_lock:
+                await self._ensure_weights_loaded(voice)
+                async for _ in self._stream_one(WARM_TEXT, voice.language, voice):
+                    pass
+            self._warm_voice_id = voice.id
+            print(f"[trained] warm on voice {voice.id}", flush=True)
+            return True
+        except Exception as error:  # noqa: BLE001 - a failed warm must not stop serving
+            print(f"[trained] warm failed for {target!r}: {error}", flush=True)
+            return False
+        finally:
+            self._warming = False
 
     async def resolve_speech_voice(self, voice: str | None):
         """Validate readiness and resolve the voice *before* streaming starts.
@@ -323,6 +415,9 @@ class TrainedService:
                     yield chunk
             if not emitted:
                 raise HTTPException(status_code=500, detail="no audio produced")
+            # A completed synthesis is the strongest warmth evidence there is —
+            # stronger than the probe's, because it was a real reply.
+            self._warm_voice_id = selected.id
 
     async def _stream_one(self, text: str, language: str | None, selected) -> AsyncIterator[bytes]:
         """Stream one sentence. Caller holds the lock and owns the emitted check."""
@@ -352,9 +447,19 @@ service = TrainedService()
 app = FastAPI(title="nova trained (GPT-SoVITS)")
 
 
+async def _start_and_warm() -> None:
+    await service.start()
+    if service.ready:
+        # Serving is already open at this point (start() flipped `ready`), so a
+        # request arriving mid-warm is served rather than refused — it just
+        # queues behind the warm on the same GPU lock, which is the same wait it
+        # would have paid loading the weights itself.
+        await service.warm()
+
+
 @app.on_event("startup")
 async def _startup() -> None:
-    asyncio.create_task(service.start())
+    asyncio.create_task(_start_and_warm())
 
 
 @app.on_event("shutdown")
@@ -368,6 +473,13 @@ def health() -> JSONResponse:
         {
             "ok": service.ready,
             "ready": service.ready,
+            # `ready` keeps its meaning — the engine will accept a request —
+            # because live turns must never be refused merely for being early.
+            # `warm` is the separate, honest answer to "will it be quick": the
+            # voice whose weights are actually resident, or null.
+            "warm": service.warm_voice is not None,
+            "warmVoice": service.warm_voice,
+            "warming": service.warming,
             "backend": "gpt-sovits",
             "sampleRate": service.sample_rate,
             "textSplitMethod": TEXT_SPLIT_METHOD,
@@ -463,6 +575,7 @@ def delete_voice(voice_id: str) -> dict:
     shutil.rmtree(vdir, ignore_errors=True)
     if service._loaded_voice_id == vid:
         service._loaded_voice_id = None
+        service._warm_voice_id = None
     return {"ok": True, "deleted": vid}
 
 

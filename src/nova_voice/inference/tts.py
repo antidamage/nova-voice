@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -11,6 +12,7 @@ import numpy as np
 
 from nova_voice.audio.pcm import float32_to_pcm16
 from nova_voice.inference.scheduler import GpuExecutionGate
+from nova_voice.warmth import WARM_INSTRUCTION, WARM_TEXT
 
 TtsDtype = Literal["auto", "float16", "bfloat16", "float32"]
 
@@ -41,6 +43,12 @@ class TextToSpeech(ABC):
     # "classic" = Qwen preset names, "custom" = dots.tts cloned-voice ids. The
     # runtime picks the engine-appropriate speaker field from settings by this.
     engine: str = "classic"
+    # Monotonic clock reading of the last synthesis the *engine* actually ran,
+    # or None if it has not run one. Read by the warmth keeper to skip probing a
+    # stack the household is already using. Cache hits deliberately do not
+    # update it: they prove the reply memo still works, not that the model is
+    # resident and hot, which is the only thing the keeper cares about.
+    last_synthesis_at: float | None = None
 
     @abstractmethod
     async def synthesize(self, text: str, instruction: str) -> tuple[bytes, int]: ...
@@ -67,6 +75,19 @@ class TextToSpeech(ABC):
         self, *, speaker: str, language: str, num_steps: int | None = None
     ) -> None:
         raise RuntimeError("TTS adapter does not support live voice settings")
+
+    async def warm(self) -> None:
+        """Exercise synthesis so the first real reply does not pay to start it.
+
+        Called at startup and on a timer by
+        :class:`~nova_voice.warmth.WarmthKeeper`. In-process adapters keep their
+        weights loaded from construction, so the default is a plain minimal
+        synthesis; the HTTP-backed engines override this to bypass their reply
+        cache, since a warm pass that gets served from cache proves nothing
+        about the engine behind it.
+        """
+
+        await self.synthesize(WARM_TEXT, WARM_INSTRUCTION)
 
 
 class QwenTextToSpeech(TextToSpeech):
@@ -148,11 +169,26 @@ class QwenTextToSpeech(TextToSpeech):
                 self._cache.move_to_end(key)
                 return cached
             result = await asyncio.to_thread(self._synthesize, text, instruction)
+            self.last_synthesis_at = time.monotonic()
             self._cache[key] = result
             self._cache.move_to_end(key)
             while len(self._cache) > self._cache_max_entries:
                 self._cache.popitem(last=False)
             return result
+
+    async def warm(self) -> None:
+        """Generate once, off the cache, holding the synthesis lock.
+
+        The base implementation would go through :meth:`synthesize` and be
+        served from the memo on every pass after the first — reporting warm
+        without the model having run. This model is in-process and its weights
+        never leave, so the cost here is only the CUDA kernels a first forward
+        pass builds, but a probe that cannot fail is not a probe.
+        """
+
+        async with self._lock:
+            await asyncio.to_thread(self._synthesize, WARM_TEXT, WARM_INSTRUCTION)
+            self.last_synthesis_at = time.monotonic()
 
     async def configure(
         self, *, speaker: str, language: str, num_steps: int | None = None
@@ -209,6 +245,51 @@ class VllmQwenTextToSpeech(TextToSpeech):
         async with self._config_lock:
             return self.speaker, self.language
 
+    def _speech_request(
+        self, text: str, instruction: str, speaker: str, language: str
+    ) -> dict[str, object]:
+        return {
+            "model": self.model_name,
+            "input": text,
+            "voice": speaker.casefold(),
+            "language": language,
+            "instructions": instruction,
+            "stream": True,
+            "stream_format": "audio",
+            "response_format": "pcm",
+            # Engine-specific generation options (dots: num_steps). Empty for the
+            # classic vLLM path, so its request is byte-for-byte unchanged.
+            **self._extra_request,
+        }
+
+    async def warm(self) -> None:
+        """Drive one real synthesis through the engine and discard the audio.
+
+        Deliberately does not go through :meth:`synthesize`: that path is
+        memoized, so from the second warm pass onwards it would return the same
+        cached PCM without the engine being involved at all — a probe that
+        reports "warm" while the GPU-side model is anything but. It also would
+        not exercise a trained engine's weight load, which is the cost this
+        whole mechanism exists to pay in advance.
+
+        Streaming to the first chunk would be enough to prove the model is
+        resident, but the response is drained to completion anyway: leaving a
+        stream half-read makes the engine cancel mid-generation, and on
+        GPT-SoVITS that leaves its single model slot held for the next request.
+        """
+
+        speaker, language = await self._snapshot()
+        request = self._speech_request(WARM_TEXT, WARM_INSTRUCTION, speaker, language)
+        async with self._client.stream(
+            "POST",
+            f"{self.base_url}/v1/audio/speech",
+            json=request,
+        ) as response:
+            response.raise_for_status()
+            async for _ in response.aiter_bytes():
+                pass
+        self.last_synthesis_at = time.monotonic()
+
     async def synthesize_stream(
         self,
         text: str,
@@ -222,19 +303,7 @@ class VllmQwenTextToSpeech(TextToSpeech):
             yield cached
             return
 
-        request = {
-            "model": self.model_name,
-            "input": text,
-            "voice": speaker.casefold(),
-            "language": language,
-            "instructions": instruction,
-            "stream": True,
-            "stream_format": "audio",
-            "response_format": "pcm",
-            # Engine-specific generation options (dots: num_steps). Empty for the
-            # classic vLLM path, so its request is byte-for-byte unchanged.
-            **self._extra_request,
-        }
+        request = self._speech_request(text, instruction, speaker, language)
         complete = bytearray()
         carry = b""
         async with self._client.stream(
@@ -258,6 +327,7 @@ class VllmQwenTextToSpeech(TextToSpeech):
             raise RuntimeError("vLLM-Omni returned an incomplete PCM16 sample")
         if not complete:
             raise RuntimeError("vLLM-Omni returned no synthesized audio")
+        self.last_synthesis_at = time.monotonic()
         self._cache[key] = (bytes(complete), self.sample_rate)
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_max_entries:
@@ -364,6 +434,12 @@ class DotsStreamingTextToSpeech(VllmQwenTextToSpeech):
             result["error"] = payload.get("loadError") or "warming up"
         if isinstance(payload.get("voices"), list):
             result["voices"] = payload["voices"]
+        # Reachable-but-cold, forwarded rather than folded into `ok`. The engine
+        # will answer a request in this state; it will just be slow about the
+        # first one, and the caller deserves to be told which it is.
+        if "warm" in payload:
+            result["warm"] = bool(payload.get("warm"))
+            result["warmVoice"] = payload.get("warmVoice")
         return result
 
 
