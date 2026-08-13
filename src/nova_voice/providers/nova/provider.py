@@ -150,6 +150,11 @@ class AliasIndex:
 
     def rebuild(self, state: dict) -> None:
         self._aliases.clear()
+        # Room light-group aliases are collected here and added last, after
+        # every real device name is known. A house with a lamp actually called
+        # "Lounge lights" must keep that name pointing at the lamp; inventing a
+        # group alias on top of it would turn an unambiguous target ambiguous.
+        deferred_group_aliases: list[tuple[str, AliasTarget]] = []
         for zone in state.get("zones", []):
             if not isinstance(zone, dict) or not zone.get("id"):
                 continue
@@ -159,6 +164,15 @@ class AliasIndex:
             if zone["id"] == "everything":
                 for alias in ("all lights", "every light", "whole house", "all the lights"):
                     self._add(alias, target)
+            else:
+                # How a room's light group is actually spoken about, and the
+                # name the prompt now advertises it under. Without these, "turn
+                # on the kitchen lights" resolves to no target at all. Plural
+                # only: the singular collides with individual lamp names.
+                for suffix in ("lights", "lighting"):
+                    deferred_group_aliases.append((f"{zone['id']} {suffix}", target))
+                    if zone.get("name"):
+                        deferred_group_aliases.append((f"{zone['name']} {suffix}", target))
 
         for entity in _device_tree_entities(state):
             if not isinstance(entity, dict) or not entity.get("entity_id"):
@@ -185,6 +199,10 @@ class AliasIndex:
             elif kind == "panel_heater":
                 self._add("bedroom heater", target)
                 self._add("bedroom panel heater", target)
+
+        for alias, target in deferred_group_aliases:
+            if normalize_alias(alias) not in self._aliases:
+                self._add(alias, target)
 
     def resolve(self, value: str, *, room: str | None = None) -> list[AliasTarget]:
         normalized = normalize_alias(value)
@@ -573,6 +591,14 @@ class NovaProvider(CapabilityProvider):
             for control in climate_controls
             if normalize_alias(control["room"]) == normalized_room
         )
+        # Group targets are as real as individual devices — "the lounge lights"
+        # is a zone, and AliasIndex has always resolved it — but nothing in the
+        # prompt ever said so, so the model had no way to know it could name
+        # one. The satellite's own room leads its manifest.
+        groups = self._zone_groups(state)
+        room_groups = [
+            group for group in groups if normalize_alias(group["room"]) == normalized_room
+        ]
         indoor = self._indoor_temperatures(state)
         return {
             "room": room,
@@ -580,11 +606,20 @@ class NovaProvider(CapabilityProvider):
             # dashboard zones such as Climate, Network, Home, and Outside are not
             # mixed into this list.
             "indoorRooms": indoor_rooms,
+            # The complete manifest of what this satellite's own room can be
+            # told to do: its group targets first, then every device in it.
+            # Anything here is directly actionable — a directive naming one is
+            # a command, not a question.
+            "roomDevices": room_groups + entities[:30],
+            # Retained under its old name because the reply pass and the tests
+            # both read it; it is the same list.
             "nearbyTargets": entities[:30],
             # Non-climate devices keep their compact raw state. Climate has a
             # separate household-level contract below so HVAC implementation
             # modes never masquerade as the controls the assistant should offer.
-            "deviceStates": self._device_states(state),
+            # Group targets are included so a command for another room ("turn
+            # on the kitchen lights") is answerable from here too.
+            "deviceStates": groups + self._device_states(state),
             "climateControls": climate_controls,
             # Indoor temperature for this satellite's room; null means no sensor
             # is configured for it (unknown), distinct from the outdoor weather.
@@ -596,6 +631,45 @@ class NovaProvider(CapabilityProvider):
             # a redundant request can be recognised as already satisfied.
             "modes": self._mode_states(state),
         }
+
+    @classmethod
+    def _zone_groups(cls, state: dict) -> list[dict[str, Any]]:
+        """Room light groups as named, actionable targets.
+
+        The dashboard's zones are group targets and ``AliasIndex`` has always
+        resolved them, but they were never described to the model — so "set the
+        lounge lights to blue" arrived as a directive the model could see no
+        target for, and it answered with an apology instead of a plan. Named
+        "<Room> lights" because that is what people say out loud.
+        """
+
+        rooms = set(cls._indoor_rooms(state))
+        groups: list[dict[str, Any]] = []
+        for zone in state.get("zones", []):
+            if not isinstance(zone, dict):
+                continue
+            zone_id = normalize_alias(str(zone.get("id") or ""))
+            if zone_id not in rooms:
+                continue
+            lights = [
+                entity
+                for entity in zone.get("entities", [])
+                if isinstance(entity, dict)
+                and (entity.get("domain") == "light" or entity.get("isIllumination"))
+            ]
+            if not lights:
+                continue
+            name = str(zone.get("name") or zone_id).strip()
+            groups.append(
+                {
+                    "name": f"{name} lights",
+                    "room": zone_id,
+                    "domain": "group",
+                    "state": "on" if zone.get("isOn") else "off",
+                    "devices": len(lights),
+                }
+            )
+        return groups
 
     @staticmethod
     def _mode_states(state: dict[str, Any]) -> dict[str, bool]:

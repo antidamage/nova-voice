@@ -47,6 +47,7 @@ from nova_voice.dry_run import begin_dry_run, current_dry_run, end_dry_run
 from nova_voice.durable.store import DurableAgentStore
 from nova_voice.events import HouseholdEventConsumer
 from nova_voice.interpretation.base import Interpreter
+from nova_voice.interpretation.llama_cpp import household_state_is_relevant
 from nova_voice.interpretation.response_length import (
     command_acknowledgement,
     spoken_word_count,
@@ -99,6 +100,26 @@ logger = logging.getLogger(__name__)
 # background talk and television can't keep a conversation alive or pollute it.
 _AMBIENT_SPEECH_ACTS = frozenset(
     {SpeechAct.THIRD_PARTY, SpeechAct.QUOTED_OR_MEDIA, SpeechAct.SELF_INTENTION}
+)
+
+# Speech acts that ask the household to change. A turn classified this way is a
+# command: it either acts or it says nothing.
+_COMMAND_SPEECH_ACTS = frozenset({SpeechAct.DIRECTIVE, SpeechAct.DESIRED_STATE})
+
+# Household-snapshot fields that must never go stale inside a conversation.
+# These are what a command is resolved against — which devices exist, what they
+# are called, and what they are currently doing — so a frozen copy silently
+# limits the assistant to the house as it was when the conversation opened.
+# Everything else in the snapshot stays frozen for prompt-cache stability.
+_LIVE_MANIFEST_KEYS = frozenset(
+    {
+        "roomDevices",
+        "nearbyTargets",
+        "deviceStates",
+        "climateControls",
+        "indoorRooms",
+        "modes",
+    }
 )
 
 
@@ -911,10 +932,25 @@ class NovaVoiceService:
                     self.nova_provider.prompt_context(utterance.room_id),
                     timeout=self.settings.provider_context_timeout_seconds,
                 )
-            except (NovaDashboardError, TimeoutError):
+            except (NovaDashboardError, TimeoutError) as error:
                 # Ambient speech must still be transcribed/classified while Nova is
                 # offline or DNS is slow, but a missing dashboard must never add
                 # seconds to the spoken turn. No stale household state is supplied.
+                #
+                # This is loud on purpose. An empty zone list makes the model
+                # correctly report that it knows of no lights, so a turn that
+                # silently landed here is indistinguishable — to a listener —
+                # from the assistant being broken. It must always leave a trace.
+                elapsed_ms = round((time.perf_counter() - context_started) * 1000, 1)
+                logger.warning(
+                    "household context unavailable; replying with no household state "
+                    "room=%s reason=%s elapsed_ms=%s budget_ms=%s",
+                    utterance.room_id,
+                    type(error).__name__,
+                    elapsed_ms,
+                    round(self.settings.provider_context_timeout_seconds * 1000, 1),
+                )
+                timings_ms["providerContextFailed"] = elapsed_ms
                 relevant_state = {
                     "room": utterance.room_id,
                     "zones": [],
@@ -1086,6 +1122,18 @@ class NovaVoiceService:
                 "now",
                 current_clock_context(self.settings.household_tzinfo()),
             )
+            # Nor may the device manifest be frozen. It is what decides whether
+            # an utterance is a command, so a conversation that opened before a
+            # device — or before a deployment that changed the manifest's shape
+            # — would otherwise be unable to act on it for its whole lifetime.
+            self.conversations.refresh_state_values(
+                utterance.room_id,
+                {
+                    key: value
+                    for key, value in relevant_state.items()
+                    if key in _LIVE_MANIFEST_KEYS
+                },
+            )
             conversation = self.conversations.snapshot(utterance.room_id) or conversation
         timings_ms["providerContext"] = round((time.perf_counter() - context_started) * 1000, 3)
         turn_machine.set_context(
@@ -1134,6 +1182,46 @@ class NovaVoiceService:
         timings_ms["interpretation"] = round(
             (time.perf_counter() - interpretation_started) * 1000, 3
         )
+        # The model's own verdict, before any deterministic repair. Everything
+        # downstream can only narrow this, so a command that never appears here
+        # was never planned — which separates "the model did not understand" from
+        # "something later threw the plan away", and those have opposite fixes.
+        logger.info(
+            "model verdict: utterance=%s decision=%s speech_act=%s addressed=%.2f conf=%.2f "
+            "tools=%s conversation=%s tool_count=%d",
+            utterance.id,
+            interpretation.decision.value,
+            interpretation.speech_act.value,
+            interpretation.addressed_probability,
+            interpretation.confidence,
+            [action.call.tool for action in interpretation.actions],
+            conversation.id if conversation is not None else None,
+            len(self._available_tools()),
+        )
+        if interpretation.decision == Decision.EXECUTE and not interpretation.actions:
+            # "Execute, but here is nothing to run" is the model agreeing it was
+            # given a command and then failing to emit the call. Nothing
+            # downstream can recover it, and the generic empty-plan repair turns
+            # it into a reply, so the evidence has to be captured here or the
+            # turn is indistinguishable from ordinary conversation.
+            frozen = (
+                conversation.initial_state
+                if conversation is not None and conversation.initial_state is not None
+                else None
+            )
+            # Neutral field names: the development redaction filter blanks the
+            # arguments of anything that looks like it carries speech, and a
+            # redacted diagnostic is no diagnostic at all.
+            logger.warning(
+                "empty execute plan: utterance=%s words=%r liveKeys=%s frozenKeys=%s "
+                "roomDeviceCount=%d truncated=%s",
+                utterance.id,
+                utterance.transcript,
+                sorted(relevant_state),
+                sorted(frozen) if frozen is not None else None,
+                len((frozen or relevant_state).get("roomDevices") or []),
+                (frozen or {}).get("truncatedFields"),
+            )
         interpretation = enforce_speech_cues(
             utterance.transcript,
             interpretation,
@@ -1279,6 +1367,15 @@ class NovaVoiceService:
             # If the tree cannot be read, it cannot establish that a household
             # device would be affected. Fail closed without taking down speech
             # interpretation or turning an outage into a voice-service error.
+            #
+            # Logged because failing closed here silently mutes every command
+            # in the house while every other signal — interpretation, policy,
+            # the dashboard's own health — still looks perfectly healthy.
+            logger.warning(
+                "device admission failed closed; dropping every household action: utterance=%s",
+                utterance.id,
+                exc_info=True,
+            )
             invalid_device_actions = {
                 action.id
                 for action in interpretation.actions
@@ -1296,6 +1393,19 @@ class NovaVoiceService:
         ]
         targets_verified = bool(device_actions) and not invalid_device_actions
         if invalid_device_actions:
+            # The other way a command dies quietly: the model named a target the
+            # freshly-read device tree could not resolve. Naming it is the
+            # difference between "the assistant is being difficult" and "the
+            # alias index does not know that phrase".
+            logger.info(
+                "dropped unresolvable household actions: utterance=%s targets=%s",
+                utterance.id,
+                [
+                    action.call.arguments.get("target")
+                    for action in interpretation.actions
+                    if action.id in invalid_device_actions
+                ],
+            )
             still_valid_actions = [
                 action
                 for action in interpretation.actions
@@ -1429,6 +1539,38 @@ class NovaVoiceService:
                 update={"decision": Decision.REPLY, "actions": []}
             )
 
+        # A household directive that planned nothing is a command the model
+        # declined to act on, not a conversation. Letting it render freely is
+        # how the assistant ended up cheerfully explaining that it could not
+        # find lights it can see and control — an answer that is both wrong and
+        # worse than silence, because it reads as a considered refusal. A
+        # command speaks when it succeeds; otherwise it stays quiet and the
+        # transcript records that nothing happened.
+        unplanned_command = bool(
+            addressed
+            and not outcome.execute
+            and not outcome.shadowed
+            and not results
+            and interpretation.speech_act in _COMMAND_SPEECH_ACTS
+            # A clarify is a deliberate, useful question ("which lamp?") and is
+            # the one thing an unexecuted command may legitimately say.
+            and interpretation.decision != Decision.CLARIFY
+            # The speech act alone is too loose: "tell me a joke" and "how are
+            # you" are routinely classified as directives, and silencing those
+            # would make the assistant mute rather than accurate. Only a turn
+            # that plausibly concerns the household is a household command.
+            and household_state_is_relevant(utterance.transcript)
+            # A bare wake word carries no command to have failed.
+            and command_word_count(utterance.transcript, self._address_words()) > 0
+        )
+        if unplanned_command:
+            logger.info(
+                "silenced unplanned command: utterance=%s speech_act=%s decision=%s",
+                utterance.id,
+                interpretation.speech_act.value,
+                interpretation.decision.value,
+            )
+
         session_started = time.perf_counter()
         self.sessions.update(
             utterance,
@@ -1493,7 +1635,12 @@ class NovaVoiceService:
         )
         bare_wake_max_words = random.choice((1, 2)) if bare_wake_word_turn else None
 
-        if verified_dashboard_command and command_max_words == 0:
+        if unplanned_command:
+            # No model render, and no deterministic persona line either: a
+            # command that did not run has nothing true to say.
+            response_text = None
+            turn_machine.record_response("final", None, force=True)
+        elif verified_dashboard_command and command_max_words == 0:
             response_text = None
         elif not outcome.shadowed and (
             self._needs_model_render(interpretation, results)
@@ -1703,7 +1850,7 @@ class NovaVoiceService:
             timings_ms=timings_ms,
         )
 
-    async def execute_companion_tool_call(self, call) -> "ToolResultMessage":
+    async def execute_companion_tool_call(self, call) -> ToolResultMessage:
         """Run one tool a companion asked for, and answer on the same socket.
 
         The companion plans; it never executes. Its ``tool_call`` re-enters
