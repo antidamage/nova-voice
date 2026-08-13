@@ -7,6 +7,7 @@ answer is *true* — is left to the judge.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -200,3 +201,57 @@ def _bodies(outcome: TurnOutcome) -> list[dict[str, Any]]:
 
 def _contains(body: dict[str, Any], expected: dict[str, Any]) -> bool:
     return all(body.get(key) == value for key, value in expected.items())
+
+
+def _spoken_words(text: str) -> list[str]:
+    return [word for word in re.findall(r"[a-z0-9']+", text.casefold()) if word]
+
+
+def transcription_fidelity(phrase: str, heard: str) -> float:
+    """How much of the intended phrase actually survived recognition.
+
+    Word-level recall rather than an edit distance: what matters is whether the
+    words that carry the request arrived, not whether punctuation or a filler
+    differs. Returns 0..1.
+    """
+
+    intended = _spoken_words(phrase)
+    if not intended:
+        return 1.0
+    remaining = list(_spoken_words(heard))
+    kept = 0
+    for word in intended:
+        if word in remaining:
+            remaining.remove(word)
+            kept += 1
+    return kept / len(intended)
+
+
+def check_transcription(
+    outcome: TurnOutcome, phrase: str, *, minimum: float = 0.6
+) -> CheckResult:
+    """Fail a case whose phrase did not survive STT.
+
+    Without this a recognition regression reads as a pass: "Make it brighter"
+    came back as "Naked brighter", the planner sensibly declined to act on
+    nonsense, and the judge — which never sees the intended phrase — graded a
+    reasonable answer to a question nobody asked. The case was green while the
+    stack was mishearing a direct command.
+
+    Marked inconclusive rather than failed: the stack behaved correctly for
+    what it heard, so this is not a behavioural regression to be triaged as
+    one. It does mean the case proved nothing about the behaviour it names.
+    """
+
+    fidelity = transcription_fidelity(phrase, outcome.transcript)
+    if fidelity >= minimum:
+        return CheckResult(True, [])
+    return CheckResult(
+        False,
+        [
+            f"speech recognition did not carry the phrase "
+            f"({fidelity:.0%} of words survived): said {phrase!r}, heard "
+            f"{outcome.transcript!r}"
+        ],
+        inconclusive=True,
+    )

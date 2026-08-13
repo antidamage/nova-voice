@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from .assertions import check
+from .assertions import check, check_transcription
 from .conftest import load_cases
 from .runner import TurnRequest
 
@@ -46,6 +46,13 @@ async def test_direct_command(harness, judge_spec, case, satellite, room, record
     record_property("decision", outcome.decision)
     record_property("requests", outcome.requests)
     record_property("said", outcome.response_text)
+
+    # Before judging the behaviour, check the stack actually heard the phrase.
+    # A mangled transcript makes every later assertion answer a question nobody
+    # asked — that is how a recognition regression used to read as a pass.
+    heard = check_transcription(outcome, case["phrase"])
+    if not heard.passed:
+        pytest.skip("; ".join(heard.failures))
 
     if case.get("mode") == "record":
         # Behaviour we have not decided on yet. Capture it so the expectation
