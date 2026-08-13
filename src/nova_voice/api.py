@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -102,7 +103,10 @@ from nova_voice.tts_engines import (
     engine_for_backend,
     engine_ids,
 )
+from nova_voice.training.mode import TrainingMode
+from nova_voice.training.paths import TRAINING_MODE_STATE
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
+from nova_voice.warmth import WarmthKeeper
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +358,7 @@ def create_app(
         frame_ms=selected_settings.tts_frame_ms,
     )
     janitor_task: asyncio.Task | None = None
+    warmth_keeper: WarmthKeeper | None = None
     monitor = VoiceMonitor()
     # The companion channel reuses the household CA the mTLS listener already
     # trusts. With no CA configured the authenticator refuses every peer, which
@@ -462,7 +467,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal janitor_task, selected_audio
+        nonlocal janitor_task, selected_audio, warmth_keeper
         await selected_service.initialize()
         if selected_settings.audio_enabled and selected_audio is None:
             selected_audio = build_audio_runtime(selected_settings, selected_service)
@@ -471,6 +476,17 @@ def create_app(
             # rather than lazily on the first addressed turn where it races the
             # live audio path and NeMo's non-reentrant restore.
             await selected_audio.warmup()
+        # Recognition is warm by the line above; the *generative* half — the
+        # interpretation model's slot and the TTS engine's voice weights — is
+        # not, and on the trained engine that is a ~20 s bill the first spoken
+        # reply pays. The keeper pays it here instead, then holds it paid.
+        training_mode = TrainingMode(Path(TRAINING_MODE_STATE))
+        warmth_keeper = WarmthKeeper(
+            interpreter=getattr(selected_service, "interpreter", None),
+            speech=getattr(selected_audio, "tts", None) if selected_audio else None,
+            training_active=lambda: training_mode.active,
+            interval_seconds=selected_settings.warmth_interval_seconds,
+        )
         attach_monitor()
         try:
             await collect_voice_settings()
@@ -480,7 +496,13 @@ def create_app(
             logger.warning("Nova voice settings unavailable during startup", exc_info=True)
         janitor_task = asyncio.create_task(selected_service.store.run_janitor())
         probe_task = asyncio.create_task(upgrade_probe_watchdog())
+        # Started as a task, not awaited: the first pass drives a real
+        # synthesis, and blocking startup on it would keep the satellites
+        # unable to connect for its duration — trading a slow first reply for
+        # an unreachable service, which is strictly worse.
+        warmth_task = asyncio.create_task(warmth_keeper.run())
         yield
+        warmth_task.cancel()
         probe_task.cancel()
         selected_service.store.stop()
         if janitor_task:
@@ -514,6 +536,16 @@ def create_app(
         }
         payload["ok"] = bool(payload["ok"] and payload["audio"]["ok"])
         payload["multimodal"] = await multimodal_inputs.health()
+        # Reported alongside, never folded into, `ok`. They answer different
+        # questions: `ok` is "are the services up", warmth is "would a wake word
+        # be answered promptly right now". A stack that is up but cold is not a
+        # fault, and a stack that is warm but whose provider link is down is not
+        # fine — collapsing the two loses exactly the distinction that made a
+        # slow first reply indistinguishable from a broken one.
+        payload["warmth"] = warmth_keeper.health() if warmth_keeper is not None else {
+            "ok": True,
+            "state": "unknown",
+        }
         return payload
 
     @app.post("/v1/communications/{draft_id}/preview")
@@ -2109,6 +2141,93 @@ def create_app(
         finally:
             await selected_audio.stt.cancel_stream(stream_id)
 
+    async def bind_satellite_identity(websocket: WebSocket, hello: SatelliteHello) -> bool:
+        """Prove a satellite holds the identity it announced. True to continue.
+
+        Same problem as the companion channel: the mTLS listener proves a peer
+        holds *a* household certificate, not that it holds the one matching the
+        ``satelliteId`` in its hello. Until this, any household certificate
+        could claim to be any satellite.
+
+        The exchange is opt-in by the client so a deployed fleet keeps working
+        through the rollout. A client that advertises ``identityProof`` gets
+        challenged before it is accepted; one that does not is admitted only
+        while ``companion_allow_unbound_satellites`` is set, and every such
+        admission is logged so the remaining unbound clients are visible.
+
+        Browser satellites are exempt by construction: a browser cannot present
+        a client certificate at all, which is why the dashboard relays them
+        under its own identity.
+        """
+
+        if hello.is_browser:
+            return True
+        if not hello.capabilities.identity_proof:
+            if selected_settings.companion_allow_unbound_satellites:
+                logger.info(
+                    "satellite admitted without identity proof id=%s client=%s "
+                    "(migration switch is on)",
+                    hello.satellite_id,
+                    hello.client,
+                )
+                return True
+            logger.warning(
+                "satellite refused: no identity proof and unbound clients are "
+                "disabled id=%s",
+                hello.satellite_id,
+            )
+            await websocket.close(code=4003, reason="Identity proof required")
+            return False
+
+        nonce = companion_authenticator.issue_nonce()
+        await websocket.send_text(
+            json.dumps(
+                serialize_companion(
+                    AuthChallenge(
+                        nonce=nonce,
+                        supportedVersions=list(SUPPORTED_PROTOCOL_VERSIONS),
+                        expiresAt=datetime.now(UTC)
+                        + timedelta(seconds=selected_settings.companion_auth_nonce_ttl_seconds),
+                    )
+                )
+            )
+        )
+        try:
+            response = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+        except (TimeoutError, ValueError) as error:
+            logger.warning(
+                "satellite identity proof was not readable id=%s error=%s",
+                hello.satellite_id,
+                type(error).__name__,
+            )
+            await websocket.close(code=4003, reason="Identity proof required")
+            return False
+        if not isinstance(response, AuthResponse):
+            await websocket.close(code=4003, reason="Expected an auth response")
+            return False
+        try:
+            companion_authenticator.authenticate(
+                nonce=nonce,
+                protocol_version=response.protocol_version,
+                # The identity being bound is the one the *satellite* hello
+                # announced, not the one the auth frame claims, so a valid
+                # signature over a different name cannot slip through.
+                announced_id=hello.satellite_id,
+                roles=list(response.roles),
+                certificate_chain=list(response.certificate_chain),
+                signature=response.signature,
+            )
+        except CompanionAuthenticationError as error:
+            logger.warning(
+                "satellite identity rejected id=%s reason=%s", hello.satellite_id, error
+            )
+            await websocket.close(code=4003, reason="Authentication failed")
+            return False
+        logger.info("satellite identity bound id=%s", hello.satellite_id)
+        return True
+
     @app.websocket("/v1/companion")
     async def companion_socket(websocket: WebSocket) -> None:
         """The companion channel: jobs out, results and tool requests back.
@@ -2239,6 +2358,9 @@ def create_app(
             )
             stage = "validating hello"
             hello.validate_protocol()
+            stage = "binding satellite identity"
+            if not await bind_satellite_identity(websocket, hello):
+                return
             # The dashboard roster is authoritative for room assignment; the
             # satellite's env-file room is a fallback (redeploys have reset it
             # to the packaged example's "office" before).

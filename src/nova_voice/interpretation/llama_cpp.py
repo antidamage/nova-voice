@@ -787,6 +787,32 @@ class LlamaCppInterpreter(Interpreter):
         except httpx.HTTPError:
             return {"ok": False, "model": self.model}
 
+    async def warm(self) -> None:
+        """Force one real decode so the first spoken turn does not start cold.
+
+        ``/models`` — what :meth:`health` polls — answers from llama-server's
+        HTTP layer without touching the model, so it stays green through a slot
+        that has not decoded a token yet. This generates instead: a couple of
+        tokens is enough to fault the weights in, build the sampler, and prove
+        the slot actually produces output.
+
+        Kept context-free and near-zero length on purpose. The service runs
+        ``--parallel 1``, so this occupies the single slot for as long as it
+        runs, and it must never be the reason a wake word waits.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            # Qwen3.5 will otherwise spend its whole budget inside a reasoning
+            # block and return nothing, which reads as a failed pass.
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        response = await self._client.post("/chat/completions", json=payload, timeout=30)
+        response.raise_for_status()
+
     async def render_response(
         self,
         utterance: Utterance,

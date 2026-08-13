@@ -32,6 +32,11 @@ class SatelliteCapabilities(BaseModel):
     # The microphone stays open, but an edge activity gate with pre-roll and a
     # silence tail suppresses steady-idle transport before central VAD.
     local_vad: bool = Field(default=False, alias="localVad")
+    # The client can prove it holds the private key for the identity it
+    # announces. Declaring this opts the connection into a challenge before it
+    # is accepted; clients that predate the exchange simply do not set it, and
+    # are admitted only while the migration switch allows unbound identities.
+    identity_proof: bool = Field(default=False, alias="identityProof")
 
 
 class SatelliteHello(BaseModel):

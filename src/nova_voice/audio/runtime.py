@@ -1832,6 +1832,20 @@ class SatelliteAudioRuntime:
                 stage="interpretation_or_execution",
                 errorType=type(error).__name__,
             )
+            if addressed:
+                # The line is displayed as still working until it resolves, so
+                # a turn that dies here has to say so — otherwise the dashboard
+                # shows a command in flight that nothing will ever finish.
+                self._announce_transcript(
+                    "user",
+                    spoken_transcript,
+                    satellite_id=satellite_id,
+                    room_id=room_id,
+                    replaces_id=announce_id,
+                    kind="command",
+                    speaker_name=announced_speaker_name,
+                    outcome="failed",
+                )
             raise
         if result.speaker is not None:
             speaker_identity = result.speaker
@@ -1880,16 +1894,22 @@ class SatelliteAudioRuntime:
         # Command turns re-announce for every path: an addressed turn already
         # has a visible line, so this upgrades it in place with the [COMMAND]
         # tag; an unaddressed one appears for the first time here.
+        #
+        # Every *displayed* turn re-announces, not just command turns: the
+        # dashboard shows a user line as still working until an outcome
+        # arrives, so an exchange that never sent one would sit there in flight
+        # forever. Non-command turns send the outcome without the [COMMAND]
+        # tag, which resolves the line without claiming it was a command.
         is_dashboard_command = bool(result.executed or result.shadowed)
         turn_outcome = _transcript_outcome(result)
-        if is_dashboard_command:
+        if addressed or is_dashboard_command:
             self._announce_transcript(
                 "user",
                 spoken_transcript,
                 satellite_id=satellite_id,
                 room_id=room_id,
                 replaces_id=announce_id,
-                kind="command",
+                **({"kind": "command"} if is_dashboard_command else {}),
                 speaker_name=final_speaker_name,
                 outcome=turn_outcome,
                 decision=result.interpretation.decision.value,

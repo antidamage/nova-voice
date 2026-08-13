@@ -220,6 +220,12 @@ class Settings(BaseSettings):
     narrow_gate_enabled: bool = False
     narrow_gate_max_oov_ratio: float = Field(default=0.34, ge=0, le=1)
     conversation_idle_seconds: float = Field(default=60.0, ge=2, le=600)
+    # How often the warmth keeper re-exercises the interpretation and speech
+    # models when the household has not. Four minutes costs well under a second
+    # of GPU per pass while keeping the readiness reported by /health recent
+    # enough to act on. 0 disables the keeper entirely — for a bench deployment
+    # with no GPU to keep hot, not for the house.
+    warmth_interval_seconds: float = Field(default=240.0, ge=0, le=3600)
     # Multiple satellites in earshot of each other form one arbitration scope:
     # exactly one of them may own an utterance and its spoken response.
     # ``household`` treats every satellite as sharing the same air; ``room``
