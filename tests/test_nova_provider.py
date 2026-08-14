@@ -358,6 +358,7 @@ def test_device_states_separate_raw_devices_from_canonical_climate_controls() ->
             "name": "Air Conditioner",
             "room": "lounge",
             "power": "on",
+            "autoManaged": True,
             "targetTemperatureC": 22.0,
             "roomTemperatureC": 24.0,
             "supportedActions": [
@@ -847,6 +848,7 @@ async def test_panel_heater_waits_for_published_power_state_and_returns_canonica
         "name": "Panel Heater",
         "room": "bedroom",
         "power": "on",
+        "autoManaged": False,
         "targetTemperatureC": 22.0,
         "roomTemperatureC": 21.0,
         "supportedActions": [
@@ -955,3 +957,78 @@ async def test_health_does_not_force_a_full_state_refetch_each_poll() -> None:
     assert version_calls == 2
     assert state_calls == 1  # only the initial cold-cache fetch
     await client.close()
+
+
+def test_auto_mode_does_not_claim_an_idle_appliance_is_running() -> None:
+    """Auto managing a room is not the same fact as the appliance running.
+
+    These were merged: `power` reported "on" whenever dashboard Auto was
+    enabled, so with the compressor idle at target the assistant told the
+    household the air conditioner was "cranking hard" while it sat off. Both
+    facts are now reported, because a spoken answer has to be true about each.
+    """
+
+    state = {
+        "zones": [{"id": "lounge", "name": "Lounge"}, {"id": "climate", "name": "Climate"}],
+        "preferences": {"aircon": {"autoMode": True, "temperature": 28}},
+        "entities": [
+            {
+                "entity_id": "climate.aircon",
+                "name": "Air Conditioner",
+                "area_id": "lounge",
+                "domain": "climate",
+                # Off: the room has reached target and Auto is simply resting.
+                "state": "off",
+                "attributes": {"temperature": 28, "current_temperature": 28},
+            }
+        ],
+    }
+
+    control = NovaProvider._climate_controls(state)[0]
+
+    assert control["power"] == "off", "an idle compressor must not read as running"
+    assert control["autoManaged"] is True, "Auto is still managing the room"
+
+
+def test_a_running_appliance_still_reads_as_on() -> None:
+    state = {
+        "zones": [{"id": "lounge", "name": "Lounge"}],
+        "preferences": {"aircon": {"autoMode": False}},
+        "entities": [
+            {
+                "entity_id": "climate.aircon",
+                "name": "Air Conditioner",
+                "area_id": "lounge",
+                "domain": "climate",
+                "state": "heat",
+                "attributes": {"temperature": 24, "current_temperature": 19},
+            }
+        ],
+    }
+
+    control = NovaProvider._climate_controls(state)[0]
+
+    assert control["power"] == "on"
+    assert control["autoManaged"] is False
+
+
+def test_an_unavailable_control_is_neither_on_nor_off() -> None:
+    state = {
+        "zones": [{"id": "lounge", "name": "Lounge"}],
+        "preferences": {"aircon": {"autoMode": True}},
+        "entities": [
+            {
+                "entity_id": "climate.aircon",
+                "name": "Air Conditioner",
+                "area_id": "lounge",
+                "domain": "climate",
+                "state": "unavailable",
+            }
+        ],
+    }
+
+    control = NovaProvider._climate_controls(state)[0]
+
+    # Auto being enabled must not paper over a device Nova cannot reach.
+    assert control["power"] == "unavailable"
+    assert control["autoManaged"] is True
