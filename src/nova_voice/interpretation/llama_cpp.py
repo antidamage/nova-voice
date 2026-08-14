@@ -274,6 +274,13 @@ Decision mapping:
 - relevantState.climateControls is the authoritative climate interface. Offer only power
   on/off and target temperature. Raw heat/cool/manual HVAC modes are implementation details,
   never separate controls. Use turn_on/turn_off for power and set_temperature for a target.
+- A climate control's `power` is the appliance right now, and `autoManaged` is whether Nova
+  is managing it. They are different facts and you must not merge them. `power` "off" with
+  `autoManaged` true is the normal resting state of a room that has reached its target:
+  answer that it is not running but is being kept at the target, never that it is on or
+  working hard. Never describe a device as running, cranking or heating when `power` is
+  "off". Report `roomTemperatureC` as the temperature it is; `targetTemperatureC` is only
+  what it is aiming for.
 - Relative requests have their own actions, and you must use them rather than working out a
   number yourself. "Brighter"/"turn it up" is brighten; "dimmer"/"turn it down" is dim;
   "warmer"/"warm the bedroom" is warm_up; "colder"/"cool the room" is cool_down. Send the

@@ -952,6 +952,17 @@ class SatelliteAudioRuntime:
         # required for invented ones the RNNT would otherwise delete.
         set_boost = getattr(self.stt, "set_boosted_phrases", None)
         if callable(set_boost):
+            # Only the wake words and the agent name. Boosting the
+            # household's own device and room names as well is an
+            # obvious-looking idea that was tried and measured on 2026-08-15
+            # and could not be shown to help — each configuration appeared to
+            # trade one word for another. Note the measurement itself was
+            # underpowered: transcription varies run to run, so a single run
+            # per configuration cannot settle it. Revisit only with repeated
+            # runs and a word-error rate, and probably with a different
+            # mechanism than a longer list, since the tree biases decoding
+            # rather than defining a vocabulary.
+            # See docs/evidence/stt-household-biasing-20260815.md.
             await set_boost([*settings.wake_words, settings.spoken_name])
         self.playback_preroll_ms = max(20, min(2000, int(settings.tts_preroll_ms)))
         self.playback_frame_ms = max(20, min(200, int(settings.tts_frame_ms)))

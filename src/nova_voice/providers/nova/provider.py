@@ -854,17 +854,17 @@ class NovaProvider(CapabilityProvider):
                 continue
             room = "lounge" if kind == "aircon" else "bedroom"
             state_name = str(entity.get("state") or "").casefold()
+            auto_managed = kind == "aircon" and aircon_preferences.get("autoMode") is True
             if state_name in {"unknown", "unavailable", ""}:
                 power = "unavailable"
             else:
-                # Manual aircon operation still means the appliance is on, but
-                # an assistant turn_on command normalises it to dashboard Auto.
-                power = (
-                    "on"
-                    if climate_is_on(entity)
-                    or (kind == "aircon" and aircon_preferences.get("autoMode") is True)
-                    else "off"
-                )
+                # `power` is the appliance itself, and nothing else. It used to
+                # also report "on" whenever dashboard Auto was enabled, which
+                # conflated two different facts and made the assistant tell the
+                # household the air conditioner was running while its compressor
+                # sat idle at target. Auto being enabled is reported separately
+                # as `autoManaged`, so a spoken answer can be true about both.
+                power = "on" if climate_is_on(entity) else "off"
             attributes = (
                 entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
             )
@@ -879,6 +879,11 @@ class NovaProvider(CapabilityProvider):
                     or ("Air Conditioner" if kind == "aircon" else "Panel Heater"),
                     "room": room,
                     "power": power,
+                    # Whether Nova's own Auto controller is managing this device.
+                    # Auto on with power off is the normal, correct resting
+                    # state once a room reaches its target — it means "being
+                    # looked after", not "broken" and not "running".
+                    "autoManaged": auto_managed,
                     "targetTemperatureC": cls._numeric_value(target),
                     "roomTemperatureC": indoor.get(room),
                     "supportedActions": [
