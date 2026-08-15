@@ -26,11 +26,20 @@ public actor URLSessionCompanionSocket: NSObject, CompanionSocket {
         public let secIdentity: SecIdentity
         public let announcedId: String
         public let roles: [CompanionRole]
+        /// The household CA, anchored for server-trust evaluation. Nil falls
+        /// back to system roots, which will reject Nova's own certificate.
+        public let caCertificate: SecCertificate?
 
-        public init(secIdentity: SecIdentity, announcedId: String, roles: [CompanionRole]) {
+        public init(
+            secIdentity: SecIdentity,
+            announcedId: String,
+            roles: [CompanionRole],
+            caCertificate: SecCertificate? = nil
+        ) {
             self.secIdentity = secIdentity
             self.announcedId = announcedId
             self.roles = roles
+            self.caCertificate = caCertificate
         }
     }
 
@@ -41,7 +50,7 @@ public actor URLSessionCompanionSocket: NSObject, CompanionSocket {
     }
 
     public func connect() async throws {
-        let delegate = TLSDelegate(identity: identity.secIdentity)
+        let delegate = TLSDelegate(identity: identity.secIdentity, anchor: identity.caCertificate)
         let configuration = URLSessionConfiguration.ephemeral
         // The server disables WebSocket pings because macOS URLSession tore
         // down otherwise-healthy streams on them, so liveness is the
@@ -81,12 +90,24 @@ public actor URLSessionCompanionSocket: NSObject, CompanionSocket {
     }
 }
 
-/// Presents the household client certificate when the server asks for one.
+/// Presents the household client certificate, and trusts the household CA.
+///
+/// Both halves are necessary. Nova's server certificate is signed by the
+/// household CA, which no device trusts by default, so without anchoring it
+/// the connection fails TLS (-1200) even once the network path works.
+///
+/// The CA is used as an **additional anchor with the system roots disabled**,
+/// so this trusts exactly one issuer rather than weakening validation
+/// generally: a public certificate for the same address would now be rejected,
+/// which is the correct behaviour for a service that is only ever the
+/// household's own.
 private final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let identity: SecIdentity
+    private let anchor: SecCertificate?
 
-    init(identity: SecIdentity) {
+    init(identity: SecIdentity, anchor: SecCertificate?) {
         self.identity = identity
+        self.anchor = anchor
     }
 
     func urlSession(
@@ -94,17 +115,41 @@ private final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendab
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard challenge.protectionSpace.authenticationMethod
-            == NSURLAuthenticationMethodClientCertificate
-        else {
-            // Server trust and everything else keep default handling. This
-            // delegate exists only to answer the client-certificate request.
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodClientCertificate:
+            completionHandler(
+                .useCredential,
+                URLCredential(identity: identity, certificates: nil, persistence: .forSession)
+            )
+
+        case NSURLAuthenticationMethodServerTrust:
+            guard let trust = challenge.protectionSpace.serverTrust, let anchor else {
+                print("[tls] server trust challenge with no anchor; deferring to system roots")
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            SecTrustSetAnchorCertificates(trust, [anchor] as CFArray)
+            // Without this the system roots stay in play alongside ours.
+            SecTrustSetAnchorCertificatesOnly(trust, true)
+            var error: CFError?
+            if SecTrustEvaluateWithError(trust, &error) {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                // Refused rather than accepted-anyway: the whole point of
+                // anchoring is that an unexpected certificate is a real signal.
+                //
+                // Logged with the reason because the two ways this fails look
+                // identical from outside — a chain that does not lead to the
+                // household CA, and a certificate that does but names an
+                // address it was never issued for — and the fixes are
+                // completely different.
+                print("[tls] server trust rejected for \(challenge.protectionSpace.host): "
+                    + String(describing: error))
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+
+        default:
             completionHandler(.performDefaultHandling, nil)
-            return
         }
-        let credential = URLCredential(
-            identity: identity, certificates: nil, persistence: .forSession
-        )
-        completionHandler(.useCredential, credential)
     }
 }

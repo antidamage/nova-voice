@@ -27,3 +27,8 @@ satellites/ios/NovaCompanion/companion-identity.p12
 
 # Deployment endpoint, identity and passphrase for the companion build.
 satellites/ios/NovaCompanion/companion-config.json
+
+# The household CA, anchored by the app so Nova's own server certificate
+# validates. Public material, but it names one deployment, so it is copied in
+# at build time alongside the identity rather than tracked.
+satellites/ios/NovaCompanion/household-ca.der

@@ -24,11 +24,52 @@ struct FoundationModelEngine: CompanionSession.Engine {
         case malformedResponse
     }
 
-    /// Workloads this engine will answer. `classify_icon` first on purpose: it
-    /// is out of the spoken turn, its answer is a single token from a closed
-    /// vocabulary, and a wrong answer costs a wrong glyph rather than a wrong
-    /// action in the house — the cheapest possible thing to move first.
-    static let supported: [CompanionWorkload] = [.classifyIcon]
+    /// Workloads this engine will answer, in the order they were moved.
+    ///
+    /// `classify_icon` first on purpose: it is out of the spoken turn, its
+    /// answer is a single token from a closed vocabulary, and a wrong answer
+    /// costs a wrong glyph rather than a wrong action in the house — the
+    /// cheapest possible thing to move first.
+    ///
+    /// The other two are also off the spoken path, and each earns its place
+    /// for a different reason. `extract_self_profile_update` runs *beside*
+    /// interpretation on the same turn, so on Iridium the two queue behind one
+    /// llama.cpp slot; moving it stops them serialising. `confirm_objective`
+    /// fires repeatedly while a multi-device command settles — every call
+    /// lands exactly when the house is busiest.
+    ///
+    /// `render_response` is the first pass here that is *inside* the spoken
+    /// turn, and it is the safer of the two: its output is a sentence, so a
+    /// bad answer is a worse-worded reply rather than a wrong action in the
+    /// house, and Iridium re-applies the whole reply contract — word budgets
+    /// and the canned acknowledgement — to whatever comes back.
+    ///
+    /// `interpret` is deliberately still absent. It plans the actions.
+    static let supported: [CompanionWorkload] = [
+        .classifyIcon, .extractSelfProfileUpdate, .confirmObjective, .renderResponse,
+    ]
+
+    /// Why the model is or is not usable, in words. Availability has several
+    /// distinct causes — unsupported device, feature disabled, model still
+    /// downloading — and they need different actions from the owner, so
+    /// collapsing them to a bool loses the only useful part.
+    var availabilityDescription: String {
+        #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                switch SystemLanguageModel.default.availability {
+                case .available:
+                    return "available"
+                case .unavailable(let reason):
+                    return "unavailable: \(reason)"
+                @unknown default:
+                    return "unavailable: unknown"
+                }
+            }
+            return "unavailable: requires iOS 26"
+        #else
+            return "unavailable: FoundationModels not compiled in"
+        #endif
+    }
 
     var isAvailable: Bool {
         #if canImport(FoundationModels)
@@ -52,6 +93,12 @@ struct FoundationModelEngine: CompanionSession.Engine {
         switch workload {
         case .classifyIcon:
             return try await classifyIcon(payload: payload)
+        case .extractSelfProfileUpdate:
+            return try await extractSelfProfileUpdate(payload: payload)
+        case .confirmObjective:
+            return try await confirmObjective(payload: payload)
+        case .renderResponse:
+            return try await renderResponse(payload: payload)
         default:
             throw EngineError.unsupportedWorkload(workload)
         }
@@ -87,14 +134,283 @@ struct FoundationModelEngine: CompanionSession.Engine {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .lowercased()
                 guard let match = icons.first(where: { $0.lowercased() == chosen }) else {
-                    // "none" and anything invented both land here. Returning
-                    // nil makes Iridium fall back rather than accept a glyph
-                    // the vocabulary never offered.
-                    return nil
+                    // "none" and anything invented both land here, and both
+                    // are answered rather than rejected: no glyph fits is a
+                    // real conclusion, and rejecting would send Iridium off to
+                    // reach the same one on its own model.
+                    return .object(["icon": .null])
                 }
                 return .object(["icon": .string(match)])
             }
         #endif
         throw EngineError.unavailable
     }
+
+    /// Pull an explicit first-person name or pronoun disclosure out of a turn.
+    ///
+    /// Almost every turn contains none, so "nothing was disclosed" is answered
+    /// explicitly rather than rejected — a rejection would hand the common
+    /// case straight back to Iridium and offload only the rare one.
+    ///
+    /// Inference is not the job. "I'm Adeline" discloses a name; "I'm cold"
+    /// and "I'm at Adeline's place" do not, and a model that helpfully fills
+    /// the field in would rename the household from a passing remark. That is
+    /// why `evidence` is required alongside: a claim with no quotable span is
+    /// discarded here rather than trusted.
+    private func extractSelfProfileUpdate(payload: JSONValue) async throws -> JSONValue? {
+        let transcript = payload["transcript"]?.stringValue ?? ""
+        guard !transcript.isEmpty else { return .object(["update": .null]) }
+
+        #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                let session = LanguageModelSession(
+                    instructions: """
+                        You detect whether a speaker states their own name or \
+                        their own pronouns.
+                        Report only what is explicitly stated about the speaker \
+                        themselves. Never infer, never guess from context, and \
+                        never report a name belonging to someone else.
+                        If nothing is explicitly stated, set disclosed to false.
+                        Quote the exact words as evidence.
+                        """
+                )
+                let generated = try await session.respond(
+                    to: "Utterance: \(transcript)",
+                    generating: GeneratedSelfProfile.self
+                ).content
+
+                guard generated.disclosed else { return .object(["update": .null]) }
+                let name = Self.tidy(generated.name)
+                let pronouns = Self.tidy(generated.pronouns)
+                let evidence = Self.tidy(generated.evidence)
+                // Iridium's schema requires at least one of the two plus
+                // evidence. Filtering here rather than sending a shape it will
+                // reject keeps a wasted round trip out of the spoken turn.
+                guard name != nil || pronouns != nil, let evidence else {
+                    return .object(["update": .null])
+                }
+                // The evidence must actually be in what was said. A model that
+                // paraphrases its own justification is the failure mode this
+                // catches, and it is the one that would rename the household.
+                guard transcript.localizedCaseInsensitiveContains(evidence) else {
+                    return .object(["update": .null])
+                }
+                return .object([
+                    "update": .object([
+                        "name": name.map(JSONValue.string) ?? .null,
+                        "pronouns": pronouns.map(JSONValue.string) ?? .null,
+                        "evidence": .string(String(evidence.prefix(200))),
+                    ])
+                ])
+            }
+        #endif
+        throw EngineError.unavailable
+    }
+
+    /// Judge whether each still-pending device objective is now satisfied.
+    ///
+    /// Called repeatedly from Iridium's verification loop while a multi-device
+    /// command settles, which is what makes it worth moving: those calls land
+    /// on Iridium exactly when it is busiest actually driving the devices.
+    ///
+    /// Only the targets that were sent may appear in the answer, and
+    /// `all_confirmed` is computed here rather than taken from the model — it
+    /// is derivable, and Iridium rejects the whole verdict if the two disagree.
+    private func confirmObjective(payload: JSONValue) async throws -> JSONValue? {
+        let transcript = payload["transcript"]?.stringValue ?? ""
+        let pending = payload["pending"]?.arrayValue ?? []
+        guard !pending.isEmpty else {
+            return .object(["items": .array([]), "all_confirmed": .bool(true)])
+        }
+
+        let targets = pending.compactMap { $0["target"]?.stringValue }
+        guard !targets.isEmpty else { return nil }
+
+        #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                let described = pending.map { entry -> String in
+                    let target = entry["target"]?.stringValue ?? "?"
+                    let objective = entry["objective"]?.stringValue ?? "?"
+                    let observed = entry["observed"].map(Self.describe) ?? "unknown"
+                    return "- target: \(target)\n  objective: \(objective)\n  observed: \(observed)"
+                }.joined(separator: "\n")
+
+                let session = LanguageModelSession(
+                    instructions: """
+                        You judge whether each device's observed state now \
+                        satisfies its stated objective.
+                        Judge only from the observed state given. Do not assume \
+                        a command succeeded because it was issued.
+                        Answer for every target listed, once each, using the \
+                        target's exact name. Give a short reason for each.
+                        """
+                )
+                let generated = try await session.respond(
+                    to: """
+                        Request: \(transcript)
+                        Targets:
+                        \(described)
+                        """,
+                    generating: GeneratedVerdict.self
+                ).content
+
+                // One verdict per target that was asked about, in the order
+                // they were asked. A target the model skipped counts as
+                // unconfirmed, which keeps the loop waiting rather than
+                // declaring success it never actually judged.
+                var items: [JSONValue] = []
+                var allConfirmed = true
+                for target in targets {
+                    let match = generated.items.first {
+                        $0.target.compare(target, options: .caseInsensitive) == .orderedSame
+                    }
+                    let confirmed = match?.confirmed ?? false
+                    if !confirmed { allConfirmed = false }
+                    let reason = Self.tidy(match?.reason) ?? "no verdict returned for this target"
+                    items.append(
+                        .object([
+                            "target": .string(target),
+                            "confirmed": .bool(confirmed),
+                            "reason": .string(String(reason.prefix(200))),
+                        ])
+                    )
+                }
+                return .object(["items": .array(items), "all_confirmed": .bool(allConfirmed)])
+            }
+        #endif
+        throw EngineError.unavailable
+    }
+
+    /// Speak Nova's reply for this turn.
+    ///
+    /// The instructions arrive with the job and are used verbatim. They are
+    /// long, specific, and load-bearing — they decide whether the assistant may
+    /// claim a device changed, how many words it gets, whether it may mention
+    /// the weather — so nothing here paraphrases or supplements them. A phone
+    /// that improvised its own version of the reply contract would produce
+    /// replies that sound right and are wrong.
+    ///
+    /// Whatever comes back is still re-checked on Iridium against the same
+    /// word budgets the local model is held to.
+    private func renderResponse(payload: JSONValue) async throws -> JSONValue? {
+        guard let instructions = payload["instructions"]?.stringValue, !instructions.isEmpty,
+            let facts = payload["facts"]
+        else { return nil }
+
+        #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                let session = LanguageModelSession(instructions: instructions)
+                var prompt = ""
+                // Prior turns first, in the order they happened, so the reply
+                // lands as a continuation rather than a fresh answer.
+                for message in payload["history"]?.arrayValue ?? [] {
+                    guard let role = message["role"]?.stringValue,
+                        let content = message["content"]?.stringValue
+                    else { continue }
+                    prompt += "\(role): \(content)\n"
+                }
+                prompt += "facts: \(Self.encode(facts))"
+
+                var options = GenerationOptions()
+                if let maxTokens = payload["maxTokens"]?.intValue {
+                    options = GenerationOptions(maximumResponseTokens: maxTokens)
+                }
+                let text = try await session.respond(to: prompt, options: options).content
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // Empty is a failure, not an answer: a turn with nothing to say
+                // says nothing at all out loud, and that must not be something
+                // a phone can cause by accident.
+                guard !text.isEmpty else { return nil }
+                return .object(["text": .string(text)])
+            }
+        #endif
+        throw EngineError.unavailable
+    }
+
+    /// The structured input, as JSON, exactly as Iridium's own model receives it.
+    private static func encode(_ value: JSONValue) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+            let text = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return text
+    }
+
+    /// Trim, and treat blank or the model's own filler as absent.
+    private static func tidy(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !trimmed.isEmpty
+        else { return nil }
+        // Small models answer optional string fields with a word rather than
+        // leaving them out, and "none" as a name is worse than no name.
+        let placeholders: Set<String> = ["none", "null", "n/a", "na", "unknown", "unspecified"]
+        return placeholders.contains(trimmed.lowercased()) ? nil : trimmed
+    }
+
+    /// Render an observed-state blob compactly for the prompt.
+    private static func describe(_ value: JSONValue) -> String {
+        switch value {
+        case .object(let fields):
+            return fields
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\(describe($0.value))" }
+                .joined(separator: " ")
+        case .array(let items):
+            return items.map(describe).joined(separator: ", ")
+        case .string(let text):
+            return text
+        case .number(let number):
+            // Whole numbers read better without a decimal tail — "22" not
+            // "22.0" — but the conversion is guarded because a value outside
+            // Int's range would trap, and a prompt is not worth a crash.
+            if number == number.rounded(), let whole = Int(exactly: number.rounded()) {
+                return String(whole)
+            }
+            return String(number)
+        case .bool(let flag):
+            return flag ? "true" : "false"
+        case .null:
+            return "unknown"
+        }
+    }
 }
+
+#if canImport(FoundationModels)
+    /// The typed shapes the on-device model generates against.
+    ///
+    /// They are deliberately *not* Iridium's schemas. Iridium's models carry
+    /// cross-field rules — a self-profile update must contain a name or
+    /// pronouns, `all_confirmed` may not contradict its items — that a
+    /// generation schema cannot express, so the model is given a flat shape it
+    /// can always satisfy and the rules are applied afterwards, in code. The
+    /// alternative is a model that fails generation on the ordinary case.
+    @available(iOS 26.0, *)
+    @Generable
+    struct GeneratedSelfProfile {
+        @Guide(description: "True only if the speaker explicitly stated their own name or pronouns")
+        var disclosed: Bool
+        @Guide(description: "The speaker's own name, exactly as stated, or empty if not stated")
+        var name: String
+        @Guide(description: "The speaker's own pronouns, exactly as stated, or empty if not stated")
+        var pronouns: String
+        @Guide(description: "The exact words from the utterance that state it, or empty")
+        var evidence: String
+    }
+
+    @available(iOS 26.0, *)
+    @Generable
+    struct GeneratedVerdict {
+        @Guide(description: "One entry per target, using the exact target name given")
+        var items: [GeneratedVerdictItem]
+    }
+
+    @available(iOS 26.0, *)
+    @Generable
+    struct GeneratedVerdictItem {
+        @Guide(description: "The target's exact name as given")
+        var target: String
+        @Guide(description: "True only if the observed state satisfies the objective")
+        var confirmed: Bool
+        @Guide(description: "A short reason, under 200 characters")
+        var reason: String
+    }
+#endif

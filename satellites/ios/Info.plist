@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+
+	<!-- Nova is on the household LAN, so every connection this app makes is a
+	     local-network connection. Without this key iOS refuses them outright
+	     and reports NSURLErrorNotConnectedToInternet (-1009), which reads as
+	     "no internet" and sends you looking at the wrong layer entirely. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Nova Companion connects to your Nova voice server on the local network to answer requests on this device.</string>
+
+	<!-- The voice server presents a household CA certificate, not a public one,
+	     which App Transport Security rejects by default. NSAllowsLocalNetworking
+	     relaxes ATS for local addresses only — public hosts keep full ATS, so
+	     this does not weaken anything reachable from outside the house. Server
+	     identity is still verified: the client presents its own certificate and
+	     signs a challenge, which is a stronger check than ATS performs.
+
+	     NSAllowsLocalNetworking does not cover the tailnet. Tailscale addresses
+	     are in 100.64.0.0/10 (RFC 6598 shared address space), not the RFC 1918
+	     ranges ATS treats as local, so away-from-home connections got full ATS
+	     and failed with -1200 while the identical LAN address was fine. The
+	     exception below is by tailnet domain rather than address because ATS
+	     exception keys are domain names and silently do not match IPs — which
+	     is also why the endpoint is now the MagicDNS name.
+
+	     NSExceptionAllowsInsecureHTTPLoads reads worse than it is: it removes
+	     ATS's requirement for a *publicly* trusted chain on this one domain.
+	     What replaces it is stricter, not weaker — the app anchors the
+	     household CA alone, with system roots switched off, so a public
+	     certificate for the same name is now refused rather than accepted. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>tuatara-dory.ts.net</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

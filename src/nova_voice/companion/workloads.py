@@ -54,11 +54,31 @@ class IconChoice(BaseModel):
     The caller still re-checks the value against the closed vocabulary it sent.
     A schema is a strong guarantee, not a substitute for validating input that
     crossed a network.
+
+    ``icon`` is nullable because "nothing in this vocabulary fits" is a real
+    answer, not a failure. A result model that could not say so would force the
+    companion to reject the job instead, and Iridium would then run the local
+    pass to reach the same conclusion — offloading the cases that fit and
+    keeping the ones that do not, which is the wrong half.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    icon: str = Field(min_length=1, max_length=64)
+    icon: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class SelfProfileResult(BaseModel):
+    """Result shape for ``extract_self_profile_update``.
+
+    Wrapped for the same reason ``IconChoice`` is nullable, only more so: on
+    the overwhelming majority of turns nobody states their name or pronouns, so
+    "no disclosure" *is* the answer. Sending the bare model would make the
+    common case inexpressible and route it straight back to Iridium.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    update: SelfProfileUpdate | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +134,7 @@ WORKLOADS: dict[CompanionWorkload, WorkloadSpec] = {
     ),
     "extract_self_profile_update": WorkloadSpec(
         name="extract_self_profile_update",
-        result_model=SelfProfileUpdate,
+        result_model=SelfProfileResult,
         result_schema="extract_self_profile_update.v1",
         default_timeout_seconds=10.0,
         cancellation="anytime",
