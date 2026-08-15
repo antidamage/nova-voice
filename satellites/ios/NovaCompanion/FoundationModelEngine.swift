@@ -106,6 +106,8 @@ struct FoundationModelEngine: CompanionSession.Engine {
             return try await confirmObjective(payload: payload)
         case .renderResponse:
             return try await renderResponse(payload: payload)
+        case .interpret:
+            return try await interpret(payload: payload)
         default:
             throw EngineError.unsupportedWorkload(workload)
         }
@@ -346,6 +348,138 @@ struct FoundationModelEngine: CompanionSession.Engine {
         throw EngineError.unavailable
     }
 
+    /// Classify a turn and, when it asks for one, plan the actions.
+    ///
+    /// The riskiest thing this device does, and the shape reflects that. The
+    /// model is asked for a flat set of fields plus at most a few tool calls,
+    /// rather than for Nova's full `Interpretation` — that schema carries
+    /// cross-field rules a generation schema cannot express, and asking a small
+    /// model to satisfy them produces failed generations rather than careful
+    /// answers.
+    ///
+    /// Everything consequential is re-derived or re-checked on Iridium: it
+    /// validates the result against the real schema and rejects any action
+    /// naming a tool this turn did not offer, discarding the whole plan rather
+    /// than dropping a clause. Nothing here is trusted to be safe; it is
+    /// trusted only to be a suggestion.
+    private func interpret(payload: JSONValue) async throws -> JSONValue? {
+        let turn = payload["turn"]
+        guard let transcript = turn?["utterance"]?["transcript"]?.stringValue,
+            !transcript.isEmpty
+        else { return nil }
+
+        #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                let instructions = payload["instructions"]?.stringValue ?? ""
+                let session = LanguageModelSession(instructions: instructions)
+
+                var prompt = ""
+                if let tools = payload["semanticTools"], case .array(let list) = tools,
+                    !list.isEmpty
+                {
+                    prompt += "Tools you may call:\n\(Self.encode(tools))\n\n"
+                }
+                if let state = payload["relevantState"], state != .object([:]) {
+                    prompt += "Household state:\n\(Self.encode(state))\n\n"
+                }
+                // Whatever Iridium had to drop to fit this device is stated, so
+                // the plan can be honest about seeing a partial listing rather
+                // than answering as though it saw everything.
+                if let note = payload["compactionNote"]?.stringValue {
+                    prompt += "\(note)\n\n"
+                }
+                prompt += "Classify this turn and plan any actions it asks for:\n"
+                prompt += Self.encode(turn ?? .null)
+
+                let generated = try await session.respond(
+                    to: prompt, generating: GeneratedInterpretation.self
+                ).content
+                return Self.interpretation(from: generated, transcript: transcript)
+            }
+        #endif
+        throw EngineError.unavailable
+    }
+
+    /// Map the flat generated shape onto Nova's wire schema.
+    ///
+    /// Clamping rather than trusting: probabilities out of range, an unknown
+    /// enum value or a malformed tool name would each fail validation on
+    /// Iridium and cost the fallback, so they are corrected here where the
+    /// correct value is knowable and dropped where it is not.
+    @available(iOS 26.0, *)
+    private static func interpretation(
+        from generated: GeneratedInterpretation,
+        transcript: String
+    ) -> JSONValue {
+        var actions: [JSONValue] = []
+        for (index, action) in generated.actions.prefix(6).enumerated() {
+            let provider = tidy(action.provider)?.lowercased()
+            let name = tidy(action.name)
+            guard let provider, let name else { continue }
+            actions.append(
+                .object([
+                    "id": .string("companion-\(index)"),
+                    // Sequential, and dependency-free. A model asked to invent
+                    // an execution order invents dependencies with it, and a
+                    // wrong dependency deadlocks the plan rather than
+                    // misordering it. Spoken clauses run in the order spoken.
+                    "order": .number(Double(index)),
+                    "depends_on": .array([]),
+                    "call": .object([
+                        "provider": .string(provider),
+                        "tool": .string(name),
+                        "arguments": decodeArguments(action.argumentsJSON),
+                    ]),
+                ])
+            )
+        }
+
+        return .object([
+            "emotion": .object([
+                "label": .string(oneOf(generated.emotion, Self.EMOTIONS, fallback: "neutral")),
+                "confidence": .number(clamp(generated.emotionConfidence)),
+                "intensity": .number(clamp(generated.emotionIntensity)),
+                "evidence": .array([]),
+            ]),
+            "speech_act": .string(oneOf(generated.speechAct, Self.SPEECH_ACTS, fallback: "unclear")),
+            "addressed_probability": .number(clamp(generated.addressedProbability)),
+            "decision": .string(oneOf(generated.decision, Self.DECISIONS, fallback: "ignore")),
+            "confidence": .number(clamp(generated.confidence)),
+            "active_goal": .object([
+                "summary": .string(tidy(generated.goalSummary) ?? transcript),
+                "status": .string(oneOf(generated.goalStatus, Self.GOAL_STATUSES, fallback: "new")),
+                "pending": .array([]),
+            ]),
+            "actions": .array(actions),
+            "response_plan": .object([
+                "acknowledgement_style": .string("concise"),
+                "pre_action_speech": .null,
+                "requires_post_tool_rendering": .bool(!actions.isEmpty),
+            ]),
+            "self_profile_update": .null,
+        ])
+    }
+
+    /// Tool arguments arrive as a JSON string: a generation schema cannot
+    /// describe a shape that differs per tool. Unparseable means no arguments
+    /// rather than a discarded action, and Iridium validates them anyway.
+    private static func decodeArguments(_ text: String) -> JSONValue {
+        guard let data = text.data(using: .utf8),
+            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+            case .object = value
+        else { return .object([:]) }
+        return value
+    }
+
+    private static func oneOf(_ value: String, _ allowed: Set<String>, fallback: String) -> String {
+        let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return allowed.contains(candidate) ? candidate : fallback
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+
     /// The structured input, as JSON, exactly as Iridium's own model receives it.
     private static func encode(_ value: JSONValue) -> String {
         guard let data = try? JSONEncoder().encode(value),
@@ -353,6 +487,22 @@ struct FoundationModelEngine: CompanionSession.Engine {
         else { return "{}" }
         return text
     }
+
+    /// Nova's enums, mirrored. A value outside these fails validation on
+    /// Iridium and costs the fallback, so an unrecognised answer is corrected
+    /// to the safe member here instead — `ignore` for a decision, `unclear`
+    /// for a speech act: the ones that do the least if the model was wrong.
+    private static let EMOTIONS: Set<String> = [
+        "neutral", "calm", "grumpy", "angry", "excited", "bored", "sad", "anxious",
+    ]
+    private static let SPEECH_ACTS: Set<String> = [
+        "directive", "desired_state", "self_intention", "observation", "question",
+        "third_party", "quoted_or_media", "social", "unclear",
+    ]
+    private static let DECISIONS: Set<String> = ["execute", "reply", "clarify", "ignore"]
+    private static let GOAL_STATUSES: Set<String> = [
+        "new", "in_progress", "needs_clarification", "satisfied", "abandoned",
+    ]
 
     /// Trim, and treat blank or the model's own filler as absent.
     private static func tidy(_ value: String?) -> String? {
@@ -420,6 +570,59 @@ struct FoundationModelEngine: CompanionSession.Engine {
     struct GeneratedVerdict {
         @Guide(description: "One entry per target, using the exact target name given")
         var items: [GeneratedVerdictItem]
+    }
+
+    /// Flat on purpose. Nova's `Interpretation` nests emotion, goal and plan,
+    /// and carries cross-field rules a generation schema cannot express; a
+    /// small model asked for that shape fails generation rather than answering
+    /// carefully. The nesting is rebuilt in code, where the rules can be.
+    ///
+    /// Tool arguments are a JSON *string* for the same reason: their shape
+    /// differs per tool, so no single schema describes them.
+    @available(iOS 26.0, *)
+    @Generable
+    struct GeneratedInterpretation {
+        @Guide(description: "One of: neutral, calm, grumpy, angry, excited, bored, sad, anxious")
+        var emotion: String
+        @Guide(description: "How sure you are of the emotion, 0 to 1")
+        var emotionConfidence: Double
+        @Guide(description: "How strong the emotion is, 0 to 1")
+        var emotionIntensity: Double
+        @Guide(
+            description:
+                "One of: directive, desired_state, self_intention, observation, question, "
+                + "third_party, quoted_or_media, social, unclear"
+        )
+        var speechAct: String
+        @Guide(description: "Probability this was said to the assistant, 0 to 1")
+        var addressedProbability: Double
+        @Guide(
+            description:
+                "One of: execute (run the tools), reply (answer in words), clarify (ask a "
+                + "question), ignore (not addressed to you)"
+        )
+        var decision: String
+        @Guide(description: "How sure you are of the decision, 0 to 1")
+        var confidence: Double
+        @Guide(description: "One short sentence naming what the speaker wants")
+        var goalSummary: String
+        @Guide(
+            description: "One of: new, in_progress, needs_clarification, satisfied, abandoned"
+        )
+        var goalStatus: String
+        @Guide(description: "Tools to call, only from the list given, empty if none are needed")
+        var actions: [GeneratedAction]
+    }
+
+    @available(iOS 26.0, *)
+    @Generable
+    struct GeneratedAction {
+        @Guide(description: "The provider part of the tool name, before the dot")
+        var provider: String
+        @Guide(description: "The tool name, after the dot")
+        var name: String
+        @Guide(description: "The tool's arguments as a JSON object string, or {} if none")
+        var argumentsJSON: String
     }
 
     @available(iOS 26.0, *)
