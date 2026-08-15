@@ -509,6 +509,7 @@ class NovaVoiceService:
     def apply_voice_settings(self, settings: VoiceSettings) -> None:
         self.persona = self.persona.with_voice_settings(settings)
         self.voice_settings = settings
+        self._apply_companion_routes(settings.companion_routes)
         self.nova_provider.agent_name = settings.spoken_name
         # The conversation window is dashboard-tunable and applies live: both
         # the wide-vocabulary follow-up window and the goal-session clock must
@@ -586,6 +587,39 @@ class NovaVoiceService:
             for tool in catalog
             if not str(tool.get("function", {}).get("name", "")).startswith("web.")
         ]
+
+    def _apply_companion_routes(self, choices: dict[str, str]) -> None:
+        """Put each pass where the dashboard says it should run.
+
+        The three operator-facing words map onto the router's modes rather than
+        being stored as modes, because an operator is choosing a *machine*:
+        "both" is the useful one and means the phone answers when it can and
+        this host when it cannot, which is `companion_preferred`.
+
+        A workload absent from the map keeps its code default. That is what
+        makes an empty map mean "as shipped" rather than "route nothing", so a
+        deployment that has never touched these controls behaves exactly as it
+        did before they existed.
+        """
+
+        router = self.companion_router
+        if router is None or not choices:
+            return
+        modes = {"local": "local", "companion": "companion_only", "both": "companion_preferred"}
+        known = router.routes()
+        for workload, choice in choices.items():
+            mode = modes.get(choice)
+            if mode is None:
+                continue
+            if workload not in known:
+                # A workload this build does not have. Checked rather than
+                # caught, because `override` would happily *invent* the route
+                # and it would then show up in the status table as though it
+                # were real. Ignored so a stale preferences file cannot stop
+                # the settings pull that applies every other setting.
+                logger.warning("ignoring companion route for unknown workload %r", workload)
+                continue
+            router.override(workload, mode=mode)
 
     async def _routed_self_profile_update(self, utterance: Utterance) -> SelfProfileUpdate | None:
         """Identity extraction, on the companion when one is eligible.

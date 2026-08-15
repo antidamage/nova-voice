@@ -38,22 +38,28 @@ struct FoundationModelEngine: CompanionSession.Engine {
     /// fires repeatedly while a multi-device command settles — every call
     /// lands exactly when the house is busiest.
     ///
-    /// `render_response` is implemented below but **deliberately not
-    /// advertised**. Measured on this device it matched Iridium for speed and
-    /// then lost Nova entirely: flat "I'm just an AI, I don't have feelings"
-    /// replies where the local model speaks in character, answering the
-    /// previous question rather than the current one. That pass *is* the
-    /// assistant's voice, so it is not a rough edge to ship and polish later.
+    /// This list is **capability, not policy**: what this device can answer if
+    /// asked. Which passes are actually offered is Iridium's route table, set
+    /// per pass from the dashboard.
     ///
-    /// Advertising is the gate that matters. Iridium offers only what a device
-    /// says it can do, so leaving it out of this list stops the offers at the
-    /// source — before, and independently of, whatever the server's route table
-    /// happens to say. See docs/evidence/companion-offload-live-20260815.md.
+    /// The two are easy to conflate, and conflating them breaks the control.
+    /// `render_response` and `interpret` were briefly withheld here while the
+    /// route defaults that keep them local were still undeployed — leaving them
+    /// out was the only gate available at the time, because Iridium offers only
+    /// what a device says it can do. Now that those defaults are live, the same
+    /// omission would make the dashboard lie: choosing "Both" for the spoken
+    /// reply would change nothing and give no reason why.
     ///
-    /// `interpret` is absent for the same reason and worse stakes: it plans the
-    /// actions.
+    /// Both still ship routed local, on measured evidence — on this device the
+    /// reply pass matched Iridium for speed and lost Nova's persona entirely.
+    /// See docs/evidence/companion-offload-live-20260815.md. Turning either on
+    /// is now a deliberate choice someone makes in the UI, and a reversible one.
     static let supported: [CompanionWorkload] = [
-        .classifyIcon, .extractSelfProfileUpdate, .confirmObjective,
+        .classifyIcon,
+        .extractSelfProfileUpdate,
+        .confirmObjective,
+        .renderResponse,
+        .interpret,
     ]
 
     /// Why the model is or is not usable, in words. Availability has several
