@@ -44,6 +44,25 @@ class RenderRequest:
     requested_depth: str = "normal"
 
 
+@dataclass(frozen=True)
+class InterpretRequest:
+    """One interpretation pass, assembled but not yet run.
+
+    Same split as :class:`RenderRequest`, and the same reason: the prompt and
+    the model that answers it are separable. This one carries more, because the
+    planner needs the callable tools and the household snapshot as named blocks
+    the system prompt refers to by name.
+    """
+
+    messages: list[dict]
+    system: str
+    # The conversation-open block: callable tools, household state, memory.
+    opening_context: dict
+    # This turn only: the utterance and the cues derived from it.
+    turn_context: dict
+    history: list[dict] = field(default_factory=list)
+
+
 class Interpreter(ABC):
     async def extract_self_profile_update(
         self, utterance: Utterance
@@ -137,6 +156,27 @@ class Interpreter(ABC):
         """
 
         return None
+
+    def build_interpret_request(
+        self,
+        utterance: Utterance,
+        *,
+        active_goal: ActiveGoal | None,
+        relevant_state: dict[str, Any],
+        tools: list[dict],
+        conversation: ConversationSnapshot | None = None,
+    ) -> InterpretRequest | None:
+        """The planning prompt, for a backend that can hand it somewhere else.
+
+        None means "not routable", and the caller runs ``interpret`` unchanged.
+        """
+
+        return None
+
+    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+        """Answer an already-assembled planning request on this host."""
+
+        raise NotImplementedError
 
     async def run_render_request(self, request: RenderRequest) -> str | None:
         """Answer an already-assembled reply request on this host."""

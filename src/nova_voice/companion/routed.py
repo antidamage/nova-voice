@@ -13,10 +13,16 @@ flip inside the builder, so rebuilding it for the fallback would answer a
 different question from the one the phone was asked, and the word-budget check
 would then be applied against the wrong contract.
 
-Everything else delegates unchanged, including ``interpret``. The spoken turn's
-planning pass is not routed here — see the roadmap's NPT-307 — because it is
-the one pass whose failure mode is a wrong action in the house rather than a
-slower or blander sentence.
+``interpret`` is routed here too, and it is the one that needed more than
+schema validation. A plan whose shape is valid can still name a tool that does
+not exist: the action would be planned, spoken about, and only refused at
+execution — after the assistant had already said it was doing it. So every
+action is checked against the exact catalogue the turn offered, and one bad
+action discards the whole plan rather than being quietly dropped from it.
+
+Both hot-path routes ship ``local``. The capability is built and switchable at
+runtime; on measured evidence the on-device model is not yet good enough to
+hold the spoken turn. See docs/evidence/companion-offload-live-20260815.md.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from nova_voice.audio.conversation import (
     compact_memory_to_budget,
     compact_state_to_budget,
 )
+from nova_voice.companion.compaction import DEFAULT_CONTEXT_TOKENS, compact_for_companion
 from nova_voice.companion.router import CompanionWorkloadRouter
 from nova_voice.companion.workloads import parse_result
 from nova_voice.domain import (
@@ -39,7 +46,7 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import Interpreter, RenderRequest
+from nova_voice.interpretation.base import InterpretRequest, Interpreter, RenderRequest
 
 logger = logging.getLogger(__name__)
 
@@ -166,13 +173,89 @@ class RoutedInterpreter(Interpreter):
         tools: list[dict],
         conversation: ConversationSnapshot | None = None,
     ) -> Interpretation:
-        return await self.inner.interpret(
+        request = self.inner.build_interpret_request(
             utterance,
             active_goal=active_goal,
             relevant_state=relevant_state,
             tools=tools,
             conversation=conversation,
         )
+        if request is None:
+            return await self.inner.interpret(
+                utterance,
+                active_goal=active_goal,
+                relevant_state=relevant_state,
+                tools=tools,
+                conversation=conversation,
+            )
+
+        snapshot = self.router.sessions.snapshot()
+        context_tokens = snapshot.hot_context_tokens or DEFAULT_CONTEXT_TOKENS
+        compacted = compact_for_companion(
+            instructions=request.system,
+            tools=request.opening_context.get("semanticTools") or [],
+            state=request.opening_context.get("relevantState") or {},
+            memory=request.opening_context.get("selectedMemory") or [],
+            history=request.history,
+            context_tokens=context_tokens,
+        )
+        payload = compacted.as_payload() | {"turn": request.turn_context}
+
+        outcome = await self.router.run(
+            "interpret",
+            payload,
+            lambda: self.inner.run_interpret_request(request),
+            parse=lambda result: self._validated_interpretation(result, compacted.tools),
+        )
+        logger.info(
+            "interpret resolved source=%s reason=%s elapsed_ms=%s",
+            outcome.source,
+            outcome.reason,
+            outcome.elapsed_ms,
+        )
+        if isinstance(outcome.value, Interpretation):
+            return outcome.value
+        # Reached only when the route is `disabled` or `companion_only`, which
+        # return without running anything locally. Neither is a state a spoken
+        # turn can proceed from — there is no "no interpretation" branch above
+        # this — so the local pass runs regardless of what the route said.
+        return await self.inner.run_interpret_request(request)
+
+    @staticmethod
+    def _validated_interpretation(result: object, offered_tools: list[dict]) -> Any:
+        """Accept a plan from the phone only if it stays inside what it was shown.
+
+        Schema validation is not enough on its own. It proves the shape, not
+        that the plan is *actionable*: a model can invent a plausible tool name,
+        and the resulting action would be planned, spoken about, and only then
+        refused — after the assistant has already said it was doing it.
+
+        So every action is checked against the exact catalogue this turn sent.
+        One bad action discards the whole interpretation rather than being
+        dropped from it, because a plan with a clause removed is not the plan
+        the model made: "turn the lights off and lock the door" minus one
+        clause still reads as success.
+        """
+
+        parsed = parse_result("interpret", result)
+        if not isinstance(parsed, Interpretation):
+            return None
+
+        allowed = {
+            name
+            for tool in offered_tools
+            if isinstance(tool, dict)
+            and isinstance(tool.get("function"), dict)
+            and (name := tool["function"].get("name"))
+        }
+        for action in parsed.actions:
+            qualified = f"{action.call.provider}.{action.call.tool}"
+            if qualified not in allowed and action.call.tool not in allowed:
+                logger.warning(
+                    "companion interpretation planned an unoffered tool: %s", qualified
+                )
+                return None
+        return parsed
 
     async def extract_self_profile_update(
         self, utterance: Utterance
@@ -191,6 +274,12 @@ class RoutedInterpreter(Interpreter):
 
     def build_render_request(self, *args, **kwargs) -> RenderRequest | None:
         return self.inner.build_render_request(*args, **kwargs)
+
+    def build_interpret_request(self, *args, **kwargs) -> InterpretRequest | None:
+        return self.inner.build_interpret_request(*args, **kwargs)
+
+    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+        return await self.inner.run_interpret_request(request)
 
     async def run_render_request(self, request: RenderRequest) -> str | None:
         return await self.inner.run_render_request(request)

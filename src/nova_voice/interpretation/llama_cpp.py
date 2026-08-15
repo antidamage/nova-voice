@@ -24,7 +24,7 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import Interpreter, RenderRequest
+from nova_voice.interpretation.base import InterpretRequest, Interpreter, RenderRequest
 from nova_voice.interpretation.response_length import (
     bare_wake_acknowledgement,
     bounded_long_reply,
@@ -622,7 +622,7 @@ class LlamaCppInterpreter(Interpreter):
             logger.warning("turn grading unavailable: %s", error)
             return None
 
-    async def interpret(
+    def build_interpret_request(
         self,
         utterance: Utterance,
         *,
@@ -630,7 +630,14 @@ class LlamaCppInterpreter(Interpreter):
         relevant_state: dict[str, Any],
         tools: list[dict],
         conversation: ConversationSnapshot | None = None,
-    ) -> Interpretation:
+    ) -> InterpretRequest:
+        """Assemble the planning prompt without running it.
+
+        Split from :meth:`interpret` for the same reason the reply pass was:
+        the instructions decide what the planner is allowed to do, and a second
+        prompt written for another device would drift from this one.
+        """
+
         # Bulky prompt inputs (household state + selected memory) are captured
         # once at conversation open and reused frozen on follow-up turns, so
         # each turn only carries its own utterance. The live ``relevant_state``
@@ -738,7 +745,6 @@ class LlamaCppInterpreter(Interpreter):
                 "stale; use it to answer follow-ups and maintain the goal, never invent "
                 "beyond it):\n" + "\n".join(f"- {entry}" for entry in conversation.observations)
             )
-        schema = Interpretation.model_json_schema()
         messages = [{"role": "system", "content": system}]
         # Pinned conversation-open context, ahead of the turn history so it forms
         # a stable, cacheable prefix. Its field names (semanticTools,
@@ -746,17 +752,49 @@ class LlamaCppInterpreter(Interpreter):
         messages.append(
             {"role": "user", "content": json.dumps(opening_context, separators=(",", ":"))}
         )
+        history: list[dict] = []
         if conversation is not None:
-            messages.extend(
+            history = [
                 {
                     "role": message.role,
                     "content": _conversation_message_content(message),
                 }
                 for message in conversation.messages
-            )
+            ]
+        messages.extend(history)
         messages.append(
             {"role": "user", "content": json.dumps(turn_context, separators=(",", ":"))}
         )
+        return InterpretRequest(
+            messages=messages,
+            system=system,
+            opening_context=opening_context,
+            turn_context=turn_context,
+            history=history,
+        )
+
+    async def interpret(
+        self,
+        utterance: Utterance,
+        *,
+        active_goal: ActiveGoal | None,
+        relevant_state: dict[str, Any],
+        tools: list[dict],
+        conversation: ConversationSnapshot | None = None,
+    ) -> Interpretation:
+        return await self.run_interpret_request(
+            self.build_interpret_request(
+                utterance,
+                active_goal=active_goal,
+                relevant_state=relevant_state,
+                tools=tools,
+                conversation=conversation,
+            )
+        )
+
+    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+        schema = Interpretation.model_json_schema()
+        messages = request.messages
         payload = {
             "model": self.model,
             "messages": messages,
