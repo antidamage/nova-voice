@@ -6,6 +6,7 @@ from nova_voice.automation import AutomationManager
 from nova_voice.briefings import BriefingManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.companion.router import CompanionWorkloadRouter
+from nova_voice.companion.routed import RoutedInterpreter
 from nova_voice.companion.session import CompanionSessionManager
 from nova_voice.companion.tiers import TierThresholds
 from nova_voice.commitments import CommitmentManager
@@ -232,6 +233,11 @@ def build_service(settings: Settings) -> NovaVoiceService:
         failure_budget=settings.companion_failure_budget,
         breaker_pause_seconds=settings.companion_breaker_pause_seconds,
     )
+    # The reply pass is routed by wrapping the interpreter rather than by
+    # editing its three call sites, so the post-generation reply contract stays
+    # in one place. With no companion connected the wrapper runs the inner
+    # interpreter and nothing observable changes.
+    interpreter = RoutedInterpreter(interpreter, companion_router)
     persona = Persona.load(settings.persona_path)
     conversations = ConversationTracker(
         idle_seconds=settings.conversation_idle_seconds,

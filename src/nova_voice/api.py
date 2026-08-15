@@ -41,6 +41,7 @@ from nova_voice.companion.protocol import (
     HelloAck,
 )
 from nova_voice.companion.protocol import parse_client_message as parse_companion_message
+from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.companion.protocol import serialize as serialize_companion
 from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
@@ -1788,7 +1789,36 @@ def create_app(
         if not callable(classify):
             return {"icon": None}
 
-        icon = await classify(name, allowed)
+        router = selected_service.companion_router
+        if router is None:
+            icon = await classify(name, allowed)
+            return {"icon": icon if icon in allowed else None}
+
+        # The first workload actually routed off this host. Chosen to be first
+        # because it is the cheapest thing to get wrong: it runs outside the
+        # spoken turn, the dashboard already treats None as an ordinary answer,
+        # and a bad result costs a wrong glyph rather than a wrong action in
+        # the house. With no companion connected the router runs `local` and
+        # this behaves exactly as it did before.
+        outcome = await router.run(
+            "classify_icon",
+            {"name": name, "icons": allowed},
+            lambda: classify(name, allowed),
+            parse=lambda payload: parse_companion_result("classify_icon", payload),
+        )
+        icon = outcome.value
+        # The companion answers with the parsed model; the local path answers
+        # with a bare string. Both are re-checked against the vocabulary that
+        # was sent, because a schema is not a substitute for validating what
+        # came back over a network.
+        if hasattr(icon, "icon"):
+            icon = icon.icon
+        logger.info(
+            "classify_icon resolved source=%s reason=%s elapsed_ms=%s",
+            outcome.source,
+            outcome.reason,
+            outcome.elapsed_ms,
+        )
         return {"icon": icon if icon in allowed else None}
 
     @app.post("/v1/settings/refresh")

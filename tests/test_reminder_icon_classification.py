@@ -5,6 +5,8 @@ import json
 import httpx
 import pytest
 
+from nova_voice.api import create_app
+from nova_voice.config import Settings
 from nova_voice.interpretation.llama_cpp import LlamaCppInterpreter
 
 ICONS = ["pill", "shower", "washing-machine", "currency-dollar", "bell"]
@@ -90,3 +92,76 @@ async def test_does_not_call_the_model_without_a_name_or_vocabulary() -> None:
     assert await interpreter.classify_icon("   ", ICONS) is None
     assert await interpreter.classify_icon("Take estrogen", []) is None
     assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_icon_classification_falls_back_when_no_companion_is_connected() -> None:
+    """The first routed workload must be invisible until a phone is there.
+
+    classify_icon is the first thing routed off this host, so the property that
+    matters most is that routing changes nothing while nothing is connected.
+    """
+
+    from types import SimpleNamespace
+
+    from nova_voice.companion.router import CompanionWorkloadRouter
+    from nova_voice.companion.session import CompanionSessionManager
+
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+    calls: list[tuple[str, list[str]]] = []
+
+    async def classify(name: str, icons: list[str]) -> str:
+        calls.append((name, icons))
+        return "pill"
+
+    service = SimpleNamespace(
+        interpreter=SimpleNamespace(classify_icon=classify),
+        companion_router=router,
+        companion_sessions=sessions,
+    )
+    app = create_app(Settings(), service=service)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://voice.test") as client:
+        response = await client.post(
+            "/v1/classify-icon",
+            json={"name": "Estrogen", "icons": ["pill", "flask"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"icon": "pill"}
+    # The local pass ran exactly once: no companion, no offer, no double work.
+    assert calls == [("Estrogen", ["pill", "flask"])]
+
+
+@pytest.mark.asyncio
+async def test_a_companion_answer_outside_the_vocabulary_is_refused() -> None:
+    """A schema is not a substitute for checking what came over a network."""
+
+    from types import SimpleNamespace
+
+    from nova_voice.companion.router import CompanionWorkloadRouter
+    from nova_voice.companion.session import CompanionSessionManager
+
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+
+    async def classify(name: str, icons: list[str]) -> str:
+        return "not-in-the-list"
+
+    service = SimpleNamespace(
+        interpreter=SimpleNamespace(classify_icon=classify),
+        companion_router=router,
+        companion_sessions=sessions,
+    )
+    app = create_app(Settings(), service=service)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://voice.test") as client:
+        response = await client.post(
+            "/v1/classify-icon",
+            json={"name": "Estrogen", "icons": ["pill", "flask"]},
+        )
+
+    assert response.json() == {"icon": None}

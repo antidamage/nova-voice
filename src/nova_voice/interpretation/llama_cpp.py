@@ -24,7 +24,7 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import Interpreter
+from nova_voice.interpretation.base import Interpreter, RenderRequest
 from nova_voice.interpretation.response_length import (
     bare_wake_acknowledgement,
     bounded_long_reply,
@@ -820,7 +820,7 @@ class LlamaCppInterpreter(Interpreter):
         response = await self._client.post("/chat/completions", json=payload, timeout=30)
         response.raise_for_status()
 
-    async def render_response(
+    def build_render_request(
         self,
         utterance: Utterance,
         interpretation: Interpretation,
@@ -833,7 +833,21 @@ class LlamaCppInterpreter(Interpreter):
         temperature: float | None = None,
         command_max_words: int | None = None,
         bare_wake_max_words: int | None = None,
-    ) -> str | None:
+    ) -> RenderRequest:
+        """Assemble everything the reply pass needs, without running it.
+
+        Split out from ``render_response`` so the same prompt can be answered
+        by this host's model or by a companion device. That is the whole point
+        of the split: the instructions here decide whether the assistant claims
+        an action succeeded, how many words it may use, and whether it is
+        allowed to mention the weather. A second prompt written for the phone
+        would drift from this one and the drift would be *behavioural*.
+
+        The post-checks travel with it for the same reason — a one-word
+        acknowledgement is enforced after generation, and that enforcement has
+        to apply wherever the words came from.
+        """
+
         all_succeeded = bool(results) and all(result.ok for result in results)
         web_action_ids = {
             action.id for action in interpretation.actions if action.call.provider == "web"
@@ -1073,14 +1087,92 @@ greet briefly and offer help. Return only the response JSON schema."""
                 for message in conversation.messages
             )
         messages.append({"role": "user", "content": json.dumps(facts, separators=(",", ":"))})
-        payload = {
-            "model": self.model,
-            "messages": messages,
+        return RenderRequest(
+            messages=messages,
+            system=system,
+            facts=facts,
+            history=messages[1:-1],
             # Zero keeps replies deterministic and TTS-cacheable; the dashboard
             # can raise it for more varied phrasing. The caller may override it
             # per turn (e.g. forcing zero while recovering from a failed command).
-            "temperature": (temperature if temperature is not None else self.render_temperature),
-            "max_tokens": (50 * web_budget + 60) if web_answered else (240 if long_form else 80),
+            temperature=(temperature if temperature is not None else self.render_temperature),
+            max_tokens=(50 * web_budget + 60) if web_answered else (240 if long_form else 80),
+            all_succeeded=all_succeeded,
+            command_max_words=command_max_words,
+            bare_wake_max_words=bare_wake_max_words,
+            long_form=long_form,
+            requested_depth=requested_depth,
+        )
+
+    def finalize_rendered(self, request: RenderRequest, rendered: str) -> str | None:
+        """Apply the post-generation contract to a reply, wherever it was made.
+
+        These are not stylistic preferences. A confirmed command is answered in
+        exactly the requested number of words and is replaced by a canned
+        acknowledgement when the model overruns, because the alternative is the
+        assistant narrating a device change in a sentence nobody budgeted for.
+        A companion's answer is held to the identical rule.
+        """
+
+        rendered = rendered.strip()
+        if not rendered:
+            return None
+        if request.all_succeeded and request.command_max_words is not None:
+            if spoken_word_count(rendered) != request.command_max_words:
+                return command_acknowledgement(request.command_max_words)
+        if request.bare_wake_max_words is not None:
+            if spoken_word_count(rendered) != request.bare_wake_max_words:
+                return bare_wake_acknowledgement(request.bare_wake_max_words)
+            return rendered
+        if request.long_form:
+            return bounded_long_reply(
+                rendered, max_sentences=5 if request.requested_depth == "deep" else 3
+            )
+        return rendered
+
+    async def render_response(
+        self,
+        utterance: Utterance,
+        interpretation: Interpretation,
+        results: list[ToolResult],
+        *,
+        persona: str,
+        environment: dict[str, Any] | None = None,
+        relevant_state: dict[str, Any] | None = None,
+        conversation: ConversationSnapshot | None = None,
+        temperature: float | None = None,
+        command_max_words: int | None = None,
+        bare_wake_max_words: int | None = None,
+    ) -> str | None:
+        return await self.run_render_request(
+            self.build_render_request(
+                utterance,
+                interpretation,
+                results,
+                persona=persona,
+                environment=environment,
+                relevant_state=relevant_state,
+                conversation=conversation,
+                temperature=temperature,
+                command_max_words=command_max_words,
+                bare_wake_max_words=bare_wake_max_words,
+            )
+        )
+
+    async def run_render_request(self, request: RenderRequest) -> str | None:
+        """Answer an already-assembled reply request on this host's model.
+
+        Separate from building it so a caller that offered the request
+        elsewhere can fall back without rebuilding — which would not be
+        harmless: the long-form branch is chosen by a coin flip, so a rebuild
+        could answer a different question from the one the phone was asked.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": request.messages,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -1095,19 +1187,7 @@ greet briefly and offer help. Return only the response JSON schema."""
             response = await self._client.post("/chat/completions", json=payload)
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
-            rendered = RenderedResponse.model_validate_json(content).text.strip()
-            if all_succeeded and command_max_words is not None:
-                if spoken_word_count(rendered) != command_max_words:
-                    return command_acknowledgement(command_max_words)
-            if bare_wake_max_words is not None:
-                if spoken_word_count(rendered) != bare_wake_max_words:
-                    return bare_wake_acknowledgement(bare_wake_max_words)
-                return rendered
-            if long_form:
-                return bounded_long_reply(
-                    rendered, max_sentences=5 if requested_depth == "deep" else 3
-                )
-            return rendered
+            rendered = RenderedResponse.model_validate_json(content).text
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
             # Silent here means silent to the household: the caller treats None
             # as "no reply", and a turn with nothing to say says nothing at all.
@@ -1116,6 +1196,7 @@ greet briefly and offer help. Return only the response JSON schema."""
             # to guess at from a room.
             logger.warning("response rendering failed: %s", error)
             return None
+        return self.finalize_rendered(request, rendered)
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -69,6 +69,22 @@ public enum JSONValue: Codable, Equatable, Sendable {
         return nil
     }
 
+    public var doubleValue: Double? {
+        if case .number(let value) = self { return value }
+        return nil
+    }
+
+    /// The value as an `Int`, or nil if it is not a whole number in range.
+    ///
+    /// JSON has one number type, so a field a schema calls an integer arrives
+    /// here as a `Double`. Converting through `Int(exactly:)` rather than
+    /// truncating means a fractional or out-of-range value reads as absent
+    /// instead of silently becoming a different number.
+    public var intValue: Int? {
+        guard case .number(let value) = self else { return nil }
+        return Int(exactly: value.rounded())
+    }
+
     public subscript(key: String) -> JSONValue? {
         objectValue?[key]
     }

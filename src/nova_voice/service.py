@@ -77,6 +77,8 @@ from nova_voice.providers.nova.provider import NovaProvider
 from nova_voice.companion.protocol import ToolResultMessage
 from nova_voice.companion.router import CompanionWorkloadRouter
 from nova_voice.companion.session import CompanionSessionManager
+from nova_voice.companion.workloads import SelfProfileResult
+from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.providers.web.provider import WebProvider
 from nova_voice.research import ResearchManager
 from nova_voice.sessions import SessionManager
@@ -584,6 +586,84 @@ class NovaVoiceService:
             for tool in catalog
             if not str(tool.get("function", {}).get("name", "")).startswith("web.")
         ]
+
+    async def _routed_self_profile_update(self, utterance: Utterance) -> SelfProfileUpdate | None:
+        """Identity extraction, on the companion when one is eligible.
+
+        Off the spoken path already — it runs as a side task next to the main
+        interpretation — so the win here is not this call's own latency. It is
+        that this pass and `interpret` were competing for llama.cpp's single
+        slot on the same turn, which is what turned two cheap passes into two
+        serialised ones.
+
+        The utterance is `personal`: the transcript is what someone said about
+        themselves. That is permitted to leave Iridium under the amended plan,
+        which is exactly why `sensitivity` keeps the value out of the logs
+        rather than trusting anyone to remember not to print it.
+        """
+
+        local = self.interpreter.extract_self_profile_update
+        router = self.companion_router
+        if router is None:
+            return await local(utterance)
+
+        outcome = await router.run(
+            "extract_self_profile_update",
+            {"transcript": utterance.transcript},
+            lambda: local(utterance),
+            parse=lambda payload: parse_companion_result("extract_self_profile_update", payload),
+        )
+        logger.info(
+            "extract_self_profile_update resolved source=%s reason=%s elapsed_ms=%s",
+            outcome.source,
+            outcome.reason,
+            outcome.elapsed_ms,
+        )
+        value = outcome.value
+        # The companion answers with the wrapper that can say "no disclosure";
+        # the local path answers with the bare model or None. Both reduce here
+        # so callers keep seeing exactly one shape.
+        if isinstance(value, SelfProfileResult):
+            return value.update
+        return value
+
+    async def _routed_confirm_objective(
+        self,
+        utterance: Utterance,
+        pending: list[dict[str, Any]],
+    ) -> VerificationVerdict | None:
+        """The verification loop's judgement pass, on the companion when eligible.
+
+        This one is worth moving even though it is not on the spoken path,
+        because of *when* it runs: the loop fires it repeatedly while a
+        multi-device command settles, so every one of its calls lands on
+        Iridium precisely when the household is busiest. On the phone they
+        cost nothing local at all.
+
+        `pending` is already narrow by construction — the loop passes each
+        still-unsettled target's own observed state, not the household
+        snapshot — so there is nothing further to compact here.
+        """
+
+        local = self.interpreter.confirm_objective
+        router = self.companion_router
+        if router is None:
+            return await local(utterance, pending)
+
+        outcome = await router.run(
+            "confirm_objective",
+            {"transcript": utterance.transcript, "pending": pending},
+            lambda: local(utterance, pending),
+            parse=lambda payload: parse_companion_result("confirm_objective", payload),
+        )
+        logger.info(
+            "confirm_objective resolved source=%s reason=%s elapsed_ms=%s pending=%d",
+            outcome.source,
+            outcome.reason,
+            outcome.elapsed_ms,
+            len(pending),
+        )
+        return outcome.value
 
     async def _recover_knowledge_failure(
         self,
@@ -1192,7 +1272,7 @@ class NovaVoiceService:
         # speech-act classification. Start the tiny context-free pass first so
         # the local model can batch/run it alongside the normal interpretation.
         profile_task = (
-            asyncio.create_task(self.interpreter.extract_self_profile_update(utterance))
+            asyncio.create_task(self._routed_self_profile_update(utterance))
             if addressed_identity_turn
             else None
         )
@@ -1516,7 +1596,7 @@ class NovaVoiceService:
                     }
                     for task in tasks
                 ]
-                return await self.interpreter.confirm_objective(utterance, pending)
+                return await self._routed_confirm_objective(utterance, pending)
 
             with verify_loop.turn_scope(thinking=on_thinking, llm_confirm=confirm_pending):
                 results = await self._execute_plan(
