@@ -20,3 +20,10 @@ output/
 # Cygwin/Git-Bash crash dumps (created anywhere a bash tool crashes).
 bash.exe.stackdump
 **/bash.exe.stackdump
+
+# Household identity shipped into the companion build. A private key must
+# never enter git; it is copied in at build time from the issuing host.
+satellites/ios/NovaCompanion/companion-identity.p12
+
+# Deployment endpoint, identity and passphrase for the companion build.
+satellites/ios/NovaCompanion/companion-config.json
