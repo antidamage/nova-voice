@@ -135,7 +135,10 @@ async def test_force_local_is_visible_as_the_reason(ca_path):
     payload = await _get(_app(ca_path, sessions, router, companion_force_local=True))
 
     assert payload["forceLocal"] is True
-    assert payload["routes"]["interpret"]["eligibility"] == "force-local is on"
+    # Asked of a workload that would otherwise be offered: `interpret` ships
+    # routed local, so it would report "route is local" whether or not the
+    # global switch were pulled, and prove nothing about it.
+    assert payload["routes"]["classify_icon"]["eligibility"] == "force-local is on"
 
 
 async def test_status_carries_no_secret_or_personal_material(ca_path):

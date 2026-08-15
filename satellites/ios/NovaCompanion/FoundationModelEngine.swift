@@ -38,15 +38,22 @@ struct FoundationModelEngine: CompanionSession.Engine {
     /// fires repeatedly while a multi-device command settles — every call
     /// lands exactly when the house is busiest.
     ///
-    /// `render_response` is the first pass here that is *inside* the spoken
-    /// turn, and it is the safer of the two: its output is a sentence, so a
-    /// bad answer is a worse-worded reply rather than a wrong action in the
-    /// house, and Iridium re-applies the whole reply contract — word budgets
-    /// and the canned acknowledgement — to whatever comes back.
+    /// `render_response` is implemented below but **deliberately not
+    /// advertised**. Measured on this device it matched Iridium for speed and
+    /// then lost Nova entirely: flat "I'm just an AI, I don't have feelings"
+    /// replies where the local model speaks in character, answering the
+    /// previous question rather than the current one. That pass *is* the
+    /// assistant's voice, so it is not a rough edge to ship and polish later.
     ///
-    /// `interpret` is deliberately still absent. It plans the actions.
+    /// Advertising is the gate that matters. Iridium offers only what a device
+    /// says it can do, so leaving it out of this list stops the offers at the
+    /// source — before, and independently of, whatever the server's route table
+    /// happens to say. See docs/evidence/companion-offload-live-20260815.md.
+    ///
+    /// `interpret` is absent for the same reason and worse stakes: it plans the
+    /// actions.
     static let supported: [CompanionWorkload] = [
-        .classifyIcon, .extractSelfProfileUpdate, .confirmObjective, .renderResponse,
+        .classifyIcon, .extractSelfProfileUpdate, .confirmObjective,
     ]
 
     /// Why the model is or is not usable, in words. Availability has several
@@ -303,13 +310,25 @@ struct FoundationModelEngine: CompanionSession.Engine {
                 var prompt = ""
                 // Prior turns first, in the order they happened, so the reply
                 // lands as a continuation rather than a fresh answer.
-                for message in payload["history"]?.arrayValue ?? [] {
-                    guard let role = message["role"]?.stringValue,
-                        let content = message["content"]?.stringValue
-                    else { continue }
-                    prompt += "\(role): \(content)\n"
+                //
+                // Fenced and labelled rather than concatenated. Iridium's model
+                // receives these as separate chat messages and cannot confuse
+                // them with the request; flattened into one string they are
+                // just more text, and on device the reply came back answering
+                // the *previous* turn's question.
+                let history = payload["history"]?.arrayValue ?? []
+                if !history.isEmpty {
+                    prompt += "Earlier in this conversation, for context only:\n"
+                    for message in history {
+                        guard let role = message["role"]?.stringValue,
+                            let content = message["content"]?.stringValue
+                        else { continue }
+                        prompt += "\(role): \(content)\n"
+                    }
+                    prompt += "\n"
                 }
-                prompt += "facts: \(Self.encode(facts))"
+                prompt += "Reply to this turn, and only this turn:\n"
+                prompt += Self.encode(facts)
 
                 var options = GenerationOptions()
                 if let maxTokens = payload["maxTokens"]?.intValue {
