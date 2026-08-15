@@ -35,6 +35,10 @@ from nova_voice.interpretation.speech_cues import has_explicit_self_intention
 
 logger = logging.getLogger(__name__)
 
+# Appended to the reply prompt for the JSON-schema-constrained local backend
+# only. A companion generates plain text and must not be told otherwise.
+_JSON_SCHEMA_DIRECTIVE = " Return only the response JSON schema."
+
 _TIME_RELEVANCE = re.compile(
     r"\b(?:time\s+is\s+it|current\s+time|what(?:'s|\s+is)\s+the\s+time|"
     r"date|what\s+day|today|tonight|tomorrow|sunrise|sunset)\b",
@@ -1051,7 +1055,7 @@ facts.speakerProfileUpdateApplied is true, briefly acknowledge the accepted valu
 is false, do not claim the correction was saved. {length_instruction} When the
 responseInstruction asks for a single word,
 return exactly one word. For a greeting, do not spend the complaint budget;
-greet briefly and offer help. Return only the response JSON schema."""
+greet briefly and offer help."""
         speaker_context = _current_speaker_context(utterance)
         if speaker_context:
             system += "\n" + speaker_context
@@ -1077,7 +1081,14 @@ greet briefly and offer help. Return only the response JSON schema."""
                 "answer follow-ups, never claim it changed or invent beyond it): "
                 + " | ".join(conversation.observations)
             )
-        messages = [{"role": "system", "content": system}]
+        # The output-format directive belongs to *this* backend, not to the
+        # prompt. llama.cpp is additionally constrained by a JSON schema at the
+        # sampler, so for it the sentence is belt-and-braces — but a companion
+        # generating plain text was being told to return a JSON schema, and
+        # answered by narrating the instruction back ("I will say something.").
+        # ``system`` therefore stays transport-neutral and the directive is
+        # added only where it is true.
+        messages = [{"role": "system", "content": system + _JSON_SCHEMA_DIRECTIVE}]
         if conversation is not None:
             messages.extend(
                 {

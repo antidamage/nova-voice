@@ -71,6 +71,84 @@ ops/issue-satellite-identity.sh companion-probe /tmp/probe-identity
     --announced-id companion-probe --jobs 2
 ```
 
+## On the phone itself
+
+Neptunium (iPhone 17 Pro Max, iOS 26.6), Apple's `SystemLanguageModel`.
+
+### `classify_icon` — a clear win
+
+| | |
+|---|---|
+| first call | 1261 ms (cold model) |
+| warm | 219, 227, 231, 234 ms |
+| Iridium, warm | 524–650 ms |
+
+Roughly **2.4x faster than Iridium**, and correct on every sample: *wash hair →
+shower*, *pay power bill → bell*, *put washing on → washing-machine*, *take
+vitamins → pill*, *take estrogen → pill*. Counters: 5 offered, 5 accepted, 5
+completed, 0 failed, 0 fell back.
+
+### `render_response` — latency parity, quality regression
+
+Timing is fine. Of 18 offers, 16 completed on the phone at 1.9–3.1 s, against
+1.9–2.7 s locally. Two missed the 4 s deadline, and a miss is expensive: it
+costs the deadline *plus* the local render, 7.2 s in one observed turn.
+
+The output is the problem. Same prompts, attributed per-sample from
+`render_response resolved source=…` rather than assumed:
+
+| question | Iridium | phone |
+|---|---|---|
+| favourite colour | "Pink? No way. It's all grey metal and neon rain down here anyway." | "I will say something." |
+| how are you feeling | "Feelin' peachy as hell, you know I do, but honestly?" | "I will say something. I can't say that I have a favorite colour, because I am an AI and do not have emotions." |
+| a fun fact | "So, that neon flickering we see everywhere came out of film noir back in the forties…" | "I will say something. I'm just an AI, so I don't have feelings or preferences…" |
+
+Three faults, in descending order of how much they matter:
+
+1. **The persona is gone.** Nova's configured personality is absent and
+   replaced by stock assistant register — "I'm just an AI, I don't have
+   feelings" — which the instructions explicitly forbid. `render_response` *is*
+   the assistant's voice, so this is not a rough edge, it is the feature.
+2. **It answers the previous question.** Two of three replies answered
+   "favourite colour" when asked something else.
+3. **"I will say something."** prefixed every reply. That was ours: the shared
+   reply prompt ended with *"Return only the response JSON schema"*, which is
+   true of llama.cpp (which is additionally schema-constrained at the sampler)
+   and nonsense to a device generating plain text. The directive now belongs to
+   the local backend only, and `RenderRequest.system` stays transport-neutral.
+
+Fault 3 is fixed; 1 and 2 are not, and are not obviously ours to fix.
+
+### Consequence
+
+`interpret` and `render_response` now **ship routed local**, in code, with the
+reasoning in `_default_routes`. The capability stays built and switchable at
+runtime through `POST /v1/companion/routing`. It is off until the output is
+good, not until the plumbing works.
+
+The non-hot-path passes keep their `companion_preferred` default: those
+measured well.
+
+## The lock screen, observed
+
+Mid-measurement the session read `connected: true` with `tier: off,
+telemetry is 296s stale`, and every route became ineligible. The socket
+survived; the app had been suspended behind the lock screen and stopped
+sending. The staleness guard is what stopped Iridium offering work into a hole
+— it behaved exactly as designed — but it is the concrete form of the open
+question: **a companion that only works while the app is foregrounded cannot
+carry hot-path work**, because Iridium would pay the round trip and fall back
+on most turns.
+
+## A methodology correction
+
+An earlier attempt at this comparison controlled by *disconnecting the phone*
+and assuming everything afterwards was local. It was not: the app comes back on
+its own, silently, and several "local" samples were companion-rendered. The
+numbers above are attributed per-sample from the server's own
+`source=` log line instead. `POST /v1/companion/routing` exists partly so this
+never has to be done by inference again.
+
 ## Incidental finding
 
 With no companion connected, `/v1/companion/status` reported

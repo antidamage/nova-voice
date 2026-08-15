@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 from uuid import uuid4
 
 import httpx
@@ -41,6 +41,7 @@ from nova_voice.companion.protocol import (
     HelloAck,
 )
 from nova_voice.companion.protocol import parse_client_message as parse_companion_message
+from nova_voice.companion.router import RouteMode
 from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.companion.protocol import serialize as serialize_companion
 from nova_voice.bootstrap import build_service
@@ -1089,8 +1090,15 @@ def create_app(
         router = selected_service.companion_router
         snapshot = sessions.snapshot() if sessions is not None else None
         payload: dict = {
-            "enabled": selected_settings.companion_enabled,
-            "forceLocal": selected_settings.companion_force_local,
+            # The router's live state, not the configured one: both switches
+            # can be moved at runtime, and a status endpoint that reported the
+            # file would contradict the behaviour it is describing.
+            "enabled": router.enabled if router is not None else selected_settings.companion_enabled,
+            "forceLocal": (
+                router.force_local
+                if router is not None
+                else selected_settings.companion_force_local
+            ),
             "connected": bool(snapshot and snapshot.connected),
             "localityConfigured": companion_locality.configured,
             "authConfigured": companion_authenticator.configured,
@@ -1127,6 +1135,67 @@ def create_app(
             }
             payload["counters"] = router.counters()
         return payload
+
+    @app.post("/v1/companion/routing")
+    async def set_companion_routing(payload: dict) -> dict:
+        """The rollback switches, without a restart.
+
+        ``force_local`` is the plan's second-bluntest rollback lever, and until
+        now the only way to pull it was to edit the environment file and
+        restart the whole voice stack — on a live household, to turn off a
+        feature that is misbehaving. That is the wrong tool for an incident.
+
+        It is also what makes the routing measurable. Comparing companion
+        against local by *disconnecting the phone* is not a control: the phone
+        reconnects on its own, silently, and the samples afterwards are a
+        mixture with no way to tell which is which. This settles it at the
+        router, where the decision is actually made.
+
+        Runtime only, deliberately: a restart returns to whatever the
+        configuration says, so an override made during an incident cannot
+        quietly become the permanent state nobody remembers choosing.
+        """
+
+        router = selected_service.companion_router
+        if router is None:
+            raise HTTPException(status_code=503, detail="companion routing is not configured")
+
+        applied: dict[str, bool | str] = {}
+        for key, setter in (
+            ("forceLocal", router.set_force_local),
+            ("enabled", router.set_enabled),
+        ):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+            setter(value)
+            applied[key] = value
+        modes = payload.get("routes")
+        if modes is not None:
+            if not isinstance(modes, dict):
+                raise HTTPException(status_code=400, detail="routes must be an object")
+            known = router.routes()
+            for workload, mode in modes.items():
+                if workload not in known:
+                    raise HTTPException(status_code=400, detail=f"unknown workload: {workload!r}")
+                if mode not in get_args(RouteMode):
+                    raise HTTPException(status_code=400, detail=f"unknown route mode: {mode!r}")
+                router.override(workload, mode=mode)
+                applied[f"routes.{workload}"] = mode
+
+        if not applied:
+            raise HTTPException(
+                status_code=400, detail="supply at least one of forceLocal, enabled, routes"
+            )
+        logger.info("companion routing overridden at runtime: %s", applied)
+        return {
+            "applied": applied,
+            "eligibility": {
+                workload: router.eligibility(workload).reason for workload in router.routes()
+            },
+        }
 
     @app.get("/v1/agent/administration")
     async def agent_administration(audit_limit: int = 100) -> dict:

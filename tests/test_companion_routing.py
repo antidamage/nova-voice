@@ -189,12 +189,6 @@ class _FakeSessions:
         return self._outcome
 
 
-def _router(sessions, **changes) -> CompanionWorkloadRouter:
-    router = CompanionWorkloadRouter(sessions, enabled=True)
-    router.override("interpret", **changes) if changes else None
-    return router
-
-
 async def test_accepted_attempt_never_runs_the_local_path():
     """The no-eager-hedge rule: acceptance means Iridium's slot stays free."""
 
@@ -207,6 +201,7 @@ async def test_accepted_attempt_never_runs_the_local_path():
 
     sessions = _FakeSessions(accept=True)
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {"transcript": "hello"}, local)
 
     assert result.source == "companion"
@@ -224,6 +219,7 @@ async def test_rejection_falls_back_locally_exactly_once():
 
     sessions = _FakeSessions(accept=False)
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {"transcript": "hello"}, local)
 
     assert result.source == "local"
@@ -243,6 +239,7 @@ async def test_failure_after_acceptance_falls_back_once():
         accept=True, outcome=JobOutcome(ok=False, failure="timeout", detail="deadline")
     )
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {"transcript": "hello"}, local)
 
     assert result.source == "local"
@@ -258,6 +255,7 @@ async def test_invalid_companion_result_falls_back():
 
     sessions = _FakeSessions(accept=True)
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local, parse=parse)
 
     assert result.source == "local"
@@ -270,6 +268,7 @@ async def test_companion_only_returns_unavailable_rather_than_running_locally():
 
     sessions = _FakeSessions(accept=False)
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     router.override("interpret", mode="companion_only")
     result = await router.run("interpret", {}, local)
 
@@ -282,6 +281,7 @@ async def test_feature_switch_keeps_everything_local():
 
     sessions = _FakeSessions()
     router = CompanionWorkloadRouter(sessions, enabled=False)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local)
 
     assert result.source == "local"
@@ -295,6 +295,7 @@ async def test_force_local_stops_offers_without_disabling_the_feature():
 
     sessions = _FakeSessions()
     router = CompanionWorkloadRouter(sessions, enabled=True, force_local=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local)
 
     assert result.source == "local"
@@ -307,6 +308,7 @@ async def test_tailnet_cannot_unlock_a_home_lan_route():
 
     sessions = _FakeSessions(snapshot=_FakeSnapshot(locality="tailnet"))
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local)
 
     assert result.source == "local"
@@ -320,6 +322,7 @@ async def test_tier_below_the_route_minimum_stays_local():
 
     sessions = _FakeSessions(snapshot=_FakeSnapshot(tier=CompanionTier.ADVISORY))
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local)
 
     assert result.source == "local"
@@ -332,6 +335,7 @@ async def test_unadvertised_workload_is_not_offered():
 
     sessions = _FakeSessions(snapshot=_FakeSnapshot(workloads=frozenset({"classify_icon"})))
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     result = await router.run("interpret", {}, local)
 
     assert result.source == "local"
@@ -348,6 +352,7 @@ async def test_repeated_failures_pause_the_workload():
         accept=True, outcome=JobOutcome(ok=False, failure="failed", detail="model error")
     )
     router = CompanionWorkloadRouter(sessions, enabled=True, failure_budget=2)
+    router.override("interpret", mode="companion_preferred")
 
     await router.run("interpret", {}, local)
     await router.run("interpret", {}, local)
@@ -364,6 +369,7 @@ async def test_disabled_route_runs_nothing():
 
     sessions = _FakeSessions()
     router = CompanionWorkloadRouter(sessions, enabled=True)
+    router.override("interpret", mode="companion_preferred")
     router.override("classify_icon", mode="disabled")
     result = await router.run("classify_icon", {}, local)
 
@@ -373,7 +379,31 @@ async def test_disabled_route_runs_nothing():
 async def test_route_overrides_are_per_workload():
     sessions = _FakeSessions()
     router = CompanionWorkloadRouter(sessions, enabled=True)
-    router.override("interpret", mode="local")
+    router.override("interpret", mode="companion_preferred")
+    router.override("classify_icon", mode="local")
+
+    assert router.route("classify_icon").mode == "local"
+    assert router.route("confirm_objective").mode == "companion_preferred"
+
+
+async def test_spoken_turn_workloads_ship_local():
+    """The hot-path defaults, which are a measured decision and not caution.
+
+    On device, replies came back at a latency comparable to Iridium's but in a
+    flat assistant voice with Nova's personality gone, answering the previous
+    question rather than the current one. ``render_response`` *is* the
+    assistant's voice, so that is a regression no latency parity pays for —
+    and ``interpret`` plans the actions, which is worse again.
+
+    The capability stays built and switchable at runtime. It is off until the
+    output is good, not until the plumbing works.
+    """
+
+    router = CompanionWorkloadRouter(_FakeSessions(), enabled=True)
 
     assert router.route("interpret").mode == "local"
+    assert router.route("render_response").mode == "local"
+    # The passes outside the spoken turn are not affected: those measured well.
     assert router.route("classify_icon").mode == "companion_preferred"
+    assert router.route("confirm_objective").mode == "companion_preferred"
+    assert router.route("extract_self_profile_update").mode == "companion_preferred"

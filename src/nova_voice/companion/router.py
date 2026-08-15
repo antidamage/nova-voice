@@ -66,7 +66,19 @@ def _default_routes() -> dict[CompanionWorkload, WorkloadRoute]:
 
     return {
         name: WorkloadRoute(
-            mode="companion_preferred",
+            # Hot-path passes default to **local**, and that is a measured
+            # decision rather than caution. Apple's on-device model rendered
+            # replies at a latency comparable to Iridium's (~1.9-2.2s) but
+            # dropped Nova's persona entirely — flat "I'm just an AI, I don't
+            # have feelings" answers where the local model speaks in character
+            # — and answered the previous question rather than the current one.
+            # ``render_response`` *is* the assistant's voice, so that is a
+            # regression no latency parity pays for.
+            #
+            # The capability is built and switchable; it is off until the
+            # output is good, not until the plumbing works.
+            # See docs/evidence/companion-offload-live-20260815.md.
+            mode="local" if entry.hot_path else "companion_preferred",
             locality="home_lan",
             # Hot-path work needs a healthy device; background work tolerates a
             # phone that is merely not in trouble.
@@ -144,6 +156,22 @@ class CompanionWorkloadRouter:
         """Global override: keep every reasoning workload on Iridium."""
 
         self._force_local = force_local
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def force_local(self) -> bool:
+        """What the router is *actually* doing, which the configuration may not.
+
+        Both switches can be moved at runtime for a rollback, so reporting the
+        configured value would mean a status endpoint that disagrees with the
+        behaviour it is describing — during exactly the incident someone is
+        using it to understand.
+        """
+
+        return self._force_local
 
     def route(self, workload: CompanionWorkload) -> WorkloadRoute:
         return self._routes.get(workload, WorkloadRoute())
