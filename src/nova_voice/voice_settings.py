@@ -8,6 +8,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DEFAULT_WAKE_WORDS = ["beemo", "bimo", "bemo", "beamo", "bmo"]
 
+# The operator-facing vocabulary for where a pass runs. Deliberately three
+# words rather than the router's five internal modes: an operator is choosing
+# a machine, not a fallback policy, and the two rarely-useful modes
+# (``companion_fallback``, ``disabled``) have no sensible plain-English name
+# and no reason to appear in a dropdown.
+CompanionRouteChoice = Literal["local", "companion", "both"]
+
+# The passes that can be routed. Restated rather than imported from the
+# companion package: this module is the settings *contract*, and a settings
+# file naming a workload that no longer exists should be ignored, not crash
+# the pull.
+COMPANION_ROUTABLE_WORKLOADS = (
+    "interpret",
+    "render_response",
+    "confirm_objective",
+    "extract_self_profile_update",
+    "classify_icon",
+)
+
 
 def _to_camel(value: str) -> str:
     head, *tail = value.split("_")
@@ -331,6 +350,15 @@ class VoiceSettings(BaseModel):
     # Global live override for the native satellites' local transport gate.
     # False is a diagnostic mode that streams every captured frame.
     satellite_noise_gate_enabled: bool = True
+    # Where each LLM pass runs: ``local`` on this host, ``companion`` only on
+    # the phone, or ``both`` (phone first, this host when it cannot answer).
+    #
+    # Stored here rather than as a runtime-only override so the choice survives
+    # a restart — an operator who moved a pass to the phone did not mean "until
+    # the service next restarts". A workload absent from the map keeps its code
+    # default, so an empty map is "leave everything as shipped" rather than
+    # "route nothing".
+    companion_routes: dict[str, CompanionRouteChoice] = Field(default_factory=dict)
     speaker: VoiceSpeaker = VoiceSpeaker.RYAN
     # Custom-engine (dots.tts) voice: a cloned-voice id resolved by the dots
     # service's registry. Kept separate from ``speaker`` because the two engines
@@ -475,6 +503,26 @@ class VoiceSettings(BaseModel):
             if satellite and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", room):
                 rooms[satellite] = room
         return rooms
+
+    @field_validator("companion_routes", mode="before")
+    @classmethod
+    def normalize_companion_routes(cls, value: object) -> object:
+        """Drop anything unrecognised rather than rejecting the whole pull.
+
+        A settings blob that names a workload this build no longer has, or a
+        choice it does not understand, must not take the entire voice settings
+        refresh down with it — that would turn a stale preferences file into an
+        outage. Unknown entries are ignored and the workload keeps its default.
+        """
+
+        if not isinstance(value, dict):
+            return {}
+        allowed = {"local", "companion", "both"}
+        return {
+            workload: choice
+            for workload, choice in value.items()
+            if workload in COMPANION_ROUTABLE_WORKLOADS and choice in allowed
+        }
 
     @field_validator("disabled_satellites", mode="before")
     @classmethod

@@ -36,7 +36,9 @@ struct StatusView: View {
                     }
                 }
 
-                Section("Workloads this device offers") {
+                // "Can run", not "runs": Nova decides which of these it
+                // actually sends, per pass, from the dashboard.
+                Section("Workloads this device can run") {
                     ForEach(FoundationModelEngine.supported, id: \.rawValue) { workload in
                         Text(workload.rawValue).font(.callout.monospaced())
                     }
