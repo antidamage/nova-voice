@@ -228,3 +228,73 @@ def test_the_payload_carries_the_shapes_the_phone_expects():
         "compaction",
     }
     assert payload["compaction"]["budgetTokens"] == DEFAULT_CONTEXT_TOKENS
+
+
+def test_the_prompt_leaves_real_room_for_the_answer():
+    """The failure this guards against was total, not marginal.
+
+    `interpret` failed on the device every single time with
+    `exceededContextWindowSize` — 4,091 tokens against a 4,096 ceiling — while
+    compaction believed it had built a ~3,400-token prompt. The shared
+    estimator is calibrated for prose; this prompt is JSON tool schemas and
+    entity ids, which tokenise far worse.
+
+    So the assertion is against the *real* cost, not the estimated one.
+    """
+
+    from nova_voice.companion.compaction import (
+        DEFAULT_CONTEXT_TOKENS,
+        DEFAULT_OUTPUT_RESERVE,
+        JSON_TOKEN_SAFETY,
+        compact_for_companion,
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"nova.some_household_tool_{index}",
+                "description": "Does a thing to a device in a room " * 4,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": {"type": "string"},
+                        "brightness_percent": {"type": "integer"},
+                    },
+                },
+            },
+        }
+        for index in range(40)
+    ]
+    state = {f"light.room_{index}": {"on": True, "level": 40} for index in range(60)}
+
+    compacted = compact_for_companion(
+        instructions="You are a household planner. " * 20,
+        tools=tools,
+        state=state,
+        memory=[f"a remembered fact number {index}" for index in range(30)],
+        history=[{"role": "user", "content": "turn the lounge lights down"}] * 20,
+    )
+
+    estimated = compacted.report.used_tokens
+    # What the device will actually count, at the observed ratio.
+    projected_real = estimated * JSON_TOKEN_SAFETY
+
+    assert projected_real + DEFAULT_OUTPUT_RESERVE <= DEFAULT_CONTEXT_TOKENS, (
+        f"prompt would be ~{projected_real:.0f} real tokens, leaving no room "
+        f"for a {DEFAULT_OUTPUT_RESERVE}-token answer in {DEFAULT_CONTEXT_TOKENS}"
+    )
+
+
+def test_the_instructions_are_never_traded_away_for_room():
+    # A planner without its safety rules is not a cheaper planner.
+    from nova_voice.companion.compaction import compact_for_companion
+
+    instructions = "Never unlock a door without confirmation. " * 10
+    compacted = compact_for_companion(
+        instructions=instructions,
+        tools=[],
+        state={f"k{i}": "v" * 400 for i in range(50)},
+    )
+
+    assert compacted.instructions == instructions

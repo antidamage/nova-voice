@@ -1,3 +1,5 @@
+import CoreLocation
+import EventKit
 import Foundation
 import NovaCompanionKit
 import OSLog
@@ -25,12 +27,32 @@ final class CompanionCoordinator: ObservableObject {
         var detail = "Not configured"
         var acceptedJobs = 0
         var lastError: String?
+        /// When this device last told Nova how it was.
+        ///
+        /// Shown because "connected" on its own is not the whole truth and once
+        /// hid a real fault for days: Nova stops offering work to a device
+        /// whose telemetry has gone stale, so the app can sit there saying
+        /// Connected while Nova has quietly written it off. If this is minutes
+        /// old, that is what has happened.
+        var lastTelemetryAt: Date?
     }
 
     @Published private(set) var status = Status()
 
     private var task: Task<Void, Never>?
+    private var observers: [NSObjectProtocol] = []
     private var backoff = ReconnectBackoff()
+    /// Bounded, structural, and never exported without the owner asking.
+    private let diagnostics = DiagnosticRing()
+    // One store for the app's lifetime: EventKit identifiers are only stable
+    // within a store, so a fresh one per call would make an id handed to Nova
+    // useless by the time an approval came back with it.
+    private let eventStore = EKEventStore()
+    private lazy var personalContext = PersonalContextRuntime(store: eventStore)
+    // The home coordinate comes from the bundled config and never leaves the
+    // device — what crosses to Nova is only whether the phone is near it.
+    private lazy var homeLocation = HomeLocationRuntime(home: configuredHome)
+    private let configuredHome: CLLocationCoordinate2D?
     private let engine = FoundationModelEngine()
     private let signer: KeychainSigner
     private let endpoints: [URL]
@@ -42,6 +64,7 @@ final class CompanionCoordinator: ObservableObject {
         self.endpoints = configuration.orderedEndpoints
         self.announcedId = configuration.announcedId
         self.identityPassphrase = configuration.identityPassphrase
+        self.configuredHome = configuration.homeCoordinate
     }
 
     func start() {
@@ -97,7 +120,11 @@ final class CompanionCoordinator: ObservableObject {
                     announcedId: announcedId,
                     workloads: FoundationModelEngine.supported,
                     engine: engine,
-                    telemetry: Self.telemetry
+                    telemetry: Self.telemetry,
+                    diagnostics: diagnostics,
+                    personal: PersonalCallHandler(
+                        runtime: personalContext, store: eventStore, location: homeLocation
+                    )
                 )
                 try await session.handshake(
                     appVersion: Bundle.main.shortVersion,
@@ -109,6 +136,22 @@ final class CompanionCoordinator: ObservableObject {
                 status.lastError = nil
                 status.detail = "Connected"
                 print("[companion] connected; session established")
+
+                // Liveness. Without this the server sees one reading from the
+                // handshake and nothing after it, so the device ages out of
+                // the routing table three minutes later and never returns —
+                // connected, advertising every workload, and offered nothing.
+                status.lastTelemetryAt = Date()
+                let telemetry = Task { [weak self] in
+                    await session.maintainTelemetry(everySeconds: 45) {
+                        Task { @MainActor in self?.status.lastTelemetryAt = Date() }
+                    }
+                }
+                observeStateChanges(for: session)
+                defer {
+                    telemetry.cancel()
+                    stopObservingStateChanges()
+                }
 
                 try await session.serve()
 
@@ -123,6 +166,11 @@ final class CompanionCoordinator: ObservableObject {
                 status.lastError = String(describing: error).prefix(120).description
                 log.error("companion session failed: \(String(describing: error), privacy: .public)")
                 print("[companion] session failed via \(endpoint): \(error)")
+                // The error type, not its message: the message can name a host
+                // and the ring is meant to be safe to hand over unread.
+                await diagnostics.record(
+                    .connection, "failed", detail: String(describing: type(of: error))
+                )
             }
             status.connected = false
           }
@@ -131,6 +179,53 @@ final class CompanionCoordinator: ObservableObject {
             status.detail = String(format: "Reconnecting in %.0fs", delay)
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
+    }
+
+    /// The diagnostics ring as text, for the owner to send on.
+    ///
+    /// Only ever called from an explicit tap. Nothing exports itself, because
+    /// a report that leaves the device without being asked for is a report the
+    /// owner did not consent to send however structural its contents are.
+    func exportDiagnostics() async -> String {
+        await diagnostics.export()
+    }
+
+    /// Report the moment the device changes, not only on the next tick.
+    ///
+    /// The periodic send keeps the reading fresh; these keep it *true*. Every
+    /// one of them can move the tier — going on or off charge, entering Low
+    /// Power Mode, heating up, being backgrounded — and the server applies a
+    /// degradation immediately while making an improvement wait out a dwell
+    /// window. Waiting up to a tick to report "I am now too hot to help" would
+    /// hand the phone work it had already decided it could not do.
+    private func observeStateChanges(for session: CompanionSession) {
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        let names: [Notification.Name] = [
+            UIApplication.didBecomeActiveNotification,
+            UIApplication.didEnterBackgroundNotification,
+            UIDevice.batteryStateDidChangeNotification,
+            UIDevice.batteryLevelDidChangeNotification,
+            .NSProcessInfoPowerStateDidChange,
+            ProcessInfo.thermalStateDidChangeNotification,
+        ]
+        observers = names.map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    try? await session.sendTelemetry()
+                    self?.status.lastTelemetryAt = Date()
+                }
+            }
+        }
+    }
+
+    private func stopObservingStateChanges() {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        observers = []
     }
 
     /// Import the household identity on first launch, if one shipped with the
@@ -219,15 +314,30 @@ struct CompanionConfiguration: Decodable {
     var announcedId: String
     var keychainLabel: String
     var identityPassphrase: String?
+    /// Where "home" is, for answering whether the phone is at it.
+    ///
+    /// Untracked like the rest of this file, and deliberately never sent: Nova
+    /// receives only the boolean this coordinate is used to compute.
+    var homeLatitude: Double?
+    var homeLongitude: Double?
 
     private enum CodingKeys: String, CodingKey {
         case endpoint, tailnetEndpoint, announcedId, keychainLabel, identityPassphrase
+        case homeLatitude, homeLongitude
+    }
+
+    var homeCoordinate: CLLocationCoordinate2D? {
+        guard let homeLatitude, let homeLongitude else { return nil }
+        return CLLocationCoordinate2D(latitude: homeLatitude, longitude: homeLongitude)
     }
 
     /// The LAN address first, always. Preferring it is what makes "at home"
     /// the normal case rather than an accident of which address answered.
+    ///
+    /// The rule itself lives in `NovaCompanionKit` so it can be tested; this
+    /// is only where the two configured addresses come from.
     var orderedEndpoints: [URL] {
-        [endpoint, tailnetEndpoint].compactMap { $0 }
+        CompanionEndpoints.ordered(lan: endpoint, tailnet: tailnetEndpoint)
     }
 
     init(
@@ -235,13 +345,17 @@ struct CompanionConfiguration: Decodable {
         tailnetEndpoint: URL? = nil,
         announcedId: String,
         keychainLabel: String,
-        identityPassphrase: String? = nil
+        identityPassphrase: String? = nil,
+        homeLatitude: Double? = nil,
+        homeLongitude: Double? = nil
     ) {
         self.endpoint = endpoint
         self.tailnetEndpoint = tailnetEndpoint
         self.announcedId = announcedId
         self.keychainLabel = keychainLabel
         self.identityPassphrase = identityPassphrase
+        self.homeLatitude = homeLatitude
+        self.homeLongitude = homeLongitude
     }
 
     static func load() -> CompanionConfiguration {

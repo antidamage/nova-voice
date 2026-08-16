@@ -234,6 +234,12 @@ ToolResultCode = Literal[
     # request that would have been sent, so a test can assert on it.
     "dry_run",
     "cancelled",
+    # The provider is reachable in principle but is not there right now — a
+    # companion device in a pocket, a household service that is off. Distinct
+    # from "backend_error" on purpose: that means something went wrong and is
+    # worth investigating, while this is an ordinary state of the world that a
+    # reply can simply mention.
+    "unavailable",
 ]
 
 
@@ -371,3 +377,11 @@ class HandleResult(StrictModel):
     response_tone_instruction: str | None = None
     timings_ms: dict[str, float] = Field(default_factory=dict)
     turn_trace: TurnTrace | None = None
+    # Both sides' answers, when a pass is in comparison mode. Present only
+    # while an operator has switched that on deliberately, because it carries
+    # what each model actually said.
+    route_comparison: dict[str, Any] | None = None
+    # Where each reasoning pass of this turn ran, in order, with how long it
+    # took. Always present when any routed pass ran — it carries no content,
+    # only which stack did the work, so it is safe to show on every line.
+    route_chain: list[dict[str, Any]] = Field(default_factory=list)

@@ -102,7 +102,10 @@ WORKLOADS: dict[CompanionWorkload, WorkloadSpec] = {
         name="interpret",
         result_model=Interpretation,
         result_schema="interpret.v1",
-        default_timeout_seconds=6.0,
+        # The measured iPhone 17 Pro Max Qwen9B interpretation completes in
+        # about 6.0s. One second of transport/scheduler margin prevents a valid
+        # device result being cancelled at the finish line.
+        default_timeout_seconds=7.0,
         cancellation="anytime",
         local_method="interpret",
         sensitivity="ordinary",
@@ -114,7 +117,7 @@ WORKLOADS: dict[CompanionWorkload, WorkloadSpec] = {
         result_schema="render_response.v1",
         # Shorter than interpret: whatever this does not deliver in time still
         # has to be generated locally *and* spoken.
-        default_timeout_seconds=4.0,
+        default_timeout_seconds=5.0,
         cancellation="anytime",
         local_method="render_response",
         sensitivity="ordinary",
@@ -136,7 +139,7 @@ WORKLOADS: dict[CompanionWorkload, WorkloadSpec] = {
         name="extract_self_profile_update",
         result_model=SelfProfileResult,
         result_schema="extract_self_profile_update.v1",
-        default_timeout_seconds=10.0,
+        default_timeout_seconds=12.0,
         cancellation="anytime",
         # Names and pronouns the household disclosed about itself.
         local_method="extract_self_profile_update",

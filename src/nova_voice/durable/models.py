@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -500,6 +501,292 @@ class ResearchRecord(DurableModel):
                 raise ValueError("research timestamps must be timezone-aware")
         if len(set(self.citations)) != len(self.citations):
             raise ValueError("research citations must be unique")
+        return self
+
+
+class CompanionJobState(StrEnum):
+    """Every state a durable companion job can be in.
+
+    Named rather than derived so an illegal move is a rejected transition
+    instead of an unnoticed field write. The two that look redundant are not:
+    ``FALLING_BACK`` records that the phone is finished with and Iridium has
+    taken the work over — which is different from ``FAILED`` (nobody has it) and
+    from ``RUNNING`` (the phone still holds it) — and ``EXPIRED`` distinguishes
+    a deadline nobody was waiting on from a failure someone should look at.
+    """
+
+    QUEUED = "queued"
+    OFFERED = "offered"
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    WAITING_TOOL = "waiting_tool"
+    WAITING_APPROVAL = "waiting_approval"
+    FALLING_BACK = "falling_back"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class CompanionAttemptRecord(BaseModel):
+    """One offer of a job to one device, kept even after it ends.
+
+    History rather than current state: a job that succeeded on its third
+    attempt should still show the two that did not, because "the phone rejected
+    this twice on battery grounds before taking it" is the fact that explains a
+    latency figure nobody can otherwise account for.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt_id: str = Field(min_length=1, max_length=160)
+    session_id: str | None = Field(default=None, max_length=160)
+    started_at: datetime = Field(default_factory=utc_now)
+    ended_at: datetime | None = None
+    outcome: (
+        Literal[
+            "accepted",
+            "rejected",
+            "completed",
+            "failed",
+            "timeout",
+            "disconnected",
+            "cancelled",
+            "invalid",
+        ]
+        | None
+    ) = None
+    detail: str | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> CompanionAttemptRecord:
+        for value in (self.started_at, self.ended_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("companion attempt timestamps must be timezone-aware")
+        if self.ended_at is not None and self.ended_at < self.started_at:
+            raise ValueError("companion attempt cannot end before it started")
+        return self
+
+
+class CompanionJobRecord(DurableModel):
+    """A reasoning job that outlives the socket it was offered on.
+
+    The durable row is authoritative and the WebSocket frames are transport
+    events, not state. That ordering is what lets a job survive a phone
+    restart, a server restart, or both.
+
+    ``input_revision`` and ``idempotency_key`` are immutable for the life of
+    the job **including its local fallback**. A retry, a second attempt and the
+    fallback all answer the same question under the same key, so no downstream
+    write can be duplicated by the work changing hands.
+    """
+
+    workload: str = Field(min_length=1, max_length=64)
+    status: CompanionJobState = CompanionJobState.QUEUED
+    input_revision: str = Field(min_length=1, max_length=128)
+    idempotency_key: str = Field(min_length=1, max_length=240)
+    # Safe to log and to put in a metrics label; carries nothing about content.
+    trace_id: str = Field(min_length=1, max_length=64)
+    sensitivity: Literal["ordinary", "personal", "health", "location", "mutation"] = (
+        "ordinary"
+    )
+    locality: Literal["home_lan", "tailnet", "other"] = "home_lan"
+
+    attempts: tuple[CompanionAttemptRecord, ...] = ()
+    # Which session currently owns the work, and until when. A lease that has
+    # expired is reclaimable regardless of what the device believes.
+    lease_owner: str | None = Field(default=None, max_length=160)
+    lease_expires_at: datetime | None = None
+    complete_deadline: datetime | None = None
+
+    progress_stage: str = Field(default="queued", max_length=64)
+    progress_fraction: float | None = Field(default=None, ge=0, le=1)
+    # A summary, never the model's working text.
+    progress_summary: str | None = Field(default=None, max_length=400)
+    checkpoint_ref: str | None = Field(default=None, max_length=240)
+    result_ref: str | None = Field(default=None, max_length=240)
+    approval_id: str | None = Field(default=None, max_length=160)
+
+    # True once the work has moved to Iridium. A late phone result for a job
+    # that has fallen back is recorded and ignored, never applied.
+    local_fallback: bool = False
+    failure_code: str | None = Field(default=None, max_length=64)
+    failure_detail: str | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_companion_job(self) -> CompanionJobRecord:
+        for value in (self.lease_expires_at, self.complete_deadline):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("companion job timestamps must be timezone-aware")
+        seen = [attempt.attempt_id for attempt in self.attempts]
+        if len(set(seen)) != len(seen):
+            raise ValueError("companion job attempts must be unique")
+        # A lease with no owner, or an owner with no expiry, is a half-written
+        # lease — the exact shape that lets two owners think they hold one job.
+        if (self.lease_owner is None) != (self.lease_expires_at is None):
+            raise ValueError("a companion lease needs both an owner and an expiry")
+        return self
+
+
+MAX_CHECKPOINT_BYTES = 64 * 1024
+
+
+class CompanionCheckpointRecord(DurableModel):
+    """Enough state to resume a long job without starting it over.
+
+    Kept as its own record rather than a field on the job so it can expire on
+    the payload clock while the job's structural history stays for audit — a
+    checkpoint is working state, and working state for a personal-context job
+    is exactly the thing that must not linger.
+
+    Bounded hard. A checkpoint is a resumption aid, and one that grows without
+    limit turns an optional optimisation into a storage leak that survives
+    every restart.
+    """
+
+    job_id: str = Field(min_length=1, max_length=160)
+    attempt_id: str = Field(min_length=1, max_length=160)
+    stage: str = Field(min_length=1, max_length=64)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    sensitivity: Literal["ordinary", "personal", "health", "location", "mutation"] = (
+        "ordinary"
+    )
+
+    @model_validator(mode="after")
+    def validate_checkpoint(self) -> CompanionCheckpointRecord:
+        try:
+            size = len(json.dumps(self.payload, default=str).encode("utf-8"))
+        except (TypeError, ValueError) as error:
+            raise ValueError("checkpoint payload must be serialisable") from error
+        if size > MAX_CHECKPOINT_BYTES:
+            raise ValueError(
+                f"checkpoint payload is {size} bytes, over the {MAX_CHECKPOINT_BYTES} limit"
+            )
+        # A checkpoint with no expiry is a personal payload kept forever.
+        if self.expires_at is None:
+            raise ValueError("a companion checkpoint must expire")
+        return self
+
+
+class CompanionCallbackState(StrEnum):
+    PENDING = "pending"
+    # Handed to the registry. Recoverable because the idempotency key is
+    # already stored before the tool is touched.
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    # The attempt that asked for this is no longer the one that owns the job,
+    # so its answer is worthless. Recorded rather than deleted: "the phone
+    # asked for this and we threw the answer away" is a fact worth having when
+    # someone is working out why a job took two goes.
+    SUPERSEDED = "superseded"
+
+
+class CompanionCallbackRecord(DurableModel):
+    """One tool call a reasoning job asked Iridium to make on its behalf.
+
+    Persisted because the socket is not the system of record. A callback issued
+    just before a disconnect must not run twice when the device reconnects and
+    asks again, and its result must not be delivered to whichever attempt
+    happens to hold the job by then.
+    """
+
+    job_id: str = Field(min_length=1, max_length=160)
+    # What makes a late result detectable. A result is only ever applied to the
+    # attempt that asked for it.
+    attempt_id: str = Field(min_length=1, max_length=160)
+    call_id: str = Field(min_length=1, max_length=64)
+    provider: str = Field(min_length=1, max_length=64)
+    tool: str = Field(min_length=1, max_length=128)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: CompanionCallbackState = CompanionCallbackState.PENDING
+    idempotency_key: str = Field(min_length=1, max_length=240)
+    sensitivity: Literal["ordinary", "personal", "health", "location", "mutation"] = (
+        "personal"
+    )
+    # The observation the tool returned. Marked with its class and expiring on
+    # that class's clock, because a calendar read's contents are exactly the
+    # thing that must not outlive the job that needed them.
+    observed: dict[str, Any] | None = None
+    ok: bool | None = None
+    code: str | None = Field(default=None, max_length=64)
+    message: str | None = Field(default=None, max_length=1000)
+    completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_companion_callback(self) -> CompanionCallbackRecord:
+        if self.completed_at is not None and self.completed_at.utcoffset() is None:
+            raise ValueError("companion callback timestamps must be timezone-aware")
+        if self.expires_at is None:
+            raise ValueError("a companion callback must expire")
+        return self
+
+
+class CompanionApprovalState(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    # Handed to the executor. A crash here is recoverable precisely because the
+    # idempotency key is already stored: the retry cannot write twice.
+    EXECUTING = "executing"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+class CompanionApprovalRecord(DurableModel):
+    """A mutation a companion proposed, and the owner's answer to it.
+
+    Durable because the voice turn must not block waiting for a human. The turn
+    ends with an acknowledgement, the phone shows a prompt, and the answer
+    arrives whenever it arrives — possibly after a reconnect, a server restart,
+    or both.
+
+    The exact target is stored, not a description of it. Approving "turn off
+    the lights" must execute the action that was described at the moment it was
+    described, not whatever that phrase would resolve to later.
+    """
+
+    job_id: str | None = Field(default=None, max_length=160)
+    provider: str = Field(min_length=1, max_length=64)
+    tool: str = Field(min_length=1, max_length=128)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    # Plain language, checkable at a glance. This is what the owner actually
+    # agrees to, so it has to describe the stored arguments and not paraphrase.
+    summary: str = Field(min_length=1, max_length=400)
+    status: CompanionApprovalState = CompanionApprovalState.PENDING
+    idempotency_key: str = Field(min_length=1, max_length=240)
+    # Single-use, and part of the signed material, so one "yes" cannot be
+    # replayed against a later approval.
+    nonce: str = Field(min_length=8, max_length=128)
+    sensitivity: Literal["ordinary", "personal", "health", "location", "mutation"] = (
+        "mutation"
+    )
+    # The answering deadline, which is NOT the store's `expires_at`.
+    #
+    # `expires_at` is retention: the store prunes past it. If the two were the
+    # same field, an approval nobody answered would be *deleted* at the moment
+    # it lapsed rather than recorded as expired — losing the audit fact that
+    # something was proposed and never agreed to. So the proposal ages out at
+    # `respond_by` and the record is kept for a while after.
+    respond_by: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = Field(default=None, max_length=160)
+    executed_at: datetime | None = None
+    result_ref: str | None = Field(default=None, max_length=240)
+    failure_detail: str | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_companion_approval(self) -> CompanionApprovalRecord:
+        for value in (self.respond_by, self.decided_at, self.executed_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("companion approval timestamps must be timezone-aware")
+        # An approval with no deadline is one that can be executed years later
+        # against a house that has changed. Every proposal must age out.
+        if self.expires_at is None:
+            raise ValueError("a companion approval must have a retention horizon")
+        if self.expires_at < self.respond_by:
+            raise ValueError("a companion approval must outlive its answering deadline")
         return self
 
 

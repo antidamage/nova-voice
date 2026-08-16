@@ -44,7 +44,11 @@ async def test_active_approved_automation_creates_one_quiet_hour_safe_proposal(t
     await automations.activate(draft.id, actor_id="addie")
     engine = ProactiveInterventionEngine(
         store,
-        policy=ProactivePolicy(quiet_start_hour=0, quiet_end_hour=23),
+        # Always quiet, so the channel downgrade is what is under test rather
+        # than what time the suite happens to run. `0..23` looks like "all day"
+        # and is not: the window is half-open, so hour 23 falls outside it and
+        # this test failed for one hour in every twenty-four.
+        policy=ProactivePolicy(quiet_start_hour=0, quiet_end_hour=24),
         automations=automations,
     )
     current = utc_now()

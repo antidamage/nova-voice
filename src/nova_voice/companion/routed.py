@@ -46,7 +46,7 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import InterpretRequest, Interpreter, RenderRequest
+from nova_voice.interpretation.base import Interpreter, InterpretRequest, RenderRequest
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,23 @@ logger = logging.getLogger(__name__)
 # ``facts`` is either tiny or load-bearing — the response instruction, the
 # decision, the tool results the reply must not contradict — and is sent whole.
 _ELASTIC_FACTS = ("relevantState", "selectedMemory")
+
+
+def _catalogue_names(offered_tools: list[dict]) -> frozenset[str]:
+    """The names a turn actually showed the phone, in OpenAI tool-schema shape.
+
+    One source for both checks — what may be called back for during reasoning,
+    and what may appear in the returned plan — so the two can never disagree
+    about what "offered" means.
+    """
+
+    return frozenset(
+        name
+        for tool in offered_tools
+        if isinstance(tool, dict)
+        and isinstance(tool.get("function"), dict)
+        and (name := tool["function"].get("name"))
+    )
 
 
 def companion_render_payload(request: RenderRequest, *, context_tokens: int) -> dict:
@@ -206,6 +223,10 @@ class RoutedInterpreter(Interpreter):
             payload,
             lambda: self.inner.run_interpret_request(request),
             parse=lambda result: self._validated_interpretation(result, compacted.tools),
+            # Exactly what this turn showed the phone, and nothing else. The
+            # same set gates both directions: a tool it may *call back* for
+            # while reasoning, and a tool it may name in the plan it returns.
+            allowed_tools=_catalogue_names(compacted.tools),
         )
         logger.info(
             "interpret resolved source=%s reason=%s elapsed_ms=%s",
@@ -241,13 +262,7 @@ class RoutedInterpreter(Interpreter):
         if not isinstance(parsed, Interpretation):
             return None
 
-        allowed = {
-            name
-            for tool in offered_tools
-            if isinstance(tool, dict)
-            and isinstance(tool.get("function"), dict)
-            and (name := tool["function"].get("name"))
-        }
+        allowed = _catalogue_names(offered_tools)
         for action in parsed.actions:
             qualified = f"{action.call.provider}.{action.call.tool}"
             if qualified not in allowed and action.call.tool not in allowed:

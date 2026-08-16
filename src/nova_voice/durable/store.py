@@ -17,6 +17,10 @@ from nova_voice.durable.models import (
     BriefingRecord,
     BriefingScheduleRecord,
     CommitmentRecord,
+    CompanionApprovalRecord,
+    CompanionCallbackRecord,
+    CompanionCheckpointRecord,
+    CompanionJobRecord,
     ConversationRecord,
     ConversationTopicRecord,
     DelegationGrantRecord,
@@ -47,6 +51,10 @@ Record = (
     | AutomationRecord
     | BriefingRecord
     | BriefingScheduleRecord
+    | CompanionApprovalRecord
+    | CompanionCallbackRecord
+    | CompanionCheckpointRecord
+    | CompanionJobRecord
     | ConversationRecord
     | ConversationTopicRecord
     | CommitmentRecord
@@ -75,6 +83,10 @@ _RECORD_TYPES: dict[str, type[Record]] = {
         AutomationRecord,
         BriefingRecord,
         BriefingScheduleRecord,
+        CompanionApprovalRecord,
+        CompanionCallbackRecord,
+        CompanionCheckpointRecord,
+        CompanionJobRecord,
         ConversationRecord,
         ConversationTopicRecord,
         CommitmentRecord,
@@ -209,6 +221,10 @@ class DurableAgentStore:
             getattr(record, "plan_id", None)
             or getattr(record, "goal_id", None)
             or getattr(record, "conversation_id", None)
+            # Companion checkpoints hang off a job. Without this they are
+            # stored with no parent and cannot be listed for the job they
+            # belong to, which is the only way anything ever looks them up.
+            or getattr(record, "job_id", None)
         )
         key = record.idempotency_key if isinstance(record, ExecutionRecord) else None
         return status_value, parent, key

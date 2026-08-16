@@ -208,6 +208,22 @@ public struct CompanionHello: Codable, Sendable {
     public let workloads: [CompanionWorkload]
     public let personalTools: [String]
     public let telemetry: CompanionTelemetry
+    /// Durable jobs this device believes it is still working on.
+    ///
+    /// Empty after a restart — which is the point. The server compares this
+    /// with what it thinks it leased, so an empty claim from a device that
+    /// crashed mid-job is how that job gets released rather than waiting out
+    /// its lease.
+    ///
+    /// **Optional, and omitted when there is nothing to claim.** The server's
+    /// message models are `extra="forbid"`, so a hello carrying a field an
+    /// older server does not know is rejected and the socket closes. Sending
+    /// it unconditionally broke a live device against a server whose matching
+    /// change had not shipped yet — the client updates the moment it is
+    /// installed, the server updates on a deploy, and the two are not the same
+    /// moment. Omitting the empty case means the field only appears once there
+    /// is something to say, by which time the server understands it.
+    public let activeJobs: [String]?
 }
 
 // MARK: - Job lifecycle
@@ -217,6 +233,21 @@ public struct JobOffer: Codable, Sendable {
     public let payload: JSONValue
     public let callbackBudget: Int
     public let contextTokens: Int
+    /// Exactly the tools this attempt may call back for, as `provider.tool`.
+    ///
+    /// The device is told the catalogue rather than left to infer it from the
+    /// prompt. Nothing here is a security boundary — Iridium refuses anything
+    /// outside the list regardless of what the device believes — but naming a
+    /// tool that will certainly be refused wastes a round trip and a slice of
+    /// the callback budget, so the runtime should read this rather than guess.
+    ///
+    /// Optional because these arrived after the first committed fixtures: an
+    /// offer from an older server decodes with them absent rather than
+    /// failing the whole frame.
+    public let toolCatalogue: [String]?
+    public let callbackDeadlineSeconds: Double?
+    public let callbackBudgetSeconds: Double?
+    public let maxConcurrentCallbacks: Int?
 }
 
 public struct JobAccept: Codable, Sendable {
@@ -327,6 +358,26 @@ public struct PersonalResult: Codable, Sendable {
     public let sensitivity: Sensitivity
     public let items: [JSONValue]
     public let truncated: Bool
+
+    /// Explicit and public because the app builds these, and a synthesised
+    /// memberwise initialiser on a public struct is only internal.
+    public init(
+        callId: String,
+        ok: Bool,
+        code: String,
+        message: String,
+        sensitivity: Sensitivity,
+        items: [JSONValue],
+        truncated: Bool
+    ) {
+        self.callId = callId
+        self.ok = ok
+        self.code = code
+        self.message = message
+        self.sensitivity = sensitivity
+        self.items = items
+        self.truncated = truncated
+    }
 }
 
 // MARK: - Housekeeping

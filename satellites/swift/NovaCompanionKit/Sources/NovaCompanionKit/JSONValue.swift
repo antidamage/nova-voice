@@ -85,6 +85,17 @@ public enum JSONValue: Codable, Equatable, Sendable {
         return Int(exactly: value.rounded())
     }
 
+    /// Strictly a JSON boolean.
+    ///
+    /// Not "truthy": a schema field declared boolean that arrives as `1` or
+    /// `"true"` is a payload that does not match its own schema, and quietly
+    /// accepting it would let a client's bug become an event marked all-day
+    /// when it is not.
+    public var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
     public subscript(key: String) -> JSONValue? {
         objectValue?[key]
     }

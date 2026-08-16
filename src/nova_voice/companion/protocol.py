@@ -210,6 +210,16 @@ class CompanionHello(CompanionModel):
         default_factory=list, max_length=64, alias="personalTools"
     )
     telemetry: CompanionTelemetry = Field(default_factory=CompanionTelemetry)
+    # Durable jobs this device believes it is still working on.
+    #
+    # Sent on every hello, including the first, where it is empty. Its absence
+    # and its emptiness must mean the same thing — "I hold nothing" — because
+    # an older client that never sends it has, in fact, restarted and holds
+    # nothing. Treating absence as "unknown" instead would leave those jobs
+    # leased to a device that will never finish them.
+    active_jobs: list[str] = Field(
+        default_factory=list, max_length=64, alias="activeJobs"
+    )
 
 
 class TelemetryMessage(CompanionModel):
@@ -242,6 +252,26 @@ class JobOffer(CompanionModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     callback_budget: int = Field(default=12, ge=0, le=64, alias="callbackBudget")
     context_tokens: int = Field(default=4096, ge=512, le=1_000_000, alias="contextTokens")
+    # Exactly the tools this attempt may call back for, as ``provider.tool``.
+    # The companion is told the catalogue rather than left to guess it: a call
+    # naming anything outside this list is refused in the session manager,
+    # before the registry ever sees it. An empty catalogue means no callbacks.
+    tool_catalogue: list[str] = Field(
+        default_factory=list, max_length=64, alias="toolCatalogue"
+    )
+    # Wall-clock ceiling for one callback, and for every callback this attempt
+    # makes put together. Count alone is not a bound: twelve calls that each
+    # hang for the workload deadline are twelve times the latency the voice
+    # turn had budgeted for.
+    callback_deadline_seconds: float = Field(
+        default=8.0, gt=0, le=120, alias="callbackDeadlineSeconds"
+    )
+    callback_budget_seconds: float = Field(
+        default=30.0, gt=0, le=600, alias="callbackBudgetSeconds"
+    )
+    max_concurrent_callbacks: int = Field(
+        default=2, ge=1, le=8, alias="maxConcurrentCallbacks"
+    )
 
 
 class JobAccept(CompanionModel):

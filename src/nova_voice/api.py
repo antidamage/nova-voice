@@ -29,10 +29,13 @@ from nova_voice.audio.runtime import (
     SatelliteAudioRuntime,
 )
 from nova_voice.automation import AutomationLifecycleError, AutomationManager
+from nova_voice.bootstrap import build_service
 from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
 from nova_voice.companion.auth import CompanionAuthenticator
 from nova_voice.companion.dispatch import dispatch_companion_message
+from nova_voice.companion.ledger import CompanionJobLedger
 from nova_voice.companion.locality import LocalityClassifier
+from nova_voice.companion.presence import presence_from
 from nova_voice.companion.protocol import (
     SUPPORTED_PROTOCOL_VERSIONS,
     AuthChallenge,
@@ -41,10 +44,10 @@ from nova_voice.companion.protocol import (
     HelloAck,
 )
 from nova_voice.companion.protocol import parse_client_message as parse_companion_message
+from nova_voice.companion.protocol import serialize as serialize_companion
+from nova_voice.companion.retention import CompanionRetention
 from nova_voice.companion.router import RouteMode
 from nova_voice.companion.workloads import parse_result as parse_companion_result
-from nova_voice.companion.protocol import serialize as serialize_companion
-from nova_voice.bootstrap import build_service
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
 from nova_voice.domain import HandleResult, SpeakerIdentity, Utterance
@@ -99,14 +102,14 @@ from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.telemetry import StructuralTelemetry
+from nova_voice.training.mode import TrainingMode
+from nova_voice.training.paths import TRAINING_MODE_STATE
 from nova_voice.tts_engines import (
     dashboard_engines_manifest,
     engine_by_id,
     engine_for_backend,
     engine_ids,
 )
-from nova_voice.training.mode import TrainingMode
-from nova_voice.training.paths import TRAINING_MODE_STATE
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
 from nova_voice.warmth import WarmthKeeper
 
@@ -503,9 +506,47 @@ def create_app(
         # unable to connect for its duration — trading a slow first reply for
         # an unreachable service, which is strictly worse.
         warmth_task = asyncio.create_task(warmth_keeper.run())
+        # Companion payload expiry. Separate from the store's own janitor
+        # because it is not only deletion: it strips content references off
+        # finished jobs and settled approvals while leaving their structural
+        # history, which nothing generic can do without knowing which fields
+        # are content.
+        retention = (
+            CompanionRetention(selected_service.durable_store)
+            if selected_service.durable_store is not None
+            else None
+        )
+        retention_task = asyncio.create_task(retention.run()) if retention else None
+        # Reconnect reconciliation. Bound here because it needs both halves —
+        # the session manager to know a device has arrived, and the durable
+        # store to know what it was holding — and neither owns the other.
+        companion_sessions = getattr(selected_service, "companion_sessions", None)
+        if selected_service.durable_store is not None and companion_sessions is not None:
+            companion_ledger = CompanionJobLedger(selected_service.durable_store)
+
+            async def reconcile_companion(
+                session_id: str, claimed: tuple[str, ...]
+            ) -> tuple[str, ...]:
+                _, unknown = await companion_ledger.reconcile(
+                    session_id=session_id, device_job_ids=claimed
+                )
+                return unknown
+
+            companion_sessions.bind_reconciler(reconcile_companion)
+        companion_ping_task = (
+            asyncio.create_task(companion_sessions.ping_loop())
+            if companion_sessions is not None
+            else None
+        )
         yield
         warmth_task.cancel()
         probe_task.cancel()
+        if retention is not None:
+            retention.stop()
+        if retention_task is not None:
+            retention_task.cancel()
+        if companion_ping_task is not None:
+            companion_ping_task.cancel()
         selected_service.store.stop()
         if janitor_task:
             await janitor_task
@@ -1103,6 +1144,21 @@ def create_app(
             "localityConfigured": companion_locality.configured,
             "authConfigured": companion_authenticator.configured,
         }
+        # Published unconditionally, including when nothing is connected,
+        # because "unknown" is the answer in that case and a caller needs to
+        # receive it rather than infer it from an absent field. A disconnect is
+        # never reported as `away`.
+        presence = presence_from(
+            session_locality=snapshot.locality if snapshot else None,
+            session_connected=bool(snapshot and snapshot.connected),
+        )
+        payload["presence"] = {
+            "state": presence.state,
+            "source": presence.source,
+            "ageSeconds": presence.age_seconds,
+            "detail": presence.detail,
+            "actionable": presence.actionable,
+        }
         if snapshot is not None and snapshot.connected:
             payload |= {
                 "identity": snapshot.identity,
@@ -1134,6 +1190,16 @@ def create_app(
                 for workload, route in router.routes().items()
             }
             payload["counters"] = router.counters()
+            # Latency per pass, split by where the work ran. The arms are timed
+            # separately so a fallback's failed attempt is not charged to the
+            # voice server.
+            payload["timings"] = router.timings()
+            payload["comparing"] = sorted(router.comparing())
+            # Both answers, when comparison mode is on. Model output, so it is
+            # bounded and it is the one part of this endpoint that carries
+            # household content — which is why it appears only while an
+            # operator has deliberately switched comparison on.
+            payload["comparisons"] = router.comparisons()
         return payload
 
     @app.post("/v1/companion/routing")
@@ -1185,9 +1251,11 @@ def create_app(
                 router.override(workload, mode=mode)
                 applied[f"routes.{workload}"] = mode
 
+
         if not applied:
             raise HTTPException(
-                status_code=400, detail="supply at least one of forceLocal, enabled, routes"
+                status_code=400,
+                detail="supply at least one of forceLocal, enabled, routes",
             )
         logger.info("companion routing overridden at runtime: %s", applied)
         return {

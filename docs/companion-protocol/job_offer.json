@@ -20,5 +20,9 @@
     "roomId": "lounge"
   },
   "callbackBudget": 12,
-  "contextTokens": 4096
+  "contextTokens": 4096,
+  "toolCatalogue": ["nova.light_set", "nova.scene_apply"],
+  "callbackDeadlineSeconds": 8.0,
+  "callbackBudgetSeconds": 30.0,
+  "maxConcurrentCallbacks": 2
 }

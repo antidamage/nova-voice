@@ -73,7 +73,50 @@ class CapabilityRegistry:
         return results
 
     def tool_catalog(self) -> list[dict]:
+        """Every registered tool. Used for validation and execution.
+
+        Deliberately *not* filtered by what is currently reachable. A durable
+        plan made an hour ago may name a tool whose provider has since gone
+        quiet, and that plan must still validate and still execute when the
+        provider comes back — hiding it here would break it retroactively.
+        """
+
         return [tool for manifest in self.manifests() for tool in manifest.tools]
+
+    async def planner_tool_catalog(self) -> list[dict]:
+        """The tools to *offer a planner*, with superseded duplicates removed.
+
+        Two providers can do the same job — the phone's own Calendar and the
+        household iCloud account are the case this exists for — and offering
+        both puts a genuinely ambiguous choice in front of the model. It will
+        pick one, sometimes the wrong one, and the result is a reminder created
+        somewhere the owner does not look.
+
+        So when a provider declares that it supersedes another's tools *and is
+        currently healthy*, the superseded ones are left out of new catalogues.
+        The superseded provider stays registered and stays executable, which is
+        what makes disconnect safe: the phone going away restores iCloud to the
+        next catalogue without invalidating any plan already holding an iCloud
+        action.
+        """
+
+        health = await self.health()
+        shadowed: set[str] = set()
+        for manifest in self.manifests():
+            supersedes = getattr(self.provider(manifest.id), "supersedes", None)
+            if not supersedes:
+                continue
+            if not health.get(manifest.id, {}).get("ok"):
+                # Registered but not usable. Superseding on the strength of a
+                # provider that cannot answer would hide the working one.
+                continue
+            shadowed.update(supersedes)
+
+        return [
+            tool
+            for tool in self.tool_catalog()
+            if str(tool.get("function", {}).get("name", "")) not in shadowed
+        ]
 
     def policy_for(self, provider_id: str, tool_name: str) -> ToolPolicy | None:
         return self._tool_policies.get((provider_id, tool_name))

@@ -96,7 +96,12 @@ struct FoundationModelEngine: CompanionSession.Engine {
     func run(
         workload: CompanionWorkload,
         payload: JSONValue,
-        contextTokens: Int
+        contextTokens: Int,
+        // Every workload here is one typed question with a typed answer, so
+        // nothing calls back. The parameter is part of the contract rather
+        // than an oversight: a later engine that reasons in steps needs it,
+        // and the session cannot know in advance which kind it is holding.
+        tools: any CompanionTools
     ) async throws -> JSONValue? {
         guard Self.supported.contains(workload) else {
             throw EngineError.unsupportedWorkload(workload)
@@ -469,21 +474,19 @@ struct FoundationModelEngine: CompanionSession.Engine {
     /// Tool arguments arrive as a JSON string: a generation schema cannot
     /// describe a shape that differs per tool. Unparseable means no arguments
     /// rather than a discarded action, and Iridium validates them anyway.
+    // Shaping lives in NovaCompanionKit so it can be tested — this target has
+    // no test bundle, and this is precisely where a wrong field name silently
+    // fails every plan. These forward rather than duplicate.
     private static func decodeArguments(_ text: String) -> JSONValue {
-        guard let data = text.data(using: .utf8),
-            let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-            case .object = value
-        else { return .object([:]) }
-        return value
+        CompanionResultShaping.decodeArguments(text)
     }
 
     private static func oneOf(_ value: String, _ allowed: Set<String>, fallback: String) -> String {
-        let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return allowed.contains(candidate) ? candidate : fallback
+        CompanionResultShaping.oneOf(value, allowed, fallback: fallback)
     }
 
     private static func clamp(_ value: Double) -> Double {
-        min(max(value, 0), 1)
+        CompanionResultShaping.clamp(value)
     }
 
     /// The structured input, as JSON, exactly as Iridium's own model receives it.
@@ -494,58 +497,17 @@ struct FoundationModelEngine: CompanionSession.Engine {
         return text
     }
 
-    /// Nova's enums, mirrored. A value outside these fails validation on
-    /// Iridium and costs the fallback, so an unrecognised answer is corrected
-    /// to the safe member here instead — `ignore` for a decision, `unclear`
-    /// for a speech act: the ones that do the least if the model was wrong.
-    private static let EMOTIONS: Set<String> = [
-        "neutral", "calm", "grumpy", "angry", "excited", "bored", "sad", "anxious",
-    ]
-    private static let SPEECH_ACTS: Set<String> = [
-        "directive", "desired_state", "self_intention", "observation", "question",
-        "third_party", "quoted_or_media", "social", "unclear",
-    ]
-    private static let DECISIONS: Set<String> = ["execute", "reply", "clarify", "ignore"]
-    private static let GOAL_STATUSES: Set<String> = [
-        "new", "in_progress", "needs_clarification", "satisfied", "abandoned",
-    ]
+    private static let EMOTIONS = CompanionResultShaping.emotions
+    private static let SPEECH_ACTS = CompanionResultShaping.speechActs
+    private static let DECISIONS = CompanionResultShaping.decisions
+    private static let GOAL_STATUSES = CompanionResultShaping.goalStatuses
 
-    /// Trim, and treat blank or the model's own filler as absent.
     private static func tidy(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !trimmed.isEmpty
-        else { return nil }
-        // Small models answer optional string fields with a word rather than
-        // leaving them out, and "none" as a name is worse than no name.
-        let placeholders: Set<String> = ["none", "null", "n/a", "na", "unknown", "unspecified"]
-        return placeholders.contains(trimmed.lowercased()) ? nil : trimmed
+        CompanionResultShaping.tidy(value)
     }
 
-    /// Render an observed-state blob compactly for the prompt.
     private static func describe(_ value: JSONValue) -> String {
-        switch value {
-        case .object(let fields):
-            return fields
-                .sorted { $0.key < $1.key }
-                .map { "\($0.key)=\(describe($0.value))" }
-                .joined(separator: " ")
-        case .array(let items):
-            return items.map(describe).joined(separator: ", ")
-        case .string(let text):
-            return text
-        case .number(let number):
-            // Whole numbers read better without a decimal tail — "22" not
-            // "22.0" — but the conversion is guarded because a value outside
-            // Int's range would trap, and a prompt is not worth a crash.
-            if number == number.rounded(), let whole = Int(exactly: number.rounded()) {
-                return String(whole)
-            }
-            return String(number)
-        case .bool(let flag):
-            return flag ? "true" : "false"
-        case .null:
-            return "unknown"
-        }
+        CompanionResultShaping.describe(value)
     }
 }
 

@@ -21,6 +21,11 @@ from nova_voice.briefings import BriefingManager
 from nova_voice.capabilities.registry import CapabilityRegistry
 from nova_voice.commitments import CommitmentManager
 from nova_voice.communications import CommunicationManager
+from nova_voice.companion.protocol import ToolResultMessage
+from nova_voice.companion.router import CompanionWorkloadRouter, turn_route_log
+from nova_voice.companion.session import CompanionSessionManager
+from nova_voice.companion.workloads import SelfProfileResult
+from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.config import Settings
 from nova_voice.continuity import ConversationContinuityManager
 from nova_voice.dialogue import MultiPartyDialogueManager, detect_dialogue_routing
@@ -74,11 +79,6 @@ from nova_voice.proactive import ProactiveInterventionEngine
 from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardError
 from nova_voice.providers.nova.provider import NovaProvider
-from nova_voice.companion.protocol import ToolResultMessage
-from nova_voice.companion.router import CompanionWorkloadRouter
-from nova_voice.companion.session import CompanionSessionManager
-from nova_voice.companion.workloads import SelfProfileResult
-from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.providers.web.provider import WebProvider
 from nova_voice.research import ResearchManager
 from nova_voice.sessions import SessionManager
@@ -509,6 +509,7 @@ class NovaVoiceService:
     def apply_voice_settings(self, settings: VoiceSettings) -> None:
         self.persona = self.persona.with_voice_settings(settings)
         self.voice_settings = settings
+        self._apply_companion_switches(settings)
         self._apply_companion_routes(settings.companion_routes)
         self.nova_provider.agent_name = settings.spoken_name
         # The conversation window is dashboard-tunable and applies live: both
@@ -588,13 +589,39 @@ class NovaVoiceService:
             if not str(tool.get("function", {}).get("name", "")).startswith("web.")
         ]
 
+    def _apply_companion_switches(self, settings) -> None:
+        """Apply the two kill switches, if the dashboard has an opinion.
+
+        `None` means "leave it as configured", which is what stops a dashboard
+        that has never shown these controls from silently switching the feature
+        on or off for a deployment that set it in configuration.
+
+        Applied *before* the routes, so an operator who switches the feature
+        off and moves a pass in the same save does not get one turn where the
+        pass has moved and the feature is still live.
+        """
+
+        router = self.companion_router
+        if router is None:
+            return
+        if settings.companion_enabled is not None:
+            router.set_enabled(settings.companion_enabled)
+        if settings.companion_force_local is not None:
+            router.set_force_local(settings.companion_force_local)
+
     def _apply_companion_routes(self, choices: dict[str, str]) -> None:
         """Put each pass where the dashboard says it should run.
 
         The three operator-facing words map onto the router's modes rather than
         being stored as modes, because an operator is choosing a *machine*:
-        "both" is the useful one and means the phone answers when it can and
-        this host when it cannot, which is `companion_preferred`.
+        "local" is this host, "companion" is the phone, and "both" runs the
+        pass on both and keeps both answers.
+
+        "Both" is the measurement setting, not the fast one. It occupies this
+        host's single LLM slot *and* the phone, so it gives up the latency
+        benefit of offloading entirely — in exchange for being able to see the
+        two answers side by side, which is the only way to judge whether a pass
+        should move for real.
 
         A workload absent from the map keeps its code default. That is what
         makes an empty map mean "as shipped" rather than "route nothing", so a
@@ -605,7 +632,15 @@ class NovaVoiceService:
         router = self.companion_router
         if router is None or not choices:
             return
-        modes = {"local": "local", "companion": "companion_only", "both": "companion_preferred"}
+        # "both" means both, literally: the pass runs on the phone *and* here,
+        # and both answers are kept. It used to map to `companion_preferred`,
+        # which tries the phone and falls back — so the control said "Both"
+        # while only ever one stack did the work.
+        # "companion" is `companion_preferred`, not `companion_only`. An
+        # operator choosing "Companion" is saying which machine should do the
+        # work, not asking for the pass to fail when the phone is asleep —
+        # and `companion_only` returns nothing at all in that case.
+        modes = {"local": "local", "companion": "companion_preferred", "both": "both"}
         known = router.routes()
         for workload, choice in choices.items():
             mode = modes.get(choice)
@@ -948,13 +983,21 @@ class NovaVoiceService:
             # late side effect — can reach the household behind its back.
             dry_run_token = begin_dry_run() if utterance.dry_run else None
             try:
-                result = await self._handle(
-                    utterance,
-                    on_thinking=on_thinking,
-                    turn_machine=machine,
-                    cancellation=cancellation,
-                    prefetch=prefetch,
-                )
+                # Collect where each reasoning pass of this turn actually ran.
+                # Wrapping the whole turn rather than a single call means a pass
+                # invoked from anywhere inside it is attributed correctly — and
+                # a pass that ran on *both* stacks appears twice, which is how
+                # a doubled turn becomes visible instead of being inferred.
+                with turn_route_log() as route_chain:
+                    result = await self._handle(
+                        utterance,
+                        on_thinking=on_thinking,
+                        turn_machine=machine,
+                        cancellation=cancellation,
+                        prefetch=prefetch,
+                    )
+                if route_chain:
+                    result = result.model_copy(update={"route_chain": list(route_chain)})
                 if dry_run_token is not None:
                     recorder = current_dry_run()
                     result = result.model_copy(
@@ -2018,7 +2061,23 @@ class NovaVoiceService:
             response_text=response_text,
             response_tone_instruction=self.persona.tone_instruction(interpretation.emotion),
             timings_ms=timings_ms,
+            route_comparison=self._route_comparison(),
         )
+
+    def _route_comparison(self) -> dict | None:
+        """Both sides' replies, if the reply pass is being compared this turn.
+
+        Only the reply is carried into the transcript. The other passes are
+        compared too, and their answers are on the status endpoint — but a
+        transcript is a record of what was *said*, and an interpretation or an
+        icon id shown beside a spoken line would be noise in the place people
+        read to understand a conversation.
+        """
+
+        router = self.companion_router
+        if router is None or "render_response" not in router.comparing():
+            return None
+        return router.pop_comparison("render_response")
 
     async def execute_companion_tool_call(self, call) -> ToolResultMessage:
         """Run one tool a companion asked for, and answer on the same socket.
