@@ -1,0 +1,623 @@
+{
+  "capturedAt": "2026-08-16T23:17:05.711659+00:00",
+  "method": {
+    "endpoint": "/v1/test/interpretation",
+    "audio": false,
+    "tools": false,
+    "state": false,
+    "memory": false,
+    "history": false,
+    "execution": false,
+    "sequential": true,
+    "warmupExcluded": true,
+    "repeats": 2,
+    "pauseSeconds": 10.0
+  },
+  "companion": {
+    "identity": "companion-1",
+    "locality": "home_lan",
+    "tier": "full",
+    "tierReason": "charging",
+    "appVersion": "1.0",
+    "osVersion": "26.6"
+  },
+  "warmup": {
+    "elapsedMs": 13909.3,
+    "armsMs": {
+      "companion": 13891.7,
+      "local": 3010.1
+    },
+    "winner": "local",
+    "input": {
+      "transcriptChars": 34,
+      "toolsOffered": 0,
+      "stateFields": 0,
+      "memoryEntries": 0,
+      "historyMessages": 0,
+      "localPromptBytes": 10576,
+      "companionPayloadBytes": 10612,
+      "companionEstimatedTokens": 2393,
+      "companionContextTokens": 16384,
+      "compaction": {
+        "budgetTokens": 16384,
+        "usedTokens": 2393,
+        "droppedTools": [],
+        "truncatedStateFields": [],
+        "droppedMemories": 0,
+        "droppedHistory": 0,
+        "complete": true
+      }
+    },
+    "result": {
+      "emotion": "neutral",
+      "speechAct": "directive",
+      "decision": "reply",
+      "confidence": 0.95,
+      "goalStatus": "satisfied",
+      "actions": 0
+    }
+  },
+  "summaryMs": {
+    "all": {
+      "companion": {
+        "n": 8,
+        "median": 14197.8,
+        "p95": 17979.1,
+        "min": 13743.6,
+        "max": 17979.1,
+        "mad": 346.5
+      },
+      "local": {
+        "n": 8,
+        "median": 2013.7,
+        "p95": 2215.3,
+        "min": 1841.9,
+        "max": 2215.3,
+        "mad": 33.5
+      },
+      "companionToLocalRatio": {
+        "n": 8,
+        "median": 7.0,
+        "p95": 9.8,
+        "min": 6.4,
+        "max": 9.8,
+        "mad": 0.3
+      },
+      "missingCompanion": 0
+    },
+    "social_short": {
+      "companion": {
+        "n": 2,
+        "median": 13974.0,
+        "p95": 13989.0,
+        "min": 13959.0,
+        "max": 13989.0,
+        "mad": 15.0
+      },
+      "local": {
+        "n": 2,
+        "median": 2041.2,
+        "p95": 2064.6,
+        "min": 2017.7,
+        "max": 2064.6,
+        "mad": 23.4
+      },
+      "companionToLocalRatio": {
+        "n": 2,
+        "median": 6.8,
+        "p95": 6.9,
+        "min": 6.8,
+        "max": 6.9,
+        "mad": 0.1
+      },
+      "missingCompanion": 0
+    },
+    "question_short": {
+      "companion": {
+        "n": 2,
+        "median": 14197.8,
+        "p95": 14280.8,
+        "min": 14114.9,
+        "max": 14280.8,
+        "mad": 82.9
+      },
+      "local": {
+        "n": 2,
+        "median": 2122.9,
+        "p95": 2215.3,
+        "min": 2030.5,
+        "max": 2215.3,
+        "mad": 92.4
+      },
+      "companionToLocalRatio": {
+        "n": 2,
+        "median": 6.7,
+        "p95": 7.0,
+        "min": 6.4,
+        "max": 7.0,
+        "mad": 0.3
+      },
+      "missingCompanion": 0
+    },
+    "observation": {
+      "companion": {
+        "n": 2,
+        "median": 14513.8,
+        "p95": 15284.0,
+        "min": 13743.6,
+        "max": 15284.0,
+        "mad": 770.2
+      },
+      "local": {
+        "n": 2,
+        "median": 1986.6,
+        "p95": 2009.6,
+        "min": 1963.6,
+        "max": 2009.6,
+        "mad": 23.0
+      },
+      "companionToLocalRatio": {
+        "n": 2,
+        "median": 7.3,
+        "p95": 7.6,
+        "min": 7.0,
+        "max": 7.6,
+        "mad": 0.3
+      },
+      "missingCompanion": 0
+    },
+    "self_intention": {
+      "companion": {
+        "n": 2,
+        "median": 16388.7,
+        "p95": 17979.1,
+        "min": 14798.2,
+        "max": 17979.1,
+        "mad": 1590.4
+      },
+      "local": {
+        "n": 2,
+        "median": 1922.2,
+        "p95": 2002.6,
+        "min": 1841.9,
+        "max": 2002.6,
+        "mad": 80.3
+      },
+      "companionToLocalRatio": {
+        "n": 2,
+        "median": 8.6,
+        "p95": 9.8,
+        "min": 7.4,
+        "max": 9.8,
+        "mad": 1.2
+      },
+      "missingCompanion": 0
+    }
+  },
+  "samples": [
+    {
+      "sequence": 1,
+      "repeat": 0,
+      "scenario": "social_short",
+      "armsMs": {
+        "companion": 13959.0,
+        "local": 2064.6
+      },
+      "elapsedMs": 13986.5,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 11,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10553,
+        "companionPayloadBytes": 10589,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "social",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 5.676081518875435,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 2,
+      "repeat": 0,
+      "scenario": "question_short",
+      "armsMs": {
+        "companion": 14114.9,
+        "local": 2215.3
+      },
+      "elapsedMs": 14128.0,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 25,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10567,
+        "companionPayloadBytes": 10603,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "social",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 29.702194615034387,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 3,
+      "repeat": 0,
+      "scenario": "observation",
+      "armsMs": {
+        "companion": 13743.6,
+        "local": 1963.6
+      },
+      "elapsedMs": 13751.7,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 32,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10574,
+        "companionPayloadBytes": 10610,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "calm",
+        "speechAct": "observation",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 8.862087168963626,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 4,
+      "repeat": 0,
+      "scenario": "self_intention",
+      "armsMs": {
+        "companion": 14798.2,
+        "local": 2002.6
+      },
+      "elapsedMs": 14811.4,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 37,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10579,
+        "companionPayloadBytes": 10615,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "self_intention",
+        "decision": "ignore",
+        "confidence": 0.9,
+        "goalStatus": "abandoned",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 32.64908002689481,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 5,
+      "repeat": 1,
+      "scenario": "question_short",
+      "armsMs": {
+        "companion": 14280.8,
+        "local": 2030.5
+      },
+      "elapsedMs": 14286.6,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 25,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10567,
+        "companionPayloadBytes": 10603,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "social",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 11.582977994112298,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 6,
+      "repeat": 1,
+      "scenario": "observation",
+      "armsMs": {
+        "companion": 15284.0,
+        "local": 2009.6
+      },
+      "elapsedMs": 15298.2,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 32,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10574,
+        "companionPayloadBytes": 10610,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "calm",
+        "speechAct": "observation",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 35.90498956711963,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 7,
+      "repeat": 1,
+      "scenario": "self_intention",
+      "armsMs": {
+        "companion": 17979.1,
+        "local": 1841.9
+      },
+      "elapsedMs": 17992.7,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 37,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10579,
+        "companionPayloadBytes": 10615,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "self_intention",
+        "decision": "ignore",
+        "confidence": 0.9,
+        "goalStatus": "abandoned",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 16.088488418143243,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    },
+    {
+      "sequence": 8,
+      "repeat": 1,
+      "scenario": "social_short",
+      "armsMs": {
+        "companion": 13989.0,
+        "local": 2017.7
+      },
+      "elapsedMs": 14004.6,
+      "winner": "local",
+      "input": {
+        "transcriptChars": 11,
+        "toolsOffered": 0,
+        "stateFields": 0,
+        "memoryEntries": 0,
+        "historyMessages": 0,
+        "localPromptBytes": 10553,
+        "companionPayloadBytes": 10589,
+        "companionEstimatedTokens": 2393,
+        "companionContextTokens": 16384,
+        "compaction": {
+          "budgetTokens": 16384,
+          "usedTokens": 2393,
+          "droppedTools": [],
+          "truncatedStateFields": [],
+          "droppedMemories": 0,
+          "droppedHistory": 0,
+          "complete": true
+        }
+      },
+      "result": {
+        "emotion": "neutral",
+        "speechAct": "social",
+        "decision": "reply",
+        "confidence": 0.95,
+        "goalStatus": "satisfied",
+        "actions": 0
+      },
+      "routeCounterDelta": {
+        "offered": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "device": {
+        "tierBefore": "full",
+        "tierReasonBefore": "charging",
+        "telemetryAgeBefore": 44.11640222906135,
+        "tierAfter": "full",
+        "tierReasonAfter": "charging"
+      }
+    }
+  ]
+}
