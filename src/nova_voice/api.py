@@ -32,6 +32,7 @@ from nova_voice.automation import AutomationLifecycleError, AutomationManager
 from nova_voice.bootstrap import build_service
 from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
 from nova_voice.companion.auth import CompanionAuthenticator
+from nova_voice.companion.compaction import DEFAULT_CONTEXT_TOKENS, compact_for_companion
 from nova_voice.companion.dispatch import dispatch_companion_message
 from nova_voice.companion.ledger import CompanionJobLedger
 from nova_voice.companion.locality import LocalityClassifier
@@ -127,6 +128,13 @@ class VoicePreviewRequest(BaseModel):
     text: str | None = None
     # Ask the language model this specific question instead of a random one.
     question: str | None = None
+
+
+class InterpretationBenchmarkRequest(BaseModel):
+    """One text-only interpretation sample with every elastic input removed."""
+
+    transcript: str = Field(min_length=1, max_length=500)
+    room: str = Field(default="benchmark", pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class EngineSwitchRequest(BaseModel):
@@ -2139,6 +2147,122 @@ def create_app(
             # failing the request.
             return {"ok": True, "dropped": True, "dryRun": dry_run}
         return _diagnostic_turn_payload(turn, include_audio=False)
+
+    @app.post("/v1/test/interpretation", include_in_schema=False)
+    async def test_interpretation(payload: InterpretationBenchmarkRequest) -> dict:
+        """Measure only the real routed interpretation pass, without tools.
+
+        Unlike ``/v1/test/turn``, this deliberately excludes audio, provider
+        context, conversation history, memory, tool schemas, policy, execution,
+        rendering and TTS. It exists so a companion benchmark can distinguish
+        model/prompt performance from the rest of a voice turn. The ordinary
+        mTLS listener still protects it, and the test-harness switch remains a
+        second explicit gate.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        build_request = getattr(interpreter, "build_interpret_request", None)
+        interpret = getattr(interpreter, "interpret", None)
+        if not callable(build_request) or not callable(interpret):
+            raise HTTPException(status_code=503, detail="Interpretation is unavailable")
+
+        utterance = Utterance.text(
+            payload.transcript.strip(),
+            room_id=payload.room,
+            satellite_id="interpretation-benchmark",
+            wake_detected=True,
+            dry_run=True,
+        )
+        request = build_request(
+            utterance,
+            active_goal=None,
+            relevant_state={},
+            tools=[],
+            conversation=None,
+        )
+        if request is None:
+            raise HTTPException(status_code=503, detail="Interpretation prompt is unavailable")
+
+        sessions = getattr(selected_service, "companion_sessions", None)
+        snapshot = sessions.snapshot() if sessions is not None else None
+        context_tokens = (
+            snapshot.hot_context_tokens
+            if snapshot is not None and snapshot.hot_context_tokens
+            else DEFAULT_CONTEXT_TOKENS
+        )
+        compacted = compact_for_companion(
+            instructions=request.system,
+            tools=[],
+            state={},
+            memory=[],
+            history=[],
+            context_tokens=context_tokens,
+        )
+        companion_payload = compacted.as_payload() | {"turn": request.turn_context}
+
+        router = getattr(selected_service, "companion_router", None)
+        comparisons_before = router.comparisons() if router is not None else []
+        previous_at = comparisons_before[-1].get("at") if comparisons_before else None
+        started = time.perf_counter()
+        result = await interpret(
+            utterance,
+            active_goal=None,
+            relevant_state={},
+            tools=[],
+            conversation=None,
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+
+        comparison = None
+        if router is not None:
+            latest = router.comparisons()
+            candidate = latest[-1] if latest else None
+            if (
+                candidate is not None
+                and candidate.get("workload") == "interpret"
+                and candidate.get("at") != previous_at
+            ):
+                comparison = candidate
+
+        arms_ms = None
+        winner = None
+        if comparison is not None:
+            arms_ms = {
+                "companion": (comparison.get("companion") or {}).get("elapsedMs"),
+                "local": (comparison.get("local") or {}).get("elapsedMs"),
+            }
+            winner = comparison.get("spoken")
+
+        local_prompt = json.dumps(request.messages, separators=(",", ":"), default=str)
+        device_prompt = json.dumps(companion_payload, separators=(",", ":"), default=str)
+        return {
+            "elapsedMs": elapsed_ms,
+            "armsMs": arms_ms,
+            "winner": winner,
+            "input": {
+                "transcriptChars": len(utterance.transcript),
+                "toolsOffered": 0,
+                "stateFields": 0,
+                "memoryEntries": 0,
+                "historyMessages": 0,
+                "localPromptBytes": len(local_prompt.encode("utf-8")),
+                "companionPayloadBytes": len(device_prompt.encode("utf-8")),
+                "companionEstimatedTokens": compacted.report.used_tokens,
+                "companionContextTokens": context_tokens,
+                "compaction": compacted.report.as_dict(),
+            },
+            "result": {
+                "emotion": result.emotion.label,
+                "speechAct": result.speech_act,
+                "decision": result.decision,
+                "confidence": result.confidence,
+                "goalStatus": result.active_goal.status,
+                "actions": len(result.actions),
+            },
+        }
 
     @app.websocket("/v1/diagnostics/stream")
     async def diagnostics_stream(websocket: WebSocket) -> None:
