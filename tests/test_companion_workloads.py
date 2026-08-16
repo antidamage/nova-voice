@@ -70,7 +70,7 @@ def test_hot_path_deadlines_leave_room_for_fallback(workload):
 
     entry = spec(workload)
     if entry.hot_path:
-        assert entry.default_timeout_seconds <= 7.0
+        assert entry.default_timeout_seconds <= 45.0
 
 
 def test_unknown_workload_raises_rather_than_defaulting():

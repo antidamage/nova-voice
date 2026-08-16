@@ -1346,22 +1346,28 @@ class NovaVoiceService:
             and (utterance.wake_detected or utterance.conversation_active)
         )
         # Identity extraction is deliberately separate from general intent and
-        # speech-act classification. Start the tiny context-free pass first so
-        # the local model can batch/run it alongside the normal interpretation.
-        profile_task = (
-            asyncio.create_task(self._routed_self_profile_update(utterance))
-            if addressed_identity_turn
-            else None
-        )
+        # speech-act classification. Queue interpretation first: both Iridium
+        # and the phone have one generation slot, and letting this background
+        # pass claim it first made the foreground interpretation miss its
+        # deadline. The tasks still overlap, but the user-facing pass reaches
+        # the engine before the background pass.
         interpretation_started = time.perf_counter()
-        try:
-            interpretation = await self.interpreter.interpret(
+        interpretation_task = asyncio.create_task(
+            self.interpreter.interpret(
                 utterance,
                 active_goal=goal,
                 relevant_state=relevant_state,
                 tools=self._available_tools(),
                 conversation=conversation,
             )
+        )
+        profile_task = (
+            asyncio.create_task(self._routed_self_profile_update(utterance))
+            if addressed_identity_turn
+            else None
+        )
+        try:
+            interpretation = await interpretation_task
         except BaseException:
             if profile_task is not None:
                 profile_task.cancel()
