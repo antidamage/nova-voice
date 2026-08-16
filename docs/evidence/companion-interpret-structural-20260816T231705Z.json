@@ -1,0 +1,31 @@
+{
+  "capturedAt": "2026-08-16T23:17:05Z",
+  "source": "Nova Companion device console",
+  "build": {
+    "bundleId": "nz.co.intraq.NovaCompanion",
+    "model": "Qwen3.5-9B",
+    "temperature": 0
+  },
+  "units": "milliseconds",
+  "warmup": {
+    "ttft": 6882.6,
+    "total": 13811.0,
+    "chunks": 97,
+    "chars": 193
+  },
+  "samples": [
+    {"sequence": 1, "ttft": 7086.6, "total": 13924.8, "chunks": 96, "chars": 174},
+    {"sequence": 2, "ttft": 7033.3, "total": 14017.0, "chunks": 98, "chars": 178},
+    {"sequence": 3, "ttft": 7094.3, "total": 13637.9, "chunks": 92, "chars": 162},
+    {"sequence": 4, "ttft": 7140.1, "total": 14727.1, "chunks": 106, "chars": 222},
+    {"sequence": 5, "ttft": 7182.4, "total": 14162.2, "chunks": 98, "chars": 178},
+    {"sequence": 6, "ttft": 8222.2, "total": 15226.5, "chunks": 92, "chars": 162},
+    {"sequence": 7, "ttft": 9044.3, "total": 17862.4, "chunks": 106, "chars": 222},
+    {"sequence": 8, "ttft": 7022.0, "total": 13950.8, "chunks": 97, "chars": 175}
+  ],
+  "notes": [
+    "Warmup excluded from summary statistics.",
+    "Entries are ordered to match the benchmark JSON sample sequence.",
+    "No transcript or generated answer text is retained."
+  ]
+}

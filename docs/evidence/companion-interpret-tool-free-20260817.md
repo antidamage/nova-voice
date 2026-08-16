@@ -34,6 +34,7 @@ which deliberately remain present on both stacks.
 |---|---:|---:|---:|---:|---:|---:|
 | Burst, 1-second gaps | 19/20 | 16.696 s | 18.451 s | 2.031 s | 2.153 s | 8.06× |
 | Paced, 20-second gaps | 7/8 | 16.904 s | 18.696 s | 2.029 s | 2.230 s | 8.12× |
+| Deterministic build, 10-second gaps | 8/8 | 14.198 s | 17.979 s | 2.014 s | 2.215 s | 7.00× |
 
 The first burst-run Iridium warm-up was 7.463 seconds, versus a 2.031-second
 measured median. The phone warm-ups were 14.428 and 14.183 seconds and were not
@@ -63,19 +64,27 @@ Qwen3.5-9B MLX build at about eight times Iridium's warm latency. Cooling gaps
 did not reverse the result. The phone's variation is bounded but real, and a
 sustained run can cross its device-state safety threshold.
 
-One further fairness bug was found after these runs: Iridium samples
+One further fairness bug was found after the first two runs: Iridium samples
 interpretation at temperature 0, while the installed phone build used 0.2.
-That changes JSON content and completion length between repetitions. Source now
-matches the phone to temperature 0 and logs structural time-to-first-chunk,
-total generation, chunk count and character count. The paid build compiled and
-signed successfully, but Neptunium locked and became unavailable before it
-could be installed, so these two evidence files remain explicitly labelled as
-the pre-fix build.
+That changes JSON content and completion length between repetitions. The paid
+build now matches the phone to temperature 0 and logs structural
+time-to-first-chunk, total generation, chunk count and character count.
+
+The deterministic build was installed on Neptunium and rerun with 10-second
+gaps. All 8 phone arms completed. Its 14.198-second median was faster and less
+variable than the pre-fix distributions, but remained 7.00 times the paired
+Iridium median. Excluding the warm-up, the phone's median first-token time was
+7.117 seconds and median generation after that first token was 6.982 seconds.
+The cost is therefore split almost evenly between prompt prefill and JSON
+generation; it is not explained by one anomalously long answer or by network
+latency.
 
 ## Retained evidence
 
 - `companion-interpret-tool-free-20260816T223337Z.json` — 20 measured burst samples.
 - `companion-interpret-tool-free-20260816T223940Z.json` — 8 measured paced samples.
+- `companion-interpret-tool-free-20260816T231705Z.json` — 8 measured samples from the installed deterministic paid build.
+- `companion-interpret-structural-20260816T231705Z.json` — device-console first-token and generation timing for the same run.
 
-Neither artifact contains transcript or model-answer text. They retain prompt
+None of the artifacts contains transcript or model-answer text. They retain prompt
 structure, timings, result shape, sequence, device tier and every missing arm.
