@@ -64,6 +64,11 @@ class AuthenticatedIdentity:
     # Fingerprint of the leaf, so a revoked or rotated certificate is
     # distinguishable in audit records without storing the certificate itself.
     fingerprint: str
+    # The verified leaf, kept because approvals are signed *later* on an
+    # already-authenticated session and there is nothing else to check them
+    # against. Optional so the many places that construct an identity for a
+    # test do not have to mint a certificate they never use.
+    certificate: x509.Certificate | None = None
 
 
 def challenge_material(
@@ -86,6 +91,60 @@ def challenge_material(
         ]
     )
     return joined.encode("utf-8")
+
+
+def approval_material(*, approval_id: str, approved: bool, nonce: str) -> bytes:
+    """The bytes an approval decision is signed over.
+
+    Built like ``challenge_material`` and for the same reasons: canonical,
+    length-delimited by the separator, and prefixed with its own domain string
+    so a signature collected for one purpose can never be presented as the
+    other.
+
+    The nonce is what makes a *decision* single-use rather than merely
+    authentic. Without it, "yes" to one approval is a valid "yes" forever, and
+    anyone who captured it could replay it against a later approval carrying
+    the same id — which matters because the phone is asked for the same shapes
+    of permission repeatedly.
+    """
+
+    joined = "|".join(
+        [
+            "nova-companion-approval-v1",
+            approval_id,
+            "approved" if approved else "denied",
+            nonce,
+        ]
+    )
+    return joined.encode("utf-8")
+
+
+def verify_approval(
+    identity: AuthenticatedIdentity,
+    *,
+    approval_id: str,
+    approved: bool,
+    nonce: str,
+    signature: str,
+) -> None:
+    """Check a decision really came from the device that was asked.
+
+    Raises ``AuthenticationError`` rather than returning a boolean, so a
+    caller that forgets to check the result cannot silently execute a mutation
+    nobody approved.
+    """
+
+    if identity.certificate is None:
+        raise AuthenticationError("this session has no certificate to check an approval against")
+    try:
+        raw = base64.b64decode(signature, validate=True)
+    except (ValueError, TypeError) as error:
+        raise AuthenticationError("approval signature was not valid base64") from error
+    _verify_signature(
+        identity.certificate,
+        raw,
+        approval_material(approval_id=approval_id, approved=approved, nonce=nonce),
+    )
 
 
 @dataclass
@@ -304,4 +363,5 @@ class CompanionAuthenticator:
             roles=tuple(sorted(role.strip().lower() for role in roles)),
             not_after=leaf.not_valid_after_utc,
             fingerprint=fingerprint,
+            certificate=leaf,
         )

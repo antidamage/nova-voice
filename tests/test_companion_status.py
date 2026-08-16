@@ -168,3 +168,58 @@ async def test_status_does_not_name_the_deployment(ca_path):
     payload = await _get(_app(ca_path, sessions, router))
 
     assert "neptunium" not in json.dumps(payload).lower()
+
+
+# -- presence (NPT-806) -------------------------------------------------------
+
+
+async def test_presence_is_published_even_with_nothing_connected(ca_path):
+    """"Unknown" is the answer, and a caller has to receive it.
+
+    Leaving the field out when nothing is connected would make every consumer
+    infer presence from an absent field, which is exactly the inference this
+    whole surface exists to prevent.
+    """
+
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+    payload = await _get(_app(ca_path, sessions, router))
+
+    assert payload["presence"]["state"] == "unknown"
+    assert payload["presence"]["actionable"] is False
+    assert "not evidence" in payload["presence"]["detail"]
+
+
+async def test_a_home_lan_session_publishes_home(ca_path):
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+    _register(sessions, locality="home_lan")
+
+    payload = await _get(_app(ca_path, sessions, router))
+
+    assert payload["presence"]["state"] == "home"
+    assert payload["presence"]["source"] == "home_lan_session"
+    assert payload["presence"]["actionable"] is True
+
+
+async def test_a_tailnet_session_is_unknown_rather_than_away(ca_path):
+    # Being reachable from outside says nothing about where anyone is.
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+    _register(sessions, locality="tailnet")
+
+    payload = await _get(_app(ca_path, sessions, router))
+
+    assert payload["presence"]["state"] == "unknown"
+
+
+async def test_presence_never_carries_a_coordinate(ca_path):
+    sessions = CompanionSessionManager()
+    router = CompanionWorkloadRouter(sessions, enabled=True)
+    _register(sessions)
+
+    payload = await _get(_app(ca_path, sessions, router))
+    encoded = json.dumps(payload["presence"])
+
+    for field in ("latitude", "longitude", "coordinate", "lat", "lon"):
+        assert field not in encoded.lower()

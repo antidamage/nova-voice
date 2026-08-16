@@ -51,13 +51,13 @@ from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
 from nova_voice.service import NovaVoiceService, turn_extends_conversation
-from nova_voice.tts_engines import engine_by_id
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import (
     apply_pronunciation_dictionary,
     normalize_spoken_numbers,
     spoken_language_for_text,
 )
+from nova_voice.tts_engines import engine_by_id
 from nova_voice.turns import ForegroundTurnStateMachine, TaskCancellationDecision
 from nova_voice.voice_settings import VoiceSettings
 
@@ -713,6 +713,7 @@ class SatelliteAudioRuntime:
         speaker_name: str | None = None,
         outcome: str | None = None,
         decision: str | None = None,
+        routes: list[dict] | None = None,
     ) -> str:
         announce_id = replaces_id or uuid4().hex
         # ``visible=False`` still hands back an id so dedup bookkeeping stays
@@ -743,6 +744,12 @@ class SatelliteAudioRuntime:
             payload["outcome"] = outcome
         if decision is not None:
             payload["decision"] = decision
+        if routes:
+            # Which stack ran each reasoning pass of this turn. Carries no
+            # content — only the pass name, where it ran and how long it took —
+            # so it is safe on every line, and a pass that ran on both stacks
+            # appears twice rather than having to be inferred from counters.
+            payload["routes"] = routes
         if role == "user" and speaker_name:
             payload["speakerName"] = speaker_name
         if replaces_id is not None:
@@ -1950,6 +1957,7 @@ class SatelliteAudioRuntime:
                 kind="command" if is_dashboard_command else None,
                 outcome=turn_outcome,
                 decision=result.interpretation.decision.value,
+                routes=result.route_chain,
             )
         # Provider execution is complete at this point. Publish it before TTS
         # so an operator can see an allowed/rejected command immediately even
@@ -2401,5 +2409,9 @@ class SatelliteAudioRuntime:
                 if result.turn_trace is not None
                 else None
             ),
+            # Both models' replies, tagged with where each ran, when the reply
+            # pass is in comparison mode. Absent the rest of the time, so the
+            # ordinary transcript is unchanged.
+            routeComparison=result.route_comparison,
         )
         return turn

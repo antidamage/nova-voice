@@ -34,6 +34,24 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Nova Companion connects to your Nova voice server on the local network to answer requests on this device.</string>
 
+	<!-- Calendar and Reminders are read only when a request needs them, in
+	     bounded windows, and the scoped results may be sent to your own Nova
+	     server to answer that request. Nothing is written without an explicit
+	     approval on this device. These strings are shown verbatim in the iOS
+	     prompt, so they say what actually happens rather than a generic
+	     "to provide features". -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Nova reads a bounded range of your calendar when you ask it something that needs one, and only changes an event after you approve the exact change on this phone.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Nova reads your reminders when you ask it something that needs them, and only adds, completes or removes one after you approve the exact change on this phone.</string>
+
+	<!-- "When in use" only. The app answers location questions while it is
+	     running; asking for Always would request a capability it does not need.
+	     Your coordinates never leave the phone — Nova is told only whether you
+	     are near home, which is the question it actually asks. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Nova checks whether this phone is near home so it can tell whether you are in. Your location stays on the phone; Nova is told only yes or no.</string>
+
 	<!-- The voice server presents a household CA certificate, not a public one,
 	     which App Transport Security rejects by default. NSAllowsLocalNetworking
 	     relaxes ATS for local addresses only — public hosts keep full ATS, so

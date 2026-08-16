@@ -33,7 +33,14 @@ def _apply(router: CompanionWorkloadRouter | None, routes: dict) -> None:
 
 @pytest.mark.parametrize(
     ("choice", "mode"),
-    [("local", "local"), ("companion", "companion_only"), ("both", "companion_preferred")],
+    # "both" maps to a route mode that genuinely runs both. It used to map to
+    # `companion_preferred` — try the phone, fall back — so the control said
+    # "Both" while only ever one stack did the work.
+    #
+    # "companion" is `companion_preferred` rather than `companion_only`: an
+    # operator picking a machine is not asking for the pass to fail when the
+    # phone is asleep, which is what `companion_only` does.
+    [("local", "local"), ("companion", "companion_preferred"), ("both", "both")],
 )
 def test_each_choice_maps_to_the_matching_route_mode(choice: str, mode: str) -> None:
     """Three operator words, five internal modes.

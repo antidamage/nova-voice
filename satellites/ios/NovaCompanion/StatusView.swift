@@ -1,5 +1,6 @@
 import NovaCompanionKit
 import SwiftUI
+import UIKit
 
 /// Why each role is or is not doing anything, in the owner's words.
 ///
@@ -8,6 +9,7 @@ import SwiftUI
 /// reason and "not built yet" is a reason like any other.
 struct StatusView: View {
     @StateObject private var companion = CompanionCoordinator()
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -20,6 +22,17 @@ struct StatusView: View {
                                 .frame(width: 8, height: 8)
                             Text(companion.status.detail)
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+                    // "Connected" is not the whole truth on its own: Nova stops
+                    // offering work to a device whose telemetry has gone stale,
+                    // so this row is what distinguishes a working companion
+                    // from one that is merely still holding a socket open.
+                    LabeledContent("Last reported") {
+                        if let sent = companion.status.lastTelemetryAt {
+                            Text(sent, style: .relative).foregroundStyle(.secondary)
+                        } else {
+                            Text("Never").foregroundStyle(.secondary)
                         }
                     }
                     LabeledContent("Jobs accepted", value: "\(companion.status.acceptedJobs)")
@@ -44,6 +57,21 @@ struct StatusView: View {
                     }
                 }
 
+                Section("Diagnostics") {
+                    Button("Copy recent activity") {
+                        Task {
+                            UIPasteboard.general.string = await companion.exportDiagnostics()
+                            copied = true
+                        }
+                    }
+                    if copied {
+                        Text("Copied. It records connections, jobs and power changes — no "
+                            + "message contents.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section {
                     Button(companion.status.connected ? "Disconnect" : "Connect") {
                         if companion.status.connected {
@@ -61,7 +89,14 @@ struct StatusView: View {
             }
             .navigationTitle("Nova Companion")
         }
-        .onAppear { companion.start() }
+        .onAppear {
+            // Published here rather than owned by the intent: an intent that
+            // built its own coordinator would open a second session, be
+            // superseded at once, and look like a reconnect loop from Nova's
+            // side.
+            CompanionIntentBridge.shared.coordinator = companion
+            companion.start()
+        }
     }
 }
 

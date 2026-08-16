@@ -43,6 +43,25 @@ DEFAULT_CONTEXT_TOKENS = 4096
 # Reserved for the model's own structured output before anything is packed in.
 DEFAULT_OUTPUT_RESERVE = 700
 
+# How much the shared token estimator undercounts *this* prompt.
+#
+# `_estimate_value_tokens` assumes ~4 characters per token, which is a fair
+# rule of thumb for English prose. This prompt is not prose: it is JSON tool
+# schemas, entity ids and snake_case keys, and that tokenises far worse —
+# every brace, quote and underscore tends to be its own token.
+#
+# Measured on the live system 2026-08-16. Compaction believed it had built a
+# ~3,400-token prompt; Apple's model rejected it at **4,091 tokens against a
+# 4,096 ceiling**, and `interpret` failed on the device every single time,
+# costing 5-11 seconds per turn before falling back. Observed shortfall was
+# ~1.2x; 1.4 leaves headroom, because the failure mode is total (the pass
+# never works) while the cost of over-trimming is a slightly thinner
+# household snapshot.
+#
+# Applied by deflating the *window* rather than inflating each cost, so
+# everything downstream keeps measuring in one consistent unit.
+JSON_TOKEN_SAFETY = 1.4
+
 # Rough share of what remains, before the elastic inputs are trimmed. These are
 # starting points for the greedy pass below, not hard partitions.
 TOOL_SHARE = 0.45
@@ -175,7 +194,11 @@ def compact_for_companion(
     history = list(history or [])
 
     instruction_cost = _estimate_value_tokens(instructions)
-    available = context_tokens - output_reserve - instruction_cost
+    # Everything the estimator is allowed to *think* it is spending. See
+    # JSON_TOKEN_SAFETY: the shared estimator is calibrated for prose and this
+    # prompt is not prose, so the window it is given is deflated to match.
+    usable = int((context_tokens - output_reserve) / JSON_TOKEN_SAFETY)
+    available = usable - instruction_cost
     if available <= 0:
         # The instructions alone exceed the window. Everything elastic goes;
         # the instructions stay, because a planner without its safety rules is

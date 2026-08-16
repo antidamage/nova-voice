@@ -155,6 +155,10 @@ class _FakeSnapshot:
         self.workloads = frozenset({"interpret", "classify_icon"})
         self.schema_versions = (1,)
         self.tier = CompanionTier.FULL
+        # Carried into the ineligibility message, because "tier off is below
+        # reduced" does not say whether the battery is flat, the device is hot,
+        # or its telemetry stopped arriving.
+        self.tier_reason = "charging"
         self.locality = "home_lan"
         self.telemetry_age_seconds = 1.0
         self.__dict__.update(changes)

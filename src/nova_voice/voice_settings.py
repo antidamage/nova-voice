@@ -359,6 +359,20 @@ class VoiceSettings(BaseModel):
     # default, so an empty map is "leave everything as shipped" rather than
     # "route nothing".
     companion_routes: dict[str, CompanionRouteChoice] = Field(default_factory=dict)
+    # The two operator kill switches, in increasing severity.
+    #
+    # `companion_force_local` stops every reasoning workload going to the
+    # device while leaving the session up, so it can be thrown mid-incident
+    # without the owner touching the phone and undone the same way.
+    # `companion_enabled=False` is the rollback invariant: it restores the
+    # previous behaviour exactly, as if the feature had never shipped.
+    #
+    # Both default to the *server's* current setting rather than a fixed value,
+    # because a dashboard that shipped its own default would silently switch
+    # the feature on or off for any deployment that had not touched these
+    # controls. `None` means "leave it as configured".
+    companion_enabled: bool | None = None
+    companion_force_local: bool | None = None
     speaker: VoiceSpeaker = VoiceSpeaker.RYAN
     # Custom-engine (dots.tts) voice: a cloned-voice id resolved by the dots
     # service's registry. Kept separate from ``speaker`` because the two engines

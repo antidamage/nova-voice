@@ -240,7 +240,12 @@ async def test_a_companion_tool_call_runs_through_iridium(credentials):
     )
     peer_task = asyncio.create_task(peer.run(until=1))
 
-    result = await router.run("classify_icon", {"name": "Estrogen"}, local)
+    result = await router.run(
+        "classify_icon",
+        {"name": "Estrogen"},
+        local,
+        allowed_tools=frozenset({"nova.lighting_shortcut"}),
+    )
     await peer_task
     pump.cancel()
 
@@ -291,7 +296,12 @@ async def test_the_callback_budget_is_enforced(credentials):
     )
     peer_task = asyncio.create_task(peer.run(until=1))
 
-    await router.run("classify_icon", {"name": "Estrogen"}, local)
+    await router.run(
+        "classify_icon",
+        {"name": "Estrogen"},
+        local,
+        allowed_tools=frozenset({"nova.lighting_shortcut"}),
+    )
     await peer_task
     pump.cancel()
 

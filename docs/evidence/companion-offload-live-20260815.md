@@ -155,3 +155,112 @@ With no companion connected, `/v1/companion/status` reported
 `render_response: {fellBack: 27}` — the reply pass had already been routed and
 had fallen back to the local model 27 times across live voice turns, exactly as
 intended. Routing is invisible until a device is actually there.
+
+---
+
+## Correction, 2026-08-16: it was never the lock screen
+
+The section above attributes `tier: off, telemetry is 296s stale` to the app
+being suspended behind the lock screen, and reads the staleness guard as having
+worked as designed. The guard did work as designed. The premise was wrong.
+
+**The app never sent telemetry after the handshake at all.** It sent one
+reading during `handshake()` and then went silent for the life of the session,
+foregrounded or not. Nothing on either side drove liveness: the client had no
+periodic send, and the server never sends the `ping` the protocol defines.
+
+Measured on the live system at 09:31 with the phone plugged in, awake, and on
+the home LAN:
+
+```
+connected: true    locality: home_lan    workloads: all five
+tier: "off"        tierReason: "telemetry is 995s stale"
+telemetryAgeSeconds:     994.67
+lastHeartbeatAgeSeconds: 994.67      <- identical, to the millisecond
+```
+
+The two ages being *the same number* is the tell: not "the phone went quiet
+when it slept", but "nothing has arrived since the one frame at connect". Every
+companion route read `tier off is below reduced` on a charging phone.
+
+So the real behaviour was worse than the note claimed, and in a more boring
+way: **the companion went ineligible three minutes after every connect and
+stayed that way**, which is why offload appeared to work only in the minutes
+right after a reconnect. The earlier `source=companion` results were real; they
+were taken inside that window.
+
+### The fix (NPT-205)
+
+`CompanionSession.maintainTelemetry(everySeconds:)` sends on a 45s cycle — a
+fraction of the 180s staleness window, so two lost frames still do not age the
+device out — and the coordinator additionally sends on every state change that
+can move the tier: charge state, battery level, Low Power Mode, thermal state,
+foreground/background.
+
+Verified live after installing the fixed build, sampling every 25s:
+
+```
+tier=full age=15.8   tier=full age=41.7   tier=full age=19.7   tier=full age=45.3
+tier=full age=24.5   tier=full age=3.1    tier=full age=28.7   tier=full age=7.4
+```
+
+A sawtooth capped at 45.3s, never approaching 180s. `tierReason: charging`.
+All three background routes returned to `eligible`.
+
+Offload confirmed working again end to end, four for four, each answer correct:
+
+| Request | Answer | source | elapsed |
+|---|---|---|---|
+| Wash hair | `shower` | companion | 940 ms (cold) |
+| Take vitamins | `pill` | companion | 628 ms |
+| Vacuum lounge | `broom` | companion | 405 ms |
+| Buy milk | `cart` | companion | 342 ms |
+
+### What this does and does not settle
+
+It does **not** answer the hot-path question the original section raised. A
+suspended app still cannot answer, and the loop stops when iOS suspends it —
+correctly, since an app that cannot run cannot do the work. Keeping the device
+eligible while suspended needs a background mode, which is M6's audio-session
+work rather than a timer.
+
+What it settles is that the previous evidence for that question was not
+evidence: the device was ineligible for reasons that had nothing to do with the
+lock screen, so nothing measured before 2026-08-16 says anything about how a
+locked phone behaves. That measurement has not been taken yet.
+
+## The locked screen, actually measured (2026-08-16)
+
+The correction above says nothing measured before 2026-08-16 describes a locked
+phone. It has now been measured, and the answer is different from — and better
+than — what both earlier notes assumed.
+
+At 10:09 the phone locked on its own mid-session. At **10:10:37** the server
+logged:
+
+```
+nova_voice.companion.session companion session released id=a5b6b24ead1149c3b1b59059fe97bb8a
+```
+
+and `/v1/companion/status` went to `connected: false` with the session fields
+gone entirely. Sampled every 40s for four minutes afterwards: still
+disconnected, no reconnection while locked.
+
+**When iOS suspends the app, the socket closes and the session is released
+cleanly.** It does not linger as a connected-but-silent session waiting to go
+stale. So:
+
+* the staleness guard is not what protects the hot path here — the disconnect
+  is, and it is immediate rather than three minutes late;
+* there is no window in which Iridium believes a suspended phone is healthy and
+  offers work into a hole; and
+* the 995s-stale session in the correction above could only ever have been the
+  *foreground* liveness bug, which is consistent with what the fix addressed.
+
+This tightens the hot-path question rather than answering it. A companion is
+eligible while the app is resident and ineligible the moment it is not, with no
+ambiguous middle. Routing `interpret` or `render_response` to the phone would
+therefore not risk a stalled turn from a stale session — it would simply fall
+back on every turn where the phone was asleep, which is most of them. Making
+the phone resident enough to carry hot-path work is M6's audio-session
+territory, not something routing configuration can reach.

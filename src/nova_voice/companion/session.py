@@ -15,6 +15,7 @@ to be the live one than a socket that has not yet noticed it is dead.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -35,6 +36,7 @@ from nova_voice.companion.protocol import (
     Locality,
     PersonalCall,
     PersonalResult,
+    Ping,
     Sensitivity,
     ToolCall,
     ToolResultMessage,
@@ -44,9 +46,49 @@ from nova_voice.companion.tiers import CompanionTier, TierThresholds, TierTracke
 
 logger = logging.getLogger(__name__)
 
+# A budget below this is spent, not merely small. Admitting a call with
+# milliseconds left would give it a deadline it cannot possibly meet, so the
+# phone pays a round trip to be told it timed out instead of being told,
+# immediately and truthfully, that there was no time left. Also keeps the check
+# honest on a coarse clock: Windows' `monotonic()` granularity is ~16ms, so
+# "greater than zero" can be an artefact of how the elapsed time was rounded.
+_MINIMUM_CALLBACK_SECONDS = 0.05
+
+
+def _payload_bytes(payload: dict) -> int:
+    """Size a callback payload the way the wire will carry it.
+
+    Anything unserialisable is treated as oversized rather than raising: a
+    limit check is not the place to discover a bad payload, and refusing is the
+    safe answer either way.
+    """
+
+    try:
+        return len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 1 << 30
+
+
+def _offered(allowed: frozenset[str], provider: str, tool: str) -> bool:
+    """Match a callback against the catalogue in both the forms it is written.
+
+    Semantic tool catalogues name some tools bare (``light_set``) and some
+    qualified (``nova.light_set``). Accepting either here keeps this check and
+    the returned-plan check in ``routed.py`` agreeing; a catalogue that matched
+    one and not the other would refuse at execution the very actions it had
+    just validated as a plan.
+    """
+
+    return f"{provider}.{tool}" in allowed or tool in allowed
+
+
 SendJson = Callable[[dict], Awaitable[None]]
 # Runs one companion-requested action through Iridium's own execution gate.
 ExecuteToolCall = Callable[[ToolCall], Awaitable[ToolResultMessage]]
+# Settles what a reconnecting device still holds. Given the session id and the
+# jobs the device claims, returns the ids it claims that the server does not
+# own — which the caller must cancel on the device.
+Reconcile = Callable[[str, tuple[str, ...]], Awaitable[tuple[str, ...]]]
 
 
 @dataclass(frozen=True)
@@ -79,6 +121,19 @@ class _Attempt:
     started_at: float
     last_progress_sequence: int = -1
     stage: str = "offered"
+    # The exact ``provider.tool`` names offered with this job. Empty means the
+    # attempt may not call back at all, which is the right default: most
+    # workloads are a single typed question with no tool loop.
+    allowed_tools: frozenset[str] = frozenset()
+    callback_deadline: float = 8.0
+    callback_seconds_remaining: float = 30.0
+    max_concurrent_callbacks: int = 2
+    callbacks_in_flight: int = 0
+    # Cancellation is recorded on the attempt as well as removing it from the
+    # session, so a frame that arrives in the same breath as the cancel is
+    # refused rather than racing a fresh attempt into the same slot.
+    cancelled: bool = False
+    tool_tasks: set[asyncio.Task] = field(default_factory=set)
 
 
 @dataclass
@@ -129,6 +184,9 @@ class SessionSnapshot:
     last_heartbeat_age_seconds: float | None
     active_attempts: int
     hot_context_tokens: int
+    # Durable jobs the device claimed on its most recent hello. Reconciliation
+    # compares this with what the server thinks it leased.
+    claimed_jobs: tuple[str, ...] = ()
 
 
 class CompanionSessionManager:
@@ -139,11 +197,20 @@ class CompanionSessionManager:
         thresholds: TierThresholds | None = None,
         callback_cap: int = 12,
         accept_timeout_seconds: float = 1.5,
+        callback_argument_bytes: int = 8192,
+        callback_result_bytes: int = 32768,
     ) -> None:
         self._execute_tool_call = execute_tool_call
+        self._reconcile: Reconcile | None = None
         self._thresholds = thresholds or TierThresholds()
         self._callback_cap = callback_cap
         self._accept_timeout = accept_timeout_seconds
+        # Byte ceilings on both directions of a callback. The inbound one stops
+        # a payload bomb reaching the registry at all; the outbound one stops a
+        # large read (a month of calendar events, say) being pushed at a phone
+        # that asked one question.
+        self._callback_argument_bytes = callback_argument_bytes
+        self._callback_result_bytes = callback_result_bytes
         self._session: CompanionSession | None = None
         self._tool_tasks: set[asyncio.Task] = set()
 
@@ -151,6 +218,15 @@ class CompanionSessionManager:
         """Late-bind execution: the service owns it and is constructed last."""
 
         self._execute_tool_call = execute_tool_call
+
+    def bind_reconciler(self, reconcile: Reconcile) -> None:
+        """Late-bind reconnect reconciliation.
+
+        Optional: a deployment with no durable job store has nothing to
+        reconcile, and must not fail to register a device over its absence.
+        """
+
+        self._reconcile = reconcile
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -181,13 +257,39 @@ class CompanionSessionManager:
         if previous is not None:
             self._abandon(previous, "disconnected", "a newer companion session superseded this one")
         logger.info(
-            "companion session registered id=%s identity=%s locality=%s roles=%s",
+            "companion session registered id=%s identity=%s locality=%s roles=%s claimed=%d",
             session.session_id,
             identity.identity,
             locality,
             ",".join(identity.roles),
+            len(hello.active_jobs),
         )
+        if self._reconcile is not None:
+            # Started, not awaited: registration must not block on a store
+            # read, and a device waiting on its hello_ack is a device not yet
+            # answering anything.
+            task = asyncio.create_task(
+                self._reconcile_session(session, tuple(hello.active_jobs))
+            )
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
         return session
+
+    async def _reconcile_session(
+        self, session: CompanionSession, claimed: tuple[str, ...]
+    ) -> None:
+        assert self._reconcile is not None
+        try:
+            unknown = await self._reconcile(session.session_id, claimed)
+        except Exception:
+            logger.exception("companion reconnect reconciliation failed")
+            return
+        for job_id in unknown:
+            # The device is working on something we do not own — we reclaimed
+            # it, or it was reassigned. Telling it to stop is what prevents the
+            # same job being executed twice.
+            logger.info("cancelling job %s the companion claims but we do not own", job_id)
+            await self._cancel_quietly(session, job_id, "", "superseded")
 
     def release(self, session: CompanionSession) -> bool:
         """Drop a session and resolve everything waiting on it."""
@@ -248,6 +350,7 @@ class CompanionSessionManager:
             last_heartbeat_age_seconds=moment - session.last_heartbeat,
             active_attempts=len(session.attempts),
             hot_context_tokens=session.telemetry.models.hot_context_tokens,
+            claimed_jobs=tuple(session.hello.active_jobs),
         )
 
     # -- inbound --------------------------------------------------------------
@@ -265,6 +368,33 @@ class CompanionSessionManager:
 
     def handle_heartbeat(self, session: CompanionSession) -> None:
         session.last_heartbeat = time.monotonic()
+
+    async def ping_loop(self, *, interval_seconds: float = 30.0) -> None:
+        """Ask the current device to say it is still there.
+
+        Deliberately independent of the device's own telemetry cycle. Telemetry
+        proves the app is *running*; a ping answered proves the socket is
+        *live*, and the two fail separately — a half-open TCP connection keeps
+        a session registered while nothing can actually reach the device.
+
+        Without this, `lastHeartbeatAgeSeconds` grew without bound from the
+        moment of connect, because nothing ever sent the ping the protocol
+        defines. A status field that always looks alarming and never means
+        anything is worse than no field: it is the one an operator learns to
+        ignore, and then ignores on the day it matters.
+        """
+
+        while True:
+            await asyncio.sleep(interval_seconds)
+            session = self._session
+            if session is None:
+                continue
+            try:
+                await session.send(serialize(Ping(sentAt=datetime.now(UTC))))
+            except Exception:
+                # The socket is gone; the receive loop will notice and release
+                # the session. Pinging is not the place to tear anything down.
+                logger.debug("companion ping could not be sent")
 
     def handle_accept(self, session: CompanionSession, job_id: str, attempt_id: str) -> None:
         attempt = session.attempt_for_job(job_id, attempt_id)
@@ -355,26 +485,61 @@ class CompanionSessionManager:
             future.set_result(approved)
 
     def dispatch_tool_call(self, session: CompanionSession, call: ToolCall) -> None:
-        """Run a companion tool request without blocking the receive loop."""
+        """Run a companion tool request without blocking the receive loop.
+
+        Every limit is checked *here*, before execution starts, so a refusal
+        costs the phone one round trip and costs Iridium nothing. The order is
+        deliberate: identity of the attempt, then whether the tool was offered
+        at all, then the four resource bounds. A tool outside the catalogue is
+        rejected before its arguments are even sized, because that call is not
+        a resource question — it is the phone naming something it was never
+        told about.
+        """
 
         attempt = session.attempt_for_job(call.job_id, call.attempt_id)
-        if attempt is None:
-            task = asyncio.create_task(
-                self._send_tool_error(session, call, "invalid", "no such running attempt")
-            )
+        refusal: tuple[str, str] | None = None
+        if attempt is None or attempt.cancelled:
+            refusal = ("invalid", "no such running attempt")
+        elif not _offered(attempt.allowed_tools, call.provider, call.tool):
+            refusal = ("blocked", "tool was not offered with this job")
         elif attempt.callbacks_remaining <= 0:
-            task = asyncio.create_task(
-                self._send_tool_error(session, call, "blocked", "callback budget exhausted")
-            )
+            refusal = ("blocked", "callback budget exhausted")
+        elif attempt.callbacks_in_flight >= attempt.max_concurrent_callbacks:
+            refusal = ("blocked", "too many callbacks in flight")
+        elif attempt.callback_seconds_remaining < _MINIMUM_CALLBACK_SECONDS:
+            refusal = ("blocked", "callback time budget exhausted")
+        elif _payload_bytes(call.arguments) > self._callback_argument_bytes:
+            refusal = ("invalid", "arguments exceeded the callback size limit")
         elif self._execute_tool_call is None:
-            task = asyncio.create_task(
-                self._send_tool_error(session, call, "blocked", "tool execution is not wired up")
+            refusal = ("blocked", "tool execution is not wired up")
+
+        if refusal is not None or attempt is None:
+            code, message = refusal or ("invalid", "no such running attempt")
+            logger.info(
+                "companion callback refused provider=%s tool=%s code=%s reason=%s",
+                call.provider,
+                call.tool,
+                code,
+                message,
             )
-        else:
-            attempt.callbacks_remaining -= 1
-            task = asyncio.create_task(self._run_tool_call(session, call))
+            task = asyncio.create_task(self._send_tool_error(session, call, code, message))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
+            return
+
+        attempt.callbacks_remaining -= 1
+        attempt.callbacks_in_flight += 1
+        task = asyncio.create_task(self._run_tool_call(session, attempt, call))
+        # Tracked on the attempt as well as the manager so cancelling one turn
+        # cancels its own outstanding tool work and nobody else's.
+        attempt.tool_tasks.add(task)
         self._tool_tasks.add(task)
-        task.add_done_callback(self._tool_tasks.discard)
+
+        def _finished(finished: asyncio.Task) -> None:
+            attempt.tool_tasks.discard(finished)
+            self._tool_tasks.discard(finished)
+
+        task.add_done_callback(_finished)
 
     # -- outbound -------------------------------------------------------------
 
@@ -390,6 +555,10 @@ class CompanionSessionManager:
         complete_deadline_seconds: float,
         sensitivity: Sensitivity = "ordinary",
         callback_budget: int | None = None,
+        allowed_tools: frozenset[str] | None = None,
+        callback_deadline_seconds: float = 8.0,
+        callback_budget_seconds: float = 30.0,
+        max_concurrent_callbacks: int = 2,
     ) -> tuple[CompanionSession, _Attempt, OfferOutcome] | None:
         """Offer one job. None means there was no session to offer it to."""
 
@@ -415,6 +584,12 @@ class CompanionSessionManager:
             completeDeadline=now + timedelta(seconds=complete_deadline_seconds),
         )
         budget = min(callback_budget or self._callback_cap, self._callback_cap)
+        catalogue = frozenset(allowed_tools or ())
+        if not catalogue:
+            # No catalogue, no callbacks. Leaving a count budget in place while
+            # nothing is callable would only invite the phone to spend it on
+            # refusals.
+            budget = 0
         attempt = _Attempt(
             job_id=job_id,
             attempt_id=attempt_id,
@@ -423,6 +598,10 @@ class CompanionSessionManager:
             result=loop.create_future(),
             callbacks_remaining=budget,
             started_at=time.monotonic(),
+            allowed_tools=catalogue,
+            callback_deadline=callback_deadline_seconds,
+            callback_seconds_remaining=callback_budget_seconds,
+            max_concurrent_callbacks=max_concurrent_callbacks,
         )
         session.attempts[attempt_id] = attempt
         offer = JobOffer(
@@ -430,6 +609,10 @@ class CompanionSessionManager:
             payload=payload,
             callbackBudget=budget,
             contextTokens=session.telemetry.models.hot_context_tokens,
+            toolCatalogue=sorted(catalogue),
+            callbackDeadlineSeconds=callback_deadline_seconds,
+            callbackBudgetSeconds=callback_budget_seconds,
+            maxConcurrentCallbacks=max_concurrent_callbacks,
         )
         try:
             await session.send(serialize(offer))
@@ -463,10 +646,15 @@ class CompanionSessionManager:
             )
         except TimeoutError:
             session.attempts.pop(attempt.attempt_id, None)
+            self._retire(attempt)
             await self._cancel_quietly(session, attempt.job_id, attempt.attempt_id, "deadline")
             return JobOutcome(ok=False, failure="timeout", detail="workload deadline elapsed")
         except asyncio.CancelledError:
+            # The turn itself was cancelled — a newer utterance, a killswitch,
+            # or shutdown. The phone is told to stop, its outstanding callbacks
+            # are dropped, and the cancellation continues to propagate.
             session.attempts.pop(attempt.attempt_id, None)
+            self._retire(attempt)
             await self._cancel_quietly(
                 session, attempt.job_id, attempt.attempt_id, "user_cancelled"
             )
@@ -528,20 +716,72 @@ class CompanionSessionManager:
 
     # -- internals ------------------------------------------------------------
 
-    async def _run_tool_call(self, session: CompanionSession, call: ToolCall) -> None:
+    async def _run_tool_call(
+        self, session: CompanionSession, attempt: _Attempt, call: ToolCall
+    ) -> None:
         assert self._execute_tool_call is not None
+        started = time.monotonic()
+        # The per-call deadline is capped by whatever the attempt has left, so
+        # the last callback of a long chain cannot overrun the whole budget.
+        deadline = min(attempt.callback_deadline, attempt.callback_seconds_remaining)
         try:
-            result = await self._execute_tool_call(call)
-        except Exception:
-            logger.exception(
-                "companion tool call failed provider=%s tool=%s", call.provider, call.tool
+            try:
+                result = await asyncio.wait_for(self._execute_tool_call(call), timeout=deadline)
+            except TimeoutError:
+                logger.info(
+                    "companion callback timed out provider=%s tool=%s after=%.1fs",
+                    call.provider,
+                    call.tool,
+                    deadline,
+                )
+                await self._send_tool_error(
+                    session, call, "timeout", "the tool did not answer within its deadline"
+                )
+                return
+            except asyncio.CancelledError:
+                # The turn that owns this callback went away. Say nothing: the
+                # attempt is being cancelled on the same socket anyway, and the
+                # phone must not be told a cancelled call merely failed.
+                raise
+            except Exception:
+                logger.exception(
+                    "companion tool call failed provider=%s tool=%s", call.provider, call.tool
+                )
+                await self._send_tool_error(session, call, "backend_error", "execution failed")
+                return
+
+            if attempt.cancelled:
+                # Finished, but for a turn nobody is listening to any more.
+                return
+            result = self._bound_result(result)
+            try:
+                await session.send(serialize(result))
+            except Exception:
+                logger.debug("companion tool result delivery failed call=%s", call.call_id)
+        finally:
+            attempt.callbacks_in_flight = max(0, attempt.callbacks_in_flight - 1)
+            attempt.callback_seconds_remaining = max(
+                0.0, attempt.callback_seconds_remaining - (time.monotonic() - started)
             )
-            await self._send_tool_error(session, call, "backend_error", "execution failed")
-            return
-        try:
-            await session.send(serialize(result))
-        except Exception:
-            logger.debug("companion tool result delivery failed call=%s", call.call_id)
+
+    def _bound_result(self, result: ToolResultMessage) -> ToolResultMessage:
+        """Keep an oversized observation off the socket without losing the answer.
+
+        Dropping the whole result would turn a successful action into an
+        apparent failure, and the companion would reasonably retry it — so the
+        outcome is preserved and only the bulky observation is replaced.
+        """
+
+        if result.observed is None:
+            return result
+        if _payload_bytes(result.observed) <= self._callback_result_bytes:
+            return result
+        logger.info("companion callback result truncated call=%s", result.call_id)
+        return result.model_copy(
+            update={
+                "observed": {"truncated": True, "reason": "result exceeded the callback size limit"}
+            }
+        )
 
     async def _send_tool_error(
         self, session: CompanionSession, call: ToolCall, code: str, message: str
@@ -573,8 +813,26 @@ class CompanionSessionManager:
 
     @staticmethod
     def _resolve(attempt: _Attempt, outcome: JobOutcome) -> None:
+        """Settle an attempt and stop everything it still owns.
+
+        Every call site here is terminal — result, failure, rejection,
+        acceptance timeout, cancellation, disconnect — so retiring the attempt
+        in one place is what makes NPT-309's guarantee hold without each caller
+        having to remember it. An outstanding tool callback belonging to a turn
+        that has been superseded is work nobody will read: it is cancelled
+        rather than left to finish and answer into the void.
+        """
+
         if not attempt.result.done():
             attempt.result.set_result(outcome)
+        CompanionSessionManager._retire(attempt)
+
+    @staticmethod
+    def _retire(attempt: _Attempt) -> None:
+        attempt.cancelled = True
+        for task in list(attempt.tool_tasks):
+            task.cancel()
+        attempt.tool_tasks.clear()
 
     def _abandon(self, session: CompanionSession, failure: str, detail: str) -> None:
         for attempt in list(session.attempts.values()):

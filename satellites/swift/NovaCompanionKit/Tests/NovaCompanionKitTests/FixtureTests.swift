@@ -50,10 +50,41 @@ final class FixtureTests: XCTestCase {
         XCTAssertEqual(offer.envelope.locality, .homeLan)
         XCTAssertEqual(offer.callbackBudget, 12)
         XCTAssertEqual(offer.contextTokens, 4096)
+        // The callback bounds travel with the offer, so the device knows what
+        // it may call and for how long without inferring it from the prompt.
+        XCTAssertEqual(offer.toolCatalogue, ["nova.light_set", "nova.scene_apply"])
+        XCTAssertEqual(offer.callbackDeadlineSeconds, 8.0)
+        XCTAssertEqual(offer.callbackBudgetSeconds, 30.0)
+        XCTAssertEqual(offer.maxConcurrentCallbacks, 2)
         // The accept deadline is deliberately much shorter than completion:
         // before acceptance, falling back costs one round trip.
         XCTAssertLessThan(offer.envelope.acceptDeadline, offer.envelope.completeDeadline)
         XCTAssertEqual(offer.payload["roomId"]?.stringValue, "lounge")
+    }
+
+    /// An offer written before the callback bounds existed must still decode.
+    ///
+    /// The device and the server are updated separately — a 7-day provisioning
+    /// profile guarantees the app is sometimes older than Iridium and sometimes
+    /// newer — so a missing optional field has to mean "this server does not
+    /// send it", not a frame the app throws away.
+    func testAnOfferWithoutCallbackBoundsStillDecodes() throws {
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try fixture("job_offer")) as? [String: Any]
+        )
+        for key in [
+            "toolCatalogue", "callbackDeadlineSeconds", "callbackBudgetSeconds",
+            "maxConcurrentCallbacks",
+        ] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        guard case .jobOffer(let offer) = try codec.decode(data) else {
+            return XCTFail("expected a job offer")
+        }
+        XCTAssertNil(offer.toolCatalogue)
+        XCTAssertNil(offer.callbackDeadlineSeconds)
+        XCTAssertEqual(offer.callbackBudget, 12)
     }
 
     func testTimestampsDecodeAsUTC() throws {
