@@ -99,6 +99,21 @@ class _Interpreter(Interpreter):
         return self.rendered
 
 
+class _OrderedIdentityInterpreter(_Interpreter):
+    def __init__(self, value) -> None:
+        super().__init__(value)
+        self.started: list[str] = []
+
+    async def interpret(self, *args, **kwargs):
+        self.started.append("interpret")
+        await asyncio.sleep(0)
+        return await super().interpret(*args, **kwargs)
+
+    async def extract_self_profile_update(self, utterance):
+        self.started.append("profile")
+        return await super().extract_self_profile_update(utterance)
+
+
 class _Provider:
     def __init__(
         self,
@@ -589,6 +604,34 @@ async def test_unaddressed_ambient_speech_is_classified_but_not_retained(utteran
 
     assert not result.executed
     assert store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_foreground_interpretation_starts_before_background_identity_pass(utterance) -> None:
+    interpreter = _OrderedIdentityInterpreter(interpretation(decision=Decision.REPLY))
+    provider = _Provider()
+    service = NovaVoiceService(
+        Settings(),
+        interpreter,
+        _Registry(provider),
+        provider,
+        _Store(),
+        _Persona(),
+        speaker_profiles=_SpeakerProfiles(),
+    )
+    spoken = utterance.model_copy(
+        update={
+            "wake_detected": True,
+            "transcript": "Nova, hello",
+            "speaker": SpeakerIdentity(
+                status="recognized", template_id="voice-a", confidence=1.0
+            ),
+        }
+    )
+
+    await service.handle(spoken)
+
+    assert interpreter.started[:2] == ["interpret", "profile"]
 
 
 @pytest.mark.asyncio
