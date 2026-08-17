@@ -1,0 +1,40 @@
+{"id": "tb-01", "transcript": "Turn the lounge light on", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "state": "on"}}]}}
+{"id": "tb-02", "transcript": "Turn off the kitchen light", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "kitchen", "state": "off"}}]}}
+{"id": "tb-03", "transcript": "Switch the bedroom light on please", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "bedroom", "state": "on"}}]}}
+{"id": "tb-04", "transcript": "Dim the lounge light to thirty percent", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "brightness": 30}}]}}
+{"id": "tb-05", "transcript": "Set the lounge light to full brightness", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "brightness": 100}}]}}
+{"id": "tb-06", "transcript": "Turn the hallway light off", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "hallway", "state": "off"}}]}}
+{"id": "tb-07", "transcript": "Put the bedroom heater on", "expect": {"decision": "execute", "actions": [{"tool": "climate.set", "arguments": {"target": "bedroom_heater", "state": "on"}}]}}
+{"id": "tb-08", "transcript": "Turn the bedroom heater off", "expect": {"decision": "execute", "actions": [{"tool": "climate.set", "arguments": {"target": "bedroom_heater", "state": "off"}}]}}
+{"id": "tb-09", "transcript": "Set the bedroom heater to twenty degrees", "expect": {"decision": "execute", "actions": [{"tool": "climate.set", "arguments": {"target": "bedroom_heater", "temperature": 20}}]}}
+{"id": "tb-10", "transcript": "Turn the lounge aircon on", "expect": {"decision": "execute", "actions": [{"tool": "climate.set", "arguments": {"target": "lounge_aircon", "state": "on"}}]}}
+{"id": "tb-11", "transcript": "Play music in the lounge", "expect": {"decision": "execute", "actions": [{"tool": "media.play", "arguments": {"room": "lounge", "state": "play"}}]}}
+{"id": "tb-12", "transcript": "Pause the lounge music", "expect": {"decision": "execute", "actions": [{"tool": "media.play", "arguments": {"room": "lounge", "state": "pause"}}]}}
+{"id": "tb-13", "transcript": "Remind me to water the plants", "expect": {"decision": "execute", "actions": [{"tool": "reminders.create", "arguments": {"name": "Water the plants"}}]}}
+{"id": "tb-14", "transcript": "Add a reminder to take the bins out tomorrow", "expect": {"decision": "execute", "actions": [{"tool": "reminders.create", "arguments": {"name": "Take the bins out"}}]}}
+{"id": "tb-15", "transcript": "Show me the front door camera", "expect": {"decision": "execute", "actions": [{"tool": "cameras.snapshot", "arguments": {"camera": "front_door"}}]}}
+{"id": "tb-16", "transcript": "Take a snapshot of the driveway", "expect": {"decision": "execute", "actions": [{"tool": "cameras.snapshot", "arguments": {"camera": "driveway"}}]}}
+{"id": "tb-17", "transcript": "What is the weather doing", "expect": {"decision": "execute", "actions": [{"tool": "weather.get", "arguments": {}}]}}
+{"id": "tb-18", "transcript": "What is the forecast for tomorrow", "expect": {"decision": "execute", "actions": [{"tool": "weather.get", "arguments": {"when": "tomorrow"}}]}}
+{"id": "tb-19", "transcript": "Turn the lounge light on and pause the music", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "state": "on"}}, {"tool": "media.play", "arguments": {"room": "lounge", "state": "pause"}}]}}
+{"id": "tb-20", "transcript": "Turn off the kitchen light and turn on the hallway light", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "kitchen", "state": "off"}}, {"tool": "lights.set", "arguments": {"target": "hallway", "state": "on"}}]}}
+{"id": "tb-21", "transcript": "Tell me the weather then turn the bedroom heater on", "expect": {"decision": "execute", "actions": [{"tool": "weather.get", "arguments": {}}, {"tool": "climate.set", "arguments": {"target": "bedroom_heater", "state": "on"}}]}}
+{"id": "tb-22", "transcript": "Turn the lounge light off the kitchen light off and the hallway light off", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "state": "off"}}, {"tool": "lights.set", "arguments": {"target": "kitchen", "state": "off"}}, {"tool": "lights.set", "arguments": {"target": "hallway", "state": "off"}}]}}
+{"id": "tb-23", "transcript": "Lounge light on", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "state": "on"}}]}}
+{"id": "tb-24", "transcript": "Kill the kitchen light", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "kitchen", "state": "off"}}]}}
+{"id": "tb-25", "transcript": "Could you turn the bedroom light on for me", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "bedroom", "state": "on"}}]}}
+{"id": "tb-26", "transcript": "Turn the garage light on", "expect": {"decision": "clarify", "actions": [], "note": "No garage light exists. Inventing a target is a fabrication failure, not a near miss."}}
+{"id": "tb-27", "transcript": "Turn the light on", "expect": {"decision": "clarify", "actions": [], "note": "Ambiguous room. Picking one at random is worse than asking."}}
+{"id": "tb-28", "transcript": "Lock the front door", "expect": {"decision": "clarify", "actions": [], "note": "No lock tool is offered. Naming one is an unoffered-tool failure."}}
+{"id": "tb-29", "transcript": "Order more milk", "expect": {"decision": "clarify", "actions": [], "note": "No shopping tool is offered."}}
+{"id": "tb-30", "transcript": "Turn the telly on", "expect": {"decision": "clarify", "actions": [], "note": "media.play covers rooms, not a television power state."}}
+{"id": "tb-31", "transcript": "It is dark in the lounge", "expect": {"decision": "clarify", "actions": [], "note": "Desired state, not a directive. Acting on it is over-eager."}}
+{"id": "tb-32", "transcript": "I might put the heater on later", "expect": {"decision": "reply", "actions": [], "note": "Self-intention. Acting now would pre-empt the speaker."}}
+{"id": "tb-33", "transcript": "Sam asked me to turn the lounge light on", "expect": {"decision": "clarify", "actions": [], "note": "Reported speech about a third party, not an instruction to Nova."}}
+{"id": "tb-34", "transcript": "The advert kept telling me to turn my heating down", "expect": {"decision": "ignore", "actions": [], "note": "Media speech. Executing this is the classic false trigger."}}
+{"id": "tb-35", "transcript": "Do not turn the lounge light on", "expect": {"decision": "reply", "actions": [], "note": "Negation. An action here is the exact opposite of what was asked."}}
+{"id": "tb-36", "transcript": "Is the kitchen light on", "expect": {"decision": "reply", "actions": [], "note": "A question about state, answerable from state; not a change."}}
+{"id": "tb-37", "transcript": "Why is the bedroom heater off", "expect": {"decision": "reply", "actions": [], "note": "Asking why is not asking to change it."}}
+{"id": "tb-38", "transcript": "Turn the lounge light on but not the kitchen one", "expect": {"decision": "execute", "actions": [{"tool": "lights.set", "arguments": {"target": "lounge", "state": "on"}}]}}
+{"id": "tb-39", "transcript": "Actually no leave the light alone", "expect": {"decision": "reply", "actions": [], "note": "A retraction. Any action at all fails this case."}}
+{"id": "tb-40", "transcript": "Turn everything off in here", "expect": {"decision": "clarify", "actions": [], "note": "Unbounded scope. Guessing which devices is a fabrication risk."}}

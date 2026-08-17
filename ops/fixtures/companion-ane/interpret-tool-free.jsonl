@@ -1,0 +1,40 @@
+{"id": "tf-01", "transcript": "Hello there", "expect": {"decision": "reply", "speechAct": "social"}}
+{"id": "tf-02", "transcript": "Good morning Nova", "expect": {"decision": "reply", "speechAct": "social"}}
+{"id": "tf-03", "transcript": "How are you feeling today", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-04", "transcript": "What time is it", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-05", "transcript": "Are you still there", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-06", "transcript": "The rain sounds peaceful tonight", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-07", "transcript": "It is freezing in here", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-08", "transcript": "That song was lovely", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-09", "transcript": "This soup came out really well", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-10", "transcript": "I might rearrange the lounge tomorrow", "expect": {"decision": "reply", "speechAct": "self_intention"}}
+{"id": "tf-11", "transcript": "I am going to head to bed soon", "expect": {"decision": "reply", "speechAct": "self_intention"}}
+{"id": "tf-12", "transcript": "I should probably call my sister back", "expect": {"decision": "reply", "speechAct": "self_intention"}}
+{"id": "tf-13", "transcript": "I want to start running again", "expect": {"decision": "reply", "speechAct": "self_intention"}}
+{"id": "tf-14", "transcript": "Sam said he would drop the tools off", "expect": {"decision": "ignore", "speechAct": "third_party"}}
+{"id": "tf-15", "transcript": "Mum wants to know if we are free Sunday", "expect": {"decision": "ignore", "speechAct": "third_party"}}
+{"id": "tf-16", "transcript": "Can you pass me that", "expect": {"decision": "ignore", "speechAct": "third_party"}}
+{"id": "tf-17", "transcript": "No not that one the other one", "expect": {"decision": "ignore", "speechAct": "third_party"}}
+{"id": "tf-18", "transcript": "And then he said turn the lights off and she just laughed", "expect": {"decision": "ignore", "speechAct": "quoted_or_media"}}
+{"id": "tf-19", "transcript": "The presenter kept saying set the thermostat to twenty two", "expect": {"decision": "ignore", "speechAct": "quoted_or_media"}}
+{"id": "tf-20", "transcript": "In the film the computer says open the pod bay doors", "expect": {"decision": "ignore", "speechAct": "quoted_or_media"}}
+{"id": "tf-21", "transcript": "She was telling me to turn the heater down all evening", "expect": {"decision": "ignore", "speechAct": "quoted_or_media"}}
+{"id": "tf-22", "transcript": "Mm", "expect": {"decision": "ignore", "speechAct": "unclear"}}
+{"id": "tf-23", "transcript": "Uh what was I", "expect": {"decision": "ignore", "speechAct": "unclear"}}
+{"id": "tf-24", "transcript": "Sorry never mind", "expect": {"decision": "ignore", "speechAct": "unclear"}}
+{"id": "tf-25", "transcript": "The thing with the", "expect": {"decision": "ignore", "speechAct": "unclear"}}
+{"id": "tf-26", "transcript": "It would be nice if it were warmer in the bedroom", "expect": {"decision": "clarify", "speechAct": "desired_state"}}
+{"id": "tf-27", "transcript": "This room is far too bright", "expect": {"decision": "clarify", "speechAct": "desired_state"}}
+{"id": "tf-28", "transcript": "I wish it were quieter in here", "expect": {"decision": "clarify", "speechAct": "desired_state"}}
+{"id": "tf-29", "transcript": "Could do with a bit more light over here", "expect": {"decision": "clarify", "speechAct": "desired_state"}}
+{"id": "tf-30", "transcript": "Thank you that was perfect", "expect": {"decision": "reply", "speechAct": "social"}}
+{"id": "tf-31", "transcript": "Goodnight Nova", "expect": {"decision": "reply", "speechAct": "social"}}
+{"id": "tf-32", "transcript": "You have been really helpful today", "expect": {"decision": "reply", "speechAct": "social"}}
+{"id": "tf-33", "transcript": "Do you remember what I asked you yesterday", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-34", "transcript": "What is the difference between a heat pump and a panel heater", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-35", "transcript": "Why does the hallway light keep dropping off the network", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-36", "transcript": "How long does it take to boil an egg properly", "expect": {"decision": "reply", "speechAct": "question"}}
+{"id": "tf-37", "transcript": "I have had an awful day", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-38", "transcript": "I am completely exhausted", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-39", "transcript": "Everything went right today for once", "expect": {"decision": "reply", "speechAct": "observation"}}
+{"id": "tf-40", "transcript": "I keep forgetting where I put my keys", "expect": {"decision": "reply", "speechAct": "observation"}}

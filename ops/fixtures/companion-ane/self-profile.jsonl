@@ -1,0 +1,30 @@
+{"id": "sp-01", "transcript": "I'm Adeline", "expect": {"name": "Adeline"}}
+{"id": "sp-02", "transcript": "My name is Adeline by the way", "expect": {"name": "Adeline"}}
+{"id": "sp-03", "transcript": "Call me Addie", "expect": {"name": "Addie"}}
+{"id": "sp-04", "transcript": "Everyone calls me Ada", "expect": {"name": "Ada"}}
+{"id": "sp-05", "transcript": "You can just call me Sam", "expect": {"name": "Sam"}}
+{"id": "sp-06", "transcript": "It's Priya, we met last week", "expect": {"name": "Priya"}}
+{"id": "sp-07", "transcript": "I go by Jo now", "expect": {"name": "Jo"}}
+{"id": "sp-08", "transcript": "My pronouns are she and her", "expect": {"pronouns": "she/her"}}
+{"id": "sp-09", "transcript": "I use they them pronouns", "expect": {"pronouns": "they/them"}}
+{"id": "sp-10", "transcript": "Please use he him for me", "expect": {"pronouns": "he/him"}}
+{"id": "sp-11", "transcript": "I'm Adeline and I use she her", "expect": {"name": "Adeline", "pronouns": "she/her"}}
+{"id": "sp-12", "transcript": "Name's Kit, pronouns they them", "expect": {"name": "Kit", "pronouns": "they/them"}}
+{"id": "sp-13", "transcript": "Actually I've changed my name to River", "expect": {"name": "River"}}
+{"id": "sp-14", "transcript": "I'd rather you called me Alex than Alexander", "expect": {"name": "Alex"}}
+{"id": "sp-15", "transcript": "I'm cold", "expect": null, "note": "The classic false positive. 'I'm X' is not a name."}
+{"id": "sp-16", "transcript": "I'm tired", "expect": null}
+{"id": "sp-17", "transcript": "I'm not sure about that", "expect": null}
+{"id": "sp-18", "transcript": "I'm going out for a bit", "expect": null}
+{"id": "sp-19", "transcript": "I'm at Adeline's place", "expect": null, "note": "A name is present but it is not the speaker's own."}
+{"id": "sp-20", "transcript": "This is Sam's coat", "expect": null}
+{"id": "sp-21", "transcript": "Sam uses he him", "expect": null, "note": "Someone else's pronouns. Recording them as the speaker's renames the household."}
+{"id": "sp-22", "transcript": "My sister is called Priya", "expect": null}
+{"id": "sp-23", "transcript": "Tell Adeline I'll be late", "expect": null}
+{"id": "sp-24", "transcript": "Turn the lounge light on", "expect": null}
+{"id": "sp-25", "transcript": "What's the weather doing", "expect": null}
+{"id": "sp-26", "transcript": "The character in the book is named Ada", "expect": null}
+{"id": "sp-27", "transcript": "He said his name was Tom", "expect": null, "note": "Third-person report, not first-person disclosure."}
+{"id": "sp-28", "transcript": "I named the cat Biscuit", "expect": null}
+{"id": "sp-29", "transcript": "I'm in the kitchen", "expect": null}
+{"id": "sp-30", "transcript": "I'm the one who set this up", "expect": null}

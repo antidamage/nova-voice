@@ -1,0 +1,22 @@
+{
+  "note": "Shared inputs for the Core ML / ANE companion benchmark. The tool catalogue is what a tool-bearing interpretation case is allowed to plan with; anything a model names outside it is an unoffered tool and fails the run outright, not just that case. The icon vocabulary is the closed set classify_icon chooses from.",
+  "tools": [
+    {"name": "lights.set", "description": "Turn a light on or off, or set its brightness.", "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "state": {"enum": ["on", "off"]}, "brightness": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["target"]}},
+    {"name": "climate.set", "description": "Set a heater or air conditioner.", "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "state": {"enum": ["on", "off"]}, "temperature": {"type": "number"}}, "required": ["target"]}},
+    {"name": "media.play", "description": "Play or pause media in a room.", "parameters": {"type": "object", "properties": {"room": {"type": "string"}, "state": {"enum": ["play", "pause"]}}, "required": ["room"]}},
+    {"name": "reminders.create", "description": "Create a reminder.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "due": {"type": "string"}}, "required": ["name"]}},
+    {"name": "cameras.snapshot", "description": "Take a still from a camera.", "parameters": {"type": "object", "properties": {"camera": {"type": "string"}}, "required": ["camera"]}},
+    {"name": "weather.get", "description": "Current conditions or forecast.", "parameters": {"type": "object", "properties": {"when": {"type": "string"}}}}
+  ],
+  "state": {
+    "lights": {"lounge": "off", "kitchen": "on", "bedroom": "off", "hallway": "off"},
+    "climate": {"bedroom_heater": "off", "lounge_aircon": "off"},
+    "media": {"lounge": "paused"},
+    "cameras": ["front_door", "driveway"]
+  },
+  "icons": [
+    "droplet", "leaf", "bolt", "bed", "cart", "pill", "phone", "envelope",
+    "car", "dog", "cat", "trash", "wrench", "book", "music", "camera",
+    "calendar", "clock", "heart", "flame", "snowflake", "sun", "moon", "gift"
+  ]
+}
