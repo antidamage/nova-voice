@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 from uuid import uuid4
 
 import httpx
@@ -51,7 +51,17 @@ from nova_voice.companion.router import RouteMode
 from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
-from nova_voice.domain import HandleResult, SpeakerIdentity, Utterance
+from nova_voice.domain import (
+    ActiveGoal,
+    Decision,
+    Emotion,
+    HandleResult,
+    Interpretation,
+    SpeakerIdentity,
+    SpeechAct,
+    ToolResult,
+    Utterance,
+)
 from nova_voice.durable.models import (
     AutomationRecord,
     BriefingRecord,
@@ -135,6 +145,180 @@ class InterpretationBenchmarkRequest(BaseModel):
 
     transcript: str = Field(min_length=1, max_length=500)
     room: str = Field(default="benchmark", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class WorkloadBenchmarkRequest(BaseModel):
+    """One text-only sample of any routed workload, run through both arms.
+
+    The tool-free interpretation harness above could only ever measure one of
+    the five workloads, and only in its easiest shape. Comparing a phone to
+    Iridium on that alone says nothing about the passes that actually carry
+    risk — the ones that plan actions, judge whether a command worked, or
+    decide what gets spoken.
+
+    Nothing here executes. Tools are supplied as a catalogue for the planner to
+    choose from and are never called; tool *results* are supplied as fixture
+    data, so a benchmark can exercise response rendering over a plan that
+    already "ran" without anything in the house moving. Every utterance is
+    marked dry-run, there is no audio in or out, and no household action can
+    result from any request to this endpoint.
+    """
+
+    workload: Literal[
+        "interpret",
+        "render_response",
+        "confirm_objective",
+        "extract_self_profile_update",
+        "classify_icon",
+    ]
+    transcript: str = Field(default="", max_length=2_000)
+    room: str = Field(default="benchmark", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # interpret
+    tools: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    state: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    # render_response
+    facts: dict[str, Any] = Field(default_factory=dict)
+    tool_results: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    interpretation: dict[str, Any] | None = None
+    # confirm_objective
+    pending: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    # classify_icon
+    name: str = Field(default="", max_length=200)
+    icons: list[str] = Field(default_factory=list, max_length=64)
+
+
+def _benchmark_interpretation(raw: dict[str, Any] | None) -> Interpretation:
+    """The interpretation a rendering sample is answering.
+
+    Rendering is judged on whether it claims something happened that did not,
+    so the plan it is rendering has to be real rather than empty. A fixture
+    supplies one; the default is the neutral reply case.
+    """
+
+    if raw:
+        return Interpretation.model_validate(raw)
+    return Interpretation(
+        emotion=Emotion(confidence=0.5, intensity=0.1),
+        speech_act=SpeechAct.QUESTION,
+        addressed_probability=0.9,
+        decision=Decision.REPLY,
+        confidence=0.8,
+        active_goal=ActiveGoal(),
+    )
+
+
+async def _run_benchmark_workload(
+    service: Any,
+    interpreter: Any,
+    payload: WorkloadBenchmarkRequest,
+    utterance: Utterance,
+) -> Any:
+    """Dispatch one sample down the same routed path a voice turn would use."""
+
+    if payload.workload == "interpret":
+        return await interpreter.interpret(
+            utterance,
+            active_goal=None,
+            relevant_state=payload.state,
+            tools=payload.tools,
+            conversation=None,
+        )
+    if payload.workload == "render_response":
+        return await interpreter.render_response(
+            utterance,
+            _benchmark_interpretation(payload.interpretation),
+            [ToolResult.model_validate(entry) for entry in payload.tool_results],
+            persona=payload.facts.get("persona", "nova"),
+            relevant_state=payload.state,
+            conversation=None,
+        )
+    if payload.workload == "confirm_objective":
+        return await service._routed_confirm_objective(utterance, payload.pending)
+    if payload.workload == "extract_self_profile_update":
+        return await service._routed_self_profile_update(utterance)
+    if payload.workload == "classify_icon":
+        allowed = [icon for icon in payload.icons if icon]
+        if not payload.name or not allowed:
+            raise HTTPException(status_code=400, detail="name and icons are required")
+        router = getattr(service, "companion_router", None)
+        classify = getattr(interpreter, "classify_icon", None)
+        if not callable(classify):
+            raise HTTPException(status_code=503, detail="classify_icon is unavailable")
+        if router is None:
+            return await classify(payload.name, allowed)
+        outcome = await router.run(
+            "classify_icon",
+            {"name": payload.name, "icons": allowed},
+            lambda: classify(payload.name, allowed),
+            parse=lambda body: parse_companion_result("classify_icon", body),
+        )
+        icon = outcome.value
+        if hasattr(icon, "icon"):
+            icon = icon.icon
+        # Re-checked against the vocabulary that was sent, exactly as the
+        # production handler does — a benchmark that scored an unvalidated
+        # answer would flatter the phone.
+        return icon if icon in allowed else None
+    raise HTTPException(status_code=400, detail="unknown workload")
+
+
+def _benchmark_result_payload(workload: str, result: Any) -> Any:
+    """Flatten a workload's answer into something a scorer can compare.
+
+    Deliberately not a verdict. This endpoint reports what came back; whether
+    it was right is the harness's judgement against a fixture's expectation,
+    and keeping those apart is what stops the measured system from grading
+    itself.
+    """
+
+    # `classify_icon` first, because None is one of its real answers rather
+    # than an absent one: "no glyph fits" is a verdict the dashboard renders,
+    # and collapsing it to a null result would score a correct refusal as a
+    # missing one.
+    if workload == "classify_icon":
+        return {"icon": result}
+    if result is None:
+        return None
+    if workload == "interpret":
+        return {
+            "emotion": result.emotion.label,
+            "speechAct": result.speech_act,
+            "addressedProbability": result.addressed_probability,
+            "decision": result.decision,
+            "confidence": result.confidence,
+            "goalSummary": result.active_goal.summary,
+            "goalStatus": result.active_goal.status,
+            "actions": [
+                {
+                    "provider": action.call.provider,
+                    "tool": action.call.tool,
+                    "arguments": action.call.arguments,
+                }
+                for action in sorted(result.actions, key=lambda item: item.order)
+            ],
+        }
+    if workload == "render_response":
+        return {"text": result}
+    if workload == "confirm_objective":
+        return {
+            "allConfirmed": result.all_confirmed,
+            "items": [
+                {
+                    "target": item.target,
+                    "confirmed": item.confirmed,
+                    "reason": item.reason,
+                }
+                for item in result.items
+            ],
+        }
+    if workload == "extract_self_profile_update":
+        return {
+            "name": result.name,
+            "pronouns": result.pronouns,
+            "evidence": result.evidence,
+        }
+    return None
 
 
 class EngineSwitchRequest(BaseModel):
@@ -2262,6 +2446,92 @@ def create_app(
                 "goalStatus": result.active_goal.status,
                 "actions": len(result.actions),
             },
+        }
+
+    @app.post("/v1/test/workload", include_in_schema=False)
+    async def test_workload(payload: WorkloadBenchmarkRequest) -> dict:
+        """Run one sample of any routed workload through both arms.
+
+        Uses the service's own routed paths rather than reimplementing them, so
+        what a benchmark measures is what a voice turn would actually do —
+        including the router's eligibility rules, its whole-plan rejection of
+        unoffered tools, and its fallback to Iridium. A harness that called the
+        model directly would produce faster and completely unrepresentative
+        numbers.
+
+        Never executes a tool, never captures audio, never speaks.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        if interpreter is None:
+            raise HTTPException(status_code=503, detail="Interpretation is unavailable")
+
+        router = getattr(selected_service, "companion_router", None)
+        comparisons_before = router.comparisons() if router is not None else []
+        previous_at = comparisons_before[-1].get("at") if comparisons_before else None
+
+        utterance = Utterance.text(
+            payload.transcript.strip() or "benchmark",
+            room_id=payload.room,
+            satellite_id="workload-benchmark",
+            wake_detected=True,
+            # Non-negotiable. Everything downstream that could touch a device
+            # keys off this, and a benchmark that ran a plan for real would
+            # turn a measurement into a household action.
+            dry_run=True,
+        )
+
+        started = time.perf_counter()
+        result: Any
+        try:
+            result = await _run_benchmark_workload(
+                selected_service, interpreter, payload, utterance
+            )
+        except HTTPException:
+            raise
+        except Exception as error:  # noqa: BLE001 - reported, not swallowed
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+
+        arms_ms = None
+        winner = None
+        rejection = None
+        if router is not None:
+            latest = router.comparisons()
+            candidate = latest[-1] if latest else None
+            if (
+                candidate is not None
+                and candidate.get("workload") == payload.workload
+                and candidate.get("at") != previous_at
+            ):
+                arms_ms = {
+                    "companion": (candidate.get("companion") or {}).get("elapsedMs"),
+                    "local": (candidate.get("local") or {}).get("elapsedMs"),
+                }
+                winner = candidate.get("spoken")
+                rejection = (candidate.get("companion") or {}).get("reason")
+
+        return {
+            "workload": payload.workload,
+            "elapsedMs": elapsed_ms,
+            "armsMs": arms_ms,
+            "winner": winner,
+            "companionReason": rejection,
+            "input": {
+                "transcriptChars": len(utterance.transcript),
+                "toolsOffered": len(payload.tools),
+                "stateFields": len(payload.state),
+                "historyMessages": len(payload.history),
+                "toolResults": len(payload.tool_results),
+                "pending": len(payload.pending),
+                "icons": len(payload.icons),
+            },
+            # Returned raw so the harness scores it rather than trusting a
+            # summary shaped by the thing being measured.
+            "result": _benchmark_result_payload(payload.workload, result),
         }
 
     @app.websocket("/v1/diagnostics/stream")

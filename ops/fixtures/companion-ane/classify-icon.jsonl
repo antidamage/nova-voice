@@ -1,0 +1,40 @@
+{"id": "ic-01", "name": "Water the plants", "expect": {"icon": "droplet"}}
+{"id": "ic-02", "name": "Water the herb garden", "expect": {"icon": "droplet"}}
+{"id": "ic-03", "name": "Rake the leaves", "expect": {"icon": "leaf"}}
+{"id": "ic-04", "name": "Mow the lawn", "expect": {"icon": "leaf"}}
+{"id": "ic-05", "name": "Pay the power bill", "expect": {"icon": "bolt"}}
+{"id": "ic-06", "name": "Read the electricity meter", "expect": {"icon": "bolt"}}
+{"id": "ic-07", "name": "Change the bedsheets", "expect": {"icon": "bed"}}
+{"id": "ic-08", "name": "Make the spare bed up", "expect": {"icon": "bed"}}
+{"id": "ic-09", "name": "Do the grocery shopping", "expect": {"icon": "cart"}}
+{"id": "ic-10", "name": "Pick up milk and bread", "expect": {"icon": "cart"}}
+{"id": "ic-11", "name": "Take my medication", "expect": {"icon": "pill"}}
+{"id": "ic-12", "name": "Collect the prescription", "expect": {"icon": "pill"}}
+{"id": "ic-13", "name": "Ring the dentist", "expect": {"icon": "phone"}}
+{"id": "ic-14", "name": "Call Mum back", "expect": {"icon": "phone"}}
+{"id": "ic-15", "name": "Reply to the landlord's email", "expect": {"icon": "envelope"}}
+{"id": "ic-16", "name": "Post the birthday card", "expect": {"icon": "envelope"}}
+{"id": "ic-17", "name": "Book the car in for a service", "expect": {"icon": "car"}}
+{"id": "ic-18", "name": "Fill up the petrol tank", "expect": {"icon": "car"}}
+{"id": "ic-19", "name": "Walk the dog", "expect": {"icon": "dog"}}
+{"id": "ic-20", "name": "Book the dog into the kennels", "expect": {"icon": "dog"}}
+{"id": "ic-21", "name": "Take the cat to the vet", "expect": {"icon": "cat"}}
+{"id": "ic-22", "name": "Buy more cat litter", "expect": {"icon": "cat"}}
+{"id": "ic-23", "name": "Put the bins out", "expect": {"icon": "trash"}}
+{"id": "ic-24", "name": "Empty the recycling", "expect": {"icon": "trash"}}
+{"id": "ic-25", "name": "Fix the dripping tap", "expect": {"icon": "wrench"}}
+{"id": "ic-26", "name": "Tighten the gate hinge", "expect": {"icon": "wrench"}}
+{"id": "ic-27", "name": "Return the library books", "expect": {"icon": "book"}}
+{"id": "ic-28", "name": "Finish the chapter for book club", "expect": {"icon": "book"}}
+{"id": "ic-29", "name": "Practise guitar", "expect": {"icon": "music"}}
+{"id": "ic-30", "name": "Buy tickets for the gig", "expect": {"icon": "music"}}
+{"id": "ic-31", "name": "Clean the driveway camera lens", "expect": {"icon": "camera"}}
+{"id": "ic-32", "name": "Print the holiday photos", "expect": {"icon": "camera"}}
+{"id": "ic-33", "name": "Schedule the quarterly review", "expect": {"icon": "calendar"}}
+{"id": "ic-34", "name": "Book Friday off work", "expect": {"icon": "calendar"}}
+{"id": "ic-35", "name": "Set the clocks forward", "expect": {"icon": "clock"}}
+{"id": "ic-36", "name": "Cardiology follow-up appointment", "expect": {"icon": "heart"}}
+{"id": "ic-37", "name": "Service the gas fireplace", "expect": {"icon": "flame"}}
+{"id": "ic-38", "name": "Defrost the freezer", "expect": {"icon": "snowflake"}}
+{"id": "ic-39", "name": "Buy a present for Sam", "expect": {"icon": "gift"}}
+{"id": "ic-40", "name": "Asdf qwerty zzz", "expect": {"icon": null}, "note": "Nonsense. Answering null is correct; inventing a glyph is not."}
