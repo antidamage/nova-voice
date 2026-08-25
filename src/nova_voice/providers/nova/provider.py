@@ -43,7 +43,19 @@ def climate_control_kind(entity: dict[str, Any]) -> Literal["aircon", "panel_hea
 
 
 def logical_entity_room(entity: dict[str, Any]) -> str | None:
-    """Map organisational climate entities back to the rooms they actually serve."""
+    """Map organisational climate entities back to the rooms they actually serve.
+
+    This returns a ROOM NAME, not a dashboard climate-instance id, and the two
+    collide. The dashboard's only heater instance is id "bedroom" — the Tuya
+    bedroom heater switch — and ``/api/climate-control`` routes on nothing but
+    that string. So feeding a ``panel_heater`` result into a climate intent
+    would drive the bedroom heater instead, silently and with no error.
+
+    The one caller that builds a climate intent guards against this by excluding
+    the panel heater (see ``is_aircon`` at the ``climate_control`` call site).
+    Any new caller must do the same, or route by instance id instead.
+    See nova-ha-dashboard/specs/bedroom-heater-control-integrity.md section 6.
+    """
 
     kind = climate_control_kind(entity)
     if kind == "aircon":
