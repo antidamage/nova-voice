@@ -1,0 +1,8 @@
+{
+  "type": "job_reject",
+  "jobId": "5f2b9c1d4e8a47c0",
+  "attemptId": "a41d7e93b0f5426d",
+  "reason": "thermal",
+  "detail": "device is in a serious thermal state",
+  "retryAfterSeconds": 120.0
+}

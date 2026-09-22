@@ -1,0 +1,23 @@
+{
+  "type": "telemetry",
+  "telemetry": {
+    "battery": 0.82,
+    "charging": false,
+    "lowPowerMode": false,
+    "thermalState": "nominal",
+    "appState": "background",
+    "models": {
+      "hotAvailable": true,
+      "hotContextTokens": 4096,
+      "deepAvailable": false,
+      "deepModelId": null
+    },
+    "permissions": {
+      "calendar": "available",
+      "reminders": "available",
+      "location": "partial",
+      "health": "denied"
+    },
+    "reportedNetwork": "home-wifi"
+  }
+}

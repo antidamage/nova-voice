@@ -5,6 +5,7 @@ import base64
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from nova_voice.api import create_app
@@ -786,3 +787,80 @@ async def test_backchannel_does_not_cancel_and_response_resumes() -> None:
 
     assert played == [b"\x01\x00" * 50, b"\x02\x00" * 50]
     assert conversations.active("lounge")
+
+
+class ExchangeService(FakeService):
+    """A turn that answers rather than touching the household."""
+
+    async def handle(self, utterance, **_kwargs):
+        self.utterance = utterance
+        result = handle_result()
+        return result.model_copy(
+            update={
+                "shadowed": False,
+                "policy_reason": "conversational",
+                "interpretation": result.interpretation.model_copy(
+                    update={"decision": Decision.REPLY}
+                ),
+            }
+        )
+
+
+class CrashingService(FakeService):
+    async def handle(self, utterance, **_kwargs):
+        self.utterance = utterance
+        raise RuntimeError("provider exploded")
+
+
+async def test_runtime_resolves_a_conversational_turn_with_an_outcome() -> None:
+    # The dashboard shows a user line as still working until an outcome
+    # arrives, so an exchange has to resolve its line too — it just must not
+    # claim to have been a command while doing it.
+    announcer = RecordingAnnouncer()
+    runtime = SatelliteAudioRuntime(
+        ExchangeService(),
+        QueueStt("Bandit, how are you"),
+        FakeTts(),
+        lambda: None,
+        speech_announcer=announcer,
+    )
+
+    await runtime.process_pcm(
+        satellite_id="lounge-microphone",
+        room_id="lounge",
+        pcm16=b"\x00\x00" * 16_000,
+        wake_detected=True,
+    )
+
+    user_payloads = [p for p in announcer.transcripts if p["role"] == "user"]
+    assert "outcome" not in user_payloads[0]
+    resolved = user_payloads[-1]
+    assert resolved["replacesId"] == user_payloads[0]["id"]
+    assert resolved["outcome"] == "answered"
+    assert "kind" not in resolved
+
+
+async def test_runtime_marks_a_crashed_turn_as_failed() -> None:
+    # Without this the line sits in the working state forever: the turn never
+    # reaches the normal outcome announcement.
+    announcer = RecordingAnnouncer()
+    runtime = SatelliteAudioRuntime(
+        CrashingService(),
+        QueueStt("Bandit, unlock the door"),
+        FakeTts(),
+        lambda: None,
+        speech_announcer=announcer,
+    )
+
+    with pytest.raises(RuntimeError):
+        await runtime.process_pcm(
+            satellite_id="lounge-microphone",
+            room_id="lounge",
+            pcm16=b"\x00\x00" * 16_000,
+            wake_detected=True,
+        )
+
+    user_payloads = [p for p in announcer.transcripts if p["role"] == "user"]
+    failed = user_payloads[-1]
+    assert failed["replacesId"] == user_payloads[0]["id"]
+    assert failed["outcome"] == "failed"

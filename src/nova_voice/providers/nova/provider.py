@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from nova_voice.capabilities.base import CapabilityManifest, CapabilityProvider, ToolPolicy
 from nova_voice.domain import CapabilityToolCall, PlannedAction, ToolResult
+from nova_voice.dry_run import current_dry_run
 from nova_voice.providers.nova import verify_loop
 from nova_voice.providers.nova.client import NovaDashboardClient, NovaDashboardError
 
@@ -42,7 +43,19 @@ def climate_control_kind(entity: dict[str, Any]) -> Literal["aircon", "panel_hea
 
 
 def logical_entity_room(entity: dict[str, Any]) -> str | None:
-    """Map organisational climate entities back to the rooms they actually serve."""
+    """Map organisational climate entities back to the rooms they actually serve.
+
+    This returns a ROOM NAME, not a dashboard climate-instance id, and the two
+    collide. The dashboard's only heater instance is id "bedroom" — the Tuya
+    bedroom heater switch — and ``/api/climate-control`` routes on nothing but
+    that string. So feeding a ``panel_heater`` result into a climate intent
+    would drive the bedroom heater instead, silently and with no error.
+
+    The one caller that builds a climate intent guards against this by excluding
+    the panel heater (see ``is_aircon`` at the ``climate_control`` call site).
+    Any new caller must do the same, or route by instance id instead.
+    See nova-ha-dashboard/specs/bedroom-heater-control-integrity.md section 6.
+    """
 
     kind = climate_control_kind(entity)
     if kind == "aircon":
@@ -54,6 +67,84 @@ def logical_entity_room(entity: dict[str, Any]) -> str | None:
 
 def climate_is_on(entity: dict[str, Any]) -> bool:
     return str(entity.get("state") or "").casefold() not in _CLIMATE_OFF_STATES
+
+
+# Spoken colour names. "Set the lounge lights to blue" otherwise depends on the
+# model inventing an RGB triple into an unconstrained schema slot, which is both
+# unreliable and untestable. Deliberately small: the colours a household
+# actually asks for out loud, tuned for lamps rather than for screens (pure
+# 0,0,255 blue reads almost black on a warm-white bulb).
+_NAMED_COLORS: dict[str, tuple[int, int, int]] = {
+    "red": (255, 0, 0),
+    "orange": (255, 120, 0),
+    "amber": (255, 160, 40),
+    "yellow": (255, 220, 60),
+    "lime": (170, 255, 60),
+    "green": (0, 255, 80),
+    "teal": (0, 220, 200),
+    "cyan": (0, 220, 255),
+    "sky": (80, 200, 255),
+    "blue": (40, 90, 255),
+    "indigo": (80, 60, 255),
+    "violet": (150, 70, 255),
+    "purple": (170, 60, 255),
+    "magenta": (255, 40, 200),
+    "pink": (255, 110, 180),
+    "white": (255, 255, 255),
+    "warm white": (255, 190, 120),
+    "cool white": (200, 225, 255),
+    "daylight": (255, 240, 220),
+    "candlelight": (255, 150, 60),
+}
+
+
+def resolve_color(value: Any) -> list[int]:
+    """Accept a spoken colour name or a raw RGB triple; always return a triple.
+
+    The tool schema leaves ``value`` open because it carries brightness levels
+    and temperatures too, so this is where a colour is actually validated. An
+    unknown name is an error rather than a guess: silently lighting the room the
+    wrong colour is worse than saying the colour was not understood.
+    """
+
+    if isinstance(value, str):
+        rgb = _NAMED_COLORS.get(" ".join(value.casefold().split()))
+        if rgb is None:
+            raise ValueError(f"unknown colour name: {value}")
+        return list(rgb)
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        channels = [int(channel) for channel in value]
+        if all(0 <= channel <= 255 for channel in channels):
+            return channels
+        raise ValueError("colour channels must be between 0 and 255")
+    raise ValueError("colour must be a name or an RGB triple")
+
+
+BRIGHTNESS_BOUNDS = (0, 100)
+TEMPERATURE_BOUNDS_C = (5.0, 35.0)
+
+# How far a relative adjustment travels when the speaker does not size it. "Make
+# it brighter" carries no number, so the step is ours to pick: a quarter of the
+# scale is a change you can see from across the room and still takes four moves
+# to cross the range. Two degrees is the climate equivalent — one is inside the
+# noise of most thermostats.
+BRIGHTNESS_STEP_PCT = 25
+TEMPERATURE_STEP_C = 2.0
+
+# Relative verb -> (absolute action it resolves to, direction of travel).
+#
+# These exist because the alternative is asking the planning model to resolve a
+# target, find its current value in the household state, do the arithmetic and
+# emit an absolute call — four inferences in one shot. The compact local model
+# answered that by returning ``execute`` with an empty plan, which is silence.
+# The provider already holds the state the arithmetic needs, so the provider
+# does the arithmetic and the model only has to name the verb it heard.
+_RELATIVE_ACTIONS: dict[str, tuple[str, int]] = {
+    "brighten": ("set_level", 1),
+    "dim": ("set_level", -1),
+    "warm_up": ("set_temperature", 1),
+    "cool_down": ("set_temperature", -1),
+}
 
 
 def _describe_objective(target_name: str, action: str, args: dict[str, Any]) -> str:
@@ -98,6 +189,11 @@ class AliasIndex:
 
     def rebuild(self, state: dict) -> None:
         self._aliases.clear()
+        # Room light-group aliases are collected here and added last, after
+        # every real device name is known. A house with a lamp actually called
+        # "Lounge lights" must keep that name pointing at the lamp; inventing a
+        # group alias on top of it would turn an unambiguous target ambiguous.
+        deferred_group_aliases: list[tuple[str, AliasTarget]] = []
         for zone in state.get("zones", []):
             if not isinstance(zone, dict) or not zone.get("id"):
                 continue
@@ -107,6 +203,15 @@ class AliasIndex:
             if zone["id"] == "everything":
                 for alias in ("all lights", "every light", "whole house", "all the lights"):
                     self._add(alias, target)
+            else:
+                # How a room's light group is actually spoken about, and the
+                # name the prompt now advertises it under. Without these, "turn
+                # on the kitchen lights" resolves to no target at all. Plural
+                # only: the singular collides with individual lamp names.
+                for suffix in ("lights", "lighting"):
+                    deferred_group_aliases.append((f"{zone['id']} {suffix}", target))
+                    if zone.get("name"):
+                        deferred_group_aliases.append((f"{zone['name']} {suffix}", target))
 
         for entity in _device_tree_entities(state):
             if not isinstance(entity, dict) or not entity.get("entity_id"):
@@ -133,6 +238,10 @@ class AliasIndex:
             elif kind == "panel_heater":
                 self._add("bedroom heater", target)
                 self._add("bedroom panel heater", target)
+
+        for alias, target in deferred_group_aliases:
+            if normalize_alias(alias) not in self._aliases:
+                self._add(alias, target)
 
     def resolve(self, value: str, *, room: str | None = None) -> list[AliasTarget]:
         normalized = normalize_alias(value)
@@ -247,7 +356,12 @@ NOVA_TOOLS = [
         "type": "function",
         "function": {
             "name": "nova.control",
-            "description": "Control an allowlisted Nova household target using friendly names.",
+            "description": (
+                "Control an allowlisted Nova household target using friendly names. "
+                "brighten/dim and warm_up/cool_down are relative: they need no value, "
+                "because Nova reads the target's current level or temperature and "
+                "moves it one step for you."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -260,6 +374,10 @@ NOVA_TOOLS = [
                             "set_temperature",
                             "set_color",
                             "set_timer",
+                            "brighten",
+                            "dim",
+                            "warm_up",
+                            "cool_down",
                             "wake",
                             "sleep",
                         ]
@@ -295,7 +413,31 @@ NOVA_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "nova.mode",
+            "description": (
+                "Turn a named whole-house mode on or off. A mode is a house-wide "
+                "behaviour, not a device: House Party makes the lights follow the "
+                "music. Use this instead of nova.control for anything named as a "
+                "mode."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"enum": ["house_party"]},
+                    "action": {"enum": ["on", "off"]},
+                },
+                "required": ["mode", "action"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
+
+# Spoken mode names to the dashboard's mode identifiers.
+MODE_NAMES = {"house_party": "house-party"}
 
 
 class NovaProvider(CapabilityProvider):
@@ -441,6 +583,12 @@ class NovaProvider(CapabilityProvider):
                     reversible=True,
                     idempotent=False,
                 ),
+                # A mode is a house-wide behaviour switch; like the other
+                # mutations it takes a serial barrier rather than sharing a
+                # parallel wave, so it can never race a light it will drive.
+                "nova.mode": ToolPolicy(
+                    risk="low", reversible=True, idempotent=True, parallel_safe=False
+                ),
             },
         )
 
@@ -491,6 +639,14 @@ class NovaProvider(CapabilityProvider):
             for control in climate_controls
             if normalize_alias(control["room"]) == normalized_room
         )
+        # Group targets are as real as individual devices — "the lounge lights"
+        # is a zone, and AliasIndex has always resolved it — but nothing in the
+        # prompt ever said so, so the model had no way to know it could name
+        # one. The satellite's own room leads its manifest.
+        groups = self._zone_groups(state)
+        room_groups = [
+            group for group in groups if normalize_alias(group["room"]) == normalized_room
+        ]
         indoor = self._indoor_temperatures(state)
         return {
             "room": room,
@@ -498,11 +654,20 @@ class NovaProvider(CapabilityProvider):
             # dashboard zones such as Climate, Network, Home, and Outside are not
             # mixed into this list.
             "indoorRooms": indoor_rooms,
+            # The complete manifest of what this satellite's own room can be
+            # told to do: its group targets first, then every device in it.
+            # Anything here is directly actionable — a directive naming one is
+            # a command, not a question.
+            "roomDevices": room_groups + entities[:30],
+            # Retained under its old name because the reply pass and the tests
+            # both read it; it is the same list.
             "nearbyTargets": entities[:30],
             # Non-climate devices keep their compact raw state. Climate has a
             # separate household-level contract below so HVAC implementation
             # modes never masquerade as the controls the assistant should offer.
-            "deviceStates": self._device_states(state),
+            # Group targets are included so a command for another room ("turn
+            # on the kitchen lights") is answerable from here too.
+            "deviceStates": groups + self._device_states(state),
             "climateControls": climate_controls,
             # Indoor temperature for this satellite's room; null means no sensor
             # is configured for it (unknown), distinct from the outdoor weather.
@@ -510,7 +675,64 @@ class NovaProvider(CapabilityProvider):
             "indoorTemperaturesByRoom": indoor,
             # Outdoor conditions only — never conflate with an indoor reading.
             "weather": self._weather_brief(state),
+            # Whole-house modes, so "turn off house party" is answerable and
+            # a redundant request can be recognised as already satisfied.
+            "modes": self._mode_states(state),
         }
+
+    @classmethod
+    def _zone_groups(cls, state: dict) -> list[dict[str, Any]]:
+        """Room light groups as named, actionable targets.
+
+        The dashboard's zones are group targets and ``AliasIndex`` has always
+        resolved them, but they were never described to the model — so "set the
+        lounge lights to blue" arrived as a directive the model could see no
+        target for, and it answered with an apology instead of a plan. Named
+        "<Room> lights" because that is what people say out loud.
+        """
+
+        rooms = set(cls._indoor_rooms(state))
+        groups: list[dict[str, Any]] = []
+        for zone in state.get("zones", []):
+            if not isinstance(zone, dict):
+                continue
+            zone_id = normalize_alias(str(zone.get("id") or ""))
+            if zone_id not in rooms:
+                continue
+            lights = [
+                entity
+                for entity in zone.get("entities", [])
+                if isinstance(entity, dict)
+                and (entity.get("domain") == "light" or entity.get("isIllumination"))
+            ]
+            if not lights:
+                continue
+            name = str(zone.get("name") or zone_id).strip()
+            groups.append(
+                {
+                    "name": f"{name} lights",
+                    "room": zone_id,
+                    "domain": "group",
+                    "state": "on" if zone.get("isOn") else "off",
+                    "devices": len(lights),
+                }
+            )
+        return groups
+
+    @staticmethod
+    def _mode_states(state: dict[str, Any]) -> dict[str, bool]:
+        """Current whole-house mode states, read from the state snapshot.
+
+        Deliberately derived from ``/api/state`` — which the provider already
+        fetches and caches — rather than from a second request. A mode is a
+        rarely-asked-about fact, and it is not worth a per-turn round trip.
+        """
+
+        preferences = state.get("preferences")
+        phonoscope = preferences.get("phonoscope") if isinstance(preferences, dict) else None
+        house_party = phonoscope.get("houseParty") if isinstance(phonoscope, dict) else None
+        enabled = house_party.get("enabled") if isinstance(house_party, dict) else False
+        return {"house_party": bool(enabled)}
 
     async def invalid_device_action_ids(self, actions: list[PlannedAction]) -> set[str]:
         """Return planned device mutations that have no current tree target.
@@ -644,17 +866,17 @@ class NovaProvider(CapabilityProvider):
                 continue
             room = "lounge" if kind == "aircon" else "bedroom"
             state_name = str(entity.get("state") or "").casefold()
+            auto_managed = kind == "aircon" and aircon_preferences.get("autoMode") is True
             if state_name in {"unknown", "unavailable", ""}:
                 power = "unavailable"
             else:
-                # Manual aircon operation still means the appliance is on, but
-                # an assistant turn_on command normalises it to dashboard Auto.
-                power = (
-                    "on"
-                    if climate_is_on(entity)
-                    or (kind == "aircon" and aircon_preferences.get("autoMode") is True)
-                    else "off"
-                )
+                # `power` is the appliance itself, and nothing else. It used to
+                # also report "on" whenever dashboard Auto was enabled, which
+                # conflated two different facts and made the assistant tell the
+                # household the air conditioner was running while its compressor
+                # sat idle at target. Auto being enabled is reported separately
+                # as `autoManaged`, so a spoken answer can be true about both.
+                power = "on" if climate_is_on(entity) else "off"
             attributes = (
                 entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
             )
@@ -669,9 +891,20 @@ class NovaProvider(CapabilityProvider):
                     or ("Air Conditioner" if kind == "aircon" else "Panel Heater"),
                     "room": room,
                     "power": power,
+                    # Whether Nova's own Auto controller is managing this device.
+                    # Auto on with power off is the normal, correct resting
+                    # state once a room reaches its target — it means "being
+                    # looked after", not "broken" and not "running".
+                    "autoManaged": auto_managed,
                     "targetTemperatureC": cls._numeric_value(target),
                     "roomTemperatureC": indoor.get(room),
-                    "supportedActions": ["turn_on", "turn_off", "set_temperature"],
+                    "supportedActions": [
+                        "turn_on",
+                        "turn_off",
+                        "set_temperature",
+                        "warm_up",
+                        "cool_down",
+                    ],
                 }
             )
         return controls
@@ -778,6 +1011,8 @@ class NovaProvider(CapabilityProvider):
                 return await self._lighting_shortcut(action)
             if action.call.tool == "nova.task":
                 return await self._task(action)
+            if action.call.tool == "nova.mode":
+                return await self._mode(action)
             return self._result(
                 action, False, "blocked", f"Unknown {self.agent_name} semantic tool"
             )
@@ -864,6 +1099,15 @@ class NovaProvider(CapabilityProvider):
         scope = str(action.call.arguments["scope"])
         requested_action = str(action.call.arguments["action"])
         returned_action = await self.client.lighting_shortcut(scope, requested_action)
+        if current_dry_run() is not None:
+            return self._dry_run_result(
+                action,
+                target={"indoors": "Home lights", "all": "All lights", "outside": "Outside lights"}[
+                    scope
+                ],
+                requested={"scope": scope, "action": requested_action},
+                observed=self._verify_lighting_shortcut(self._state, scope, requested_action)[1],
+            )
         if returned_action != requested_action:
             return self._result(
                 action,
@@ -1103,15 +1347,18 @@ class NovaProvider(CapabilityProvider):
         room = str(args.get("room") or "") or None
         if requested_action == "set_level":
             level = int(args["value"])
-            if not 0 <= level <= 100:
+            if not BRIGHTNESS_BOUNDS[0] <= level <= BRIGHTNESS_BOUNDS[1]:
                 raise ValueError("brightness must be between 0 and 100")
         if requested_action == "set_temperature":
             temperature = float(args["value"])
-            if not 5 <= temperature <= 35:
+            if not TEMPERATURE_BOUNDS_C[0] <= temperature <= TEMPERATURE_BOUNDS_C[1]:
                 raise ValueError("temperature is outside the configured 5-35C bound")
         if requested_action in {"wake", "sleep"}:
             target = target_name or "desktop"
-            observed = await self.client.desktop_action(requested_action, {"target": target})
+            body = {"id": target, "target": target}
+            observed = await self.client.desktop_action(requested_action, body)
+            if current_dry_run() is not None:
+                return self._dry_run_result(action, target=target, requested=body)
             return self._result(
                 action,
                 True,
@@ -1126,6 +1373,26 @@ class NovaProvider(CapabilityProvider):
         if len(candidates) != 1:
             return self._resolution_failure(action, candidates)
         target = candidates[0]
+
+        # A relative verb becomes the absolute action it always was, here, while
+        # the target's current reading is in hand. Everything downstream — body
+        # building, the spoken objective, verification — then sees an ordinary
+        # set_level/set_temperature and needs to know nothing about "brighter".
+        if requested_action in _RELATIVE_ACTIONS:
+            resolved = self._resolve_relative(target, requested_action, args)
+            if resolved is None:
+                absolute, _ = _RELATIVE_ACTIONS[requested_action]
+                reading = "brightness" if absolute == "set_level" else "target temperature"
+                return self._result(
+                    action,
+                    False,
+                    "blocked",
+                    f"{target.name} reports no current {reading}, so there is nothing "
+                    "to adjust relative to",
+                    target=target.name,
+                    requested=dict(args),
+                )
+            requested_action, args = resolved
 
         if requested_action == "set_timer":
             body = {
@@ -1145,6 +1412,8 @@ class NovaProvider(CapabilityProvider):
                     "Timers are only supported for climate targets",
                     target=target.name,
                 )
+            if current_dry_run() is not None:
+                return self._dry_run_result(action, target=target.name, requested=body)
             return self._result(
                 action,
                 True,
@@ -1159,7 +1428,46 @@ class NovaProvider(CapabilityProvider):
             returned_state = await self.client.zone_action(body)
         else:
             body = self._entity_body(target, requested_action, args)
-            returned_state = await self.client.entity_action(body)
+            target_text = f"{target.id} {target.name}".casefold()
+            is_aircon = (target.domain or "").casefold() == "climate" and not _PANEL_HEATER_RE.search(target_text)
+            if is_aircon:
+                # Aircon is a lounge control regardless of the HA area it is
+                # filed under; resolve it the same way the rest of the provider
+                # does instead of assuming the room name.
+                intent: dict[str, Any] = {
+                    "room": logical_entity_room(
+                        {
+                            "domain": target.domain,
+                            "entity_id": target.id,
+                            "name": target.name,
+                        }
+                    )
+                    or "lounge"
+                }
+                if requested_action == "turn_on":
+                    intent["mode"] = "auto"
+                elif requested_action == "turn_off":
+                    intent["mode"] = "off"
+                elif requested_action == "set_temperature":
+                    intent["temperature"] = float(args["value"])
+                elif requested_action == "set_mode":
+                    intent.update({"mode": "manual", "direction": str(args["value"])})
+                body = intent
+                returned_state = await self.client.climate_control(intent)
+            else:
+                returned_state = await self.client.entity_action(body)
+
+        # A dry run built the real request body above and the client withheld
+        # it. Nothing changed, so the verification loop would only ever report
+        # "unverified"; report the withheld request and the pre-action state of
+        # the target instead — that is the "before" side of the would-be diff.
+        if current_dry_run() is not None:
+            return self._dry_run_result(
+                action,
+                target=target.name,
+                requested=body,
+                observed=self._observed_target(self._state, target),
+            )
 
         # Some dashboard builds return only an operation acknowledgement. Keep
         # the pre-action snapshot as the initial (almost certainly stale) check;
@@ -1194,6 +1502,45 @@ class NovaProvider(CapabilityProvider):
             observed=observed,
         )
 
+    async def _mode(self, action: PlannedAction) -> ToolResult:
+        """Turn a named whole-house mode on or off.
+
+        A mode has no entity to resolve and nothing in Home Assistant to call,
+        so it skips the alias index entirely. The dashboard returns the state
+        that actually landed, which is also the verification: there is no
+        device to wait for, so a wrong answer here is a genuine failure rather
+        than a device that has not caught up yet.
+        """
+
+        args = action.call.arguments
+        mode = MODE_NAMES.get(str(args["mode"]))
+        if mode is None:
+            return self._result(action, False, "not_found", "Unknown household mode")
+        enabled = str(args["action"]) == "on"
+        body = {"mode": mode, "enabled": enabled}
+        observed = await self.client.mode_action(body)
+        if current_dry_run() is not None:
+            return self._dry_run_result(action, target=mode, requested=body)
+        if bool(observed.get("enabled")) != enabled:
+            return self._result(
+                action,
+                False,
+                "unverified",
+                f"{self.agent_name} did not report the requested mode state",
+                target=mode,
+                requested=body,
+                observed=observed,
+            )
+        return self._result(
+            action,
+            True,
+            "ok",
+            "Mode verified",
+            target=mode,
+            requested=body,
+            observed=observed,
+        )
+
     async def _task(self, action: PlannedAction) -> ToolResult:
         args = action.call.arguments
         operation = str(args.get("operation", ""))
@@ -1207,9 +1554,12 @@ class NovaProvider(CapabilityProvider):
         if operation == "list":
             observed = await self.client.list_tasks()
         else:
-            observed = await self.client.tasks(
-                operation, {key: value for key, value in args.items() if key != "operation"}
-            )
+            body = {key: value for key, value in args.items() if key != "operation"}
+            observed = await self.client.tasks(operation, body)
+            if current_dry_run() is not None:
+                return self._dry_run_result(
+                    action, requested={**body, "command": operation}
+                )
         return self._result(action, True, "ok", "Task operation completed", observed=observed)
 
     def _store_state(self, state: dict[str, Any]) -> None:
@@ -1277,7 +1627,7 @@ class NovaProvider(CapabilityProvider):
         if action == "set_level":
             body["brightnessPct"] = int(args["value"])
         if action == "set_color":
-            body["rgb"] = args["value"]
+            body["rgb"] = resolve_color(args["value"])
         return body
 
     @staticmethod
@@ -1300,7 +1650,7 @@ class NovaProvider(CapabilityProvider):
         elif action == "set_mode":
             data["hvac_mode"] = str(args["value"])
         elif action == "set_color":
-            data["rgb_color"] = args["value"]
+            data["rgb_color"] = resolve_color(args["value"])
         body: dict[str, Any] = {
             "entityId": target.id,
             "domain": target.domain,
@@ -1348,6 +1698,90 @@ class NovaProvider(CapabilityProvider):
             None,
         )
 
+    def _resolve_relative(
+        self,
+        target: AliasTarget,
+        requested_action: str,
+        args: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Turn a relative verb into an absolute action against the live reading.
+
+        Returns ``None`` when the target publishes no value to move from.
+        Inventing a baseline would drive a real device to an absolute setting
+        nobody asked for, so an unknown reading is refused instead of assumed.
+        """
+
+        absolute, direction = _RELATIVE_ACTIONS[requested_action]
+        step = self._relative_step(absolute, args)
+        if absolute == "set_level":
+            current = self._observed_brightness_pct(self._observed_target(self._state, target))
+            if current is None:
+                return None
+            low, high = BRIGHTNESS_BOUNDS
+            value: Any = int(min(high, max(low, round(current + direction * step))))
+        else:
+            current_c = self._observed_temperature_c(target)
+            if current_c is None:
+                return None
+            low_c, high_c = TEMPERATURE_BOUNDS_C
+            value = float(min(high_c, max(low_c, current_c + direction * step)))
+        # Copied, never mutated in place: the planned action is reported verbatim
+        # in results and dry runs and is the plan's dedup signature, so it has to
+        # keep the verb the model actually chose.
+        return absolute, {**args, "value": value}
+
+    @staticmethod
+    def _relative_step(absolute_action: str, args: dict[str, Any]) -> float:
+        """One adjustment's magnitude, sized by the speaker when they said so.
+
+        The verb owns the direction, so a supplied magnitude is taken absolute:
+        ``dim`` with ``-30`` means thirty dimmer, not thirty brighter.
+        """
+
+        default = BRIGHTNESS_STEP_PCT if absolute_action == "set_level" else TEMPERATURE_STEP_C
+        try:
+            requested = abs(float(args["value"]))
+        except (KeyError, TypeError, ValueError):
+            return default
+        return requested or default
+
+    @staticmethod
+    def _observed_brightness_pct(observed: dict[str, Any] | None) -> int | None:
+        """Current brightness as a percentage, or None when the target is unknown.
+
+        A target that exists but reports no brightness is off, and zero is the
+        honest baseline for it: "brighter" from off should light the room rather
+        than refuse.
+        """
+
+        if not observed:
+            return None
+        if "brightnessPct" in observed:
+            return int(observed.get("brightnessPct") or 0)
+        attributes = observed.get("attributes")
+        raw = attributes.get("brightness") if isinstance(attributes, dict) else None
+        return round(int(raw or 0) * 100 / 255)
+
+    def _observed_temperature_c(self, target: AliasTarget) -> float | None:
+        """The target temperature a relative climate adjustment moves from.
+
+        The canonical climate control wins because it already prefers the
+        dashboard's remembered aircon target over the appliance's own attribute.
+        That is the number the household sees, so it is the one "two degrees
+        warmer" has to be two degrees from.
+        """
+
+        canonical = self._canonical_climate_observed(self._state, target)
+        if canonical is not None:
+            current = self._numeric_value(canonical.get("targetTemperatureC"))
+            if current is not None:
+                return current
+        observed = self._observed_target(self._state, target)
+        attributes = observed.get("attributes") if isinstance(observed, dict) else None
+        if isinstance(attributes, dict):
+            return self._numeric_value(attributes.get("temperature"))
+        return None
+
     @staticmethod
     def _verify(action: str, args: dict[str, Any], observed: dict[str, Any] | None) -> bool:
         if not observed:
@@ -1366,13 +1800,8 @@ class NovaProvider(CapabilityProvider):
             return state in {"on", "off"}
         if action == "set_level":
             expected = int(args["value"])
-            if "brightnessPct" in observed:
-                actual = int(observed.get("brightnessPct") or 0)
-            else:
-                actual = round(
-                    int(observed.get("attributes", {}).get("brightness") or 0) * 100 / 255
-                )
-            return abs(actual - expected) <= 2
+            actual = NovaProvider._observed_brightness_pct(observed)
+            return actual is not None and abs(actual - expected) <= 2
         if action == "set_temperature":
             actual = observed.get("attributes", {}).get("temperature")
             return actual is not None and abs(float(actual) - float(args["value"])) <= 0.5
@@ -1404,6 +1833,34 @@ class NovaProvider(CapabilityProvider):
         **kwargs: Any,
     ) -> ToolResult:
         return ToolResult(action_id=action.id, ok=ok, code=code, message=message, **kwargs)
+
+    @classmethod
+    def _dry_run_result(
+        cls,
+        action: PlannedAction,
+        *,
+        target: str | None = None,
+        requested: dict[str, Any] | None = None,
+        observed: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        """Report a fully-planned but deliberately withheld household change.
+
+        ``ok`` is true because the action succeeded at everything it was asked
+        to do: the target resolved, the arguments validated, and the request
+        body was built. ``requested`` is that exact body and ``observed`` is the
+        target's state before it — the "before" half of a diff that was never
+        applied.
+        """
+
+        return cls._result(
+            action,
+            True,
+            "dry_run",
+            "Dry run: the request was built and reported but not sent",
+            target=target,
+            requested=requested,
+            observed=observed,
+        )
 
     async def health(self) -> dict:
         try:

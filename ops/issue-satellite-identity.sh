@@ -10,12 +10,21 @@ usage() {
   cat >&2 <<'EOF'
 Usage: issue-satellite-identity.sh IDENTITY OUTPUT_DIR [P12_PASSWORD_FILE]
 
-IDENTITY must be "nocturnium", "indium", "nova-dashboard", or
-"browser-diagnostics". OUTPUT_DIR
-must not already exist. The directory receives ca.crt, client.crt, and
-client.key. Supplying a P12_PASSWORD_FILE additionally creates IDENTITY.p12 for
-the macOS satellite or diagnostic browser; the password is read from that file
-and never accepted as a command argument.
+IDENTITY is the device name this certificate speaks for. It becomes the
+certificate's common name and DNS subject alternative name, and the voice
+server binds it: a client may only announce the identity its certificate was
+issued for. Use a safe identifier — lowercase letters, digits and hyphens,
+1-64 characters, starting and ending alphanumerically.
+
+There is deliberately no fixed list of permitted device names here. Hardcoding
+one put deployment-specific hostnames into a tracked file, which is exactly the
+coupling this topology avoids; restrict which identities may connect with the
+server-side NOVA_VOICE_COMPANION_ALLOWED_IDENTITIES instead.
+
+OUTPUT_DIR must not already exist. The directory receives ca.crt, client.crt,
+and client.key. Supplying a P12_PASSWORD_FILE additionally creates
+IDENTITY.p12 for a macOS satellite, an iOS companion, or a diagnostic browser;
+the password is read from that file and never accepted as a command argument.
 
 Override NOVA_VOICE_CA_DIR only when the existing CA is stored elsewhere.
 EOF
@@ -26,10 +35,22 @@ identity="${1:-}"
 output_dir="${2:-}"
 p12_password_file="${3:-}"
 [[ -n "$identity" && -n "$output_dir" ]] || usage
-case "$identity" in
-  nocturnium | indium | nova-dashboard | browser-diagnostics) ;;
-  *) usage ;;
-esac
+# A safe identifier, not an allowlist. This has to be strict because the value
+# is interpolated into an OpenSSL subject and an X.509 extension file: anything
+# accepting slashes, commas, newlines or shell metacharacters here would let a
+# caller inject additional subject fields or extensions.
+#
+# The permitted characters are enumerated rather than expressed as a range.
+# Under most locales a bracket range like [a-z] follows collation order, which
+# interleaves uppercase — so "UPPER" would pass a [a-z0-9] test. Listing the
+# characters removes the locale from the question entirely.
+readonly IDENTITY_CHARACTERS='abcdefghijklmnopqrstuvwxyz0123456789-'
+if [[ -z "$identity" || ${#identity} -gt 64 ]] \
+  || [[ -n "${identity//[$IDENTITY_CHARACTERS]/}" ]] \
+  || [[ "$identity" == -* || "$identity" == *- ]]; then
+  echo "Refusing unsafe identity: $identity" >&2
+  usage
+fi
 [[ ! -e "$output_dir" ]] || {
   echo "Refusing to overwrite existing output directory: $output_dir" >&2
   exit 2

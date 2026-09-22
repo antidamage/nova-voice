@@ -1,0 +1,7 @@
+{
+  "type": "configuration_changed",
+  "changed": [
+    "routes",
+    "companion_enabled"
+  ]
+}

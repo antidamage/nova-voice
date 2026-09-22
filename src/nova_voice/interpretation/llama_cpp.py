@@ -9,16 +9,22 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from nova_voice.audio.conversation import ConversationMessage, ConversationSnapshot
+from nova_voice.audio.conversation import (
+    ConversationMessage,
+    ConversationSnapshot,
+    compact_memory_to_budget,
+    compact_state_to_budget,
+)
 from nova_voice.domain import (
     ActiveGoal,
     Interpretation,
     SelfProfileUpdate,
     ToolResult,
+    TurnGrade,
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import Interpreter
+from nova_voice.interpretation.base import InterpretRequest, Interpreter, RenderRequest
 from nova_voice.interpretation.response_length import (
     bare_wake_acknowledgement,
     bounded_long_reply,
@@ -28,6 +34,10 @@ from nova_voice.interpretation.response_length import (
 from nova_voice.interpretation.speech_cues import has_explicit_self_intention
 
 logger = logging.getLogger(__name__)
+
+# Appended to the reply prompt for the JSON-schema-constrained local backend
+# only. A companion generates plain text and must not be told otherwise.
+_JSON_SCHEMA_DIRECTIVE = " Return only the response JSON schema."
 
 _TIME_RELEVANCE = re.compile(
     r"\b(?:time\s+is\s+it|current\s+time|what(?:'s|\s+is)\s+the\s+time|"
@@ -75,17 +85,60 @@ _HOUSEHOLD_STATE_RELEVANCE = re.compile(
     r"turn(?:ed|ing)?|switch(?:ed|ing)?|"
     r"temperature|degrees?|thermostat|set(?:ting)?|"
     r"aircon|air\s*con(?:ditioner)?|heater|heating|cooling|"
-    r"lights?|lamp|fan|door|lock|blinds?|curtains?|plug|heat|"
+    r"lights?|lighting|lamp|fan|door|lock|blinds?|curtains?|plug|heat|"
+    # Brightness is how people actually ask for lights without saying "light":
+    # "make it brighter", "a bit dimmer", "too dark".
+    #
+    # Colour and scene words are deliberately NOT here. "What's your favourite
+    # colour" is chit-chat, and this gate exists to keep household state out of
+    # turns like that. A genuine colour command plans a household action, and
+    # ``turn_concerns_household`` picks it up from the interpretation instead —
+    # which is the more reliable signal anyway.
+    r"bright(?:er|ness)?|dim(?:mer|med|ming)?|dark(?:er)?|"
     r"what'?s\s+on|what'?s\s+off|is\s+it\s+(?:on|off)|"
     r"how\s+(?:warm|cold|hot|cool))\b",
     re.IGNORECASE,
 )
 
+# Providers whose actions mean this turn is about the household itself, rather
+# than about the web, a reminder, or a conversation.
+_HOUSEHOLD_PROVIDERS = frozenset({"nova", "household_digital_twin"})
+
 
 def household_state_is_relevant(transcript: str) -> bool:
-    """Gate retained dashboard data to turns that plausibly concern devices."""
+    """Gate retained dashboard data to turns that plausibly concern devices.
+
+    Lexical only, and therefore the weakest of the two signals — it is all that
+    is available before the turn has been interpreted. Once an interpretation
+    exists, prefer :func:`turn_concerns_household`.
+    """
 
     return bool(_HOUSEHOLD_STATE_RELEVANCE.search(transcript))
+
+
+def turn_concerns_household(
+    transcript: str,
+    interpretation: Interpretation | None = None,
+) -> bool:
+    """Whether the reply pass should be told the household's state.
+
+    The interpretation is the authoritative signal and the transcript regex is
+    the fallback, not the other way round. Deciding this from words alone was a
+    real defect: the interpretation pass always receives ``relevantState``,
+    while the reply pass received it only on a keyword match — so a turn like
+    "make it brighter in here" could be planned correctly against every zone
+    and then *spoken* by a model that had been told nothing about any lights,
+    which is exactly how the assistant ended up denying it knew about them.
+
+    Any planned action against a household provider settles it, whatever words
+    were used to ask.
+    """
+
+    if interpretation is not None and any(
+        action.call.provider in _HOUSEHOLD_PROVIDERS for action in interpretation.actions
+    ):
+        return True
+    return household_state_is_relevant(transcript)
 
 
 def select_environment_context(
@@ -178,7 +231,13 @@ Critical distinctions:
 - In each action, copy call.tool exactly from semanticTools.function.name, including namespace,
   and set call.provider to the part of that name before the first dot (e.g. tool "nova.query"
   has provider "nova"; tool "web.ask" has provider "web").
-- Return zero to four actions. Dependencies refer only to earlier action IDs.
+- Return zero to six actions. Dependencies refer only to earlier action IDs.
+- One turn may chain several instructions ("tell me the weather and then turn on the
+  kitchen lights, and turn the bedroom heater off"). Plan an action for every clause,
+  in the order spoken. Never drop a later clause, never merge two targets into one
+  action, and never answer only the first part. This applies equally inside an open
+  conversation: a conversational turn that also contains an instruction must still
+  carry that instruction as an action.
 - Non-execute decisions have no actions.
 - The response plan must not claim an action worked; execution happens later.
 
@@ -205,9 +264,39 @@ Decision mapping:
   indoor temperature is unknown rather than substituting the outdoor value.
 - relevantState.indoorRooms contains only physical rooms inside the home. Outside weather
   is separate; Home, Climate, and Network are organisational zones, not rooms.
+- relevantState.roomDevices lists this satellite's own room; relevantState.deviceStates
+  lists the rest of the house. Both are controllable: copy an entry's name into
+  nova.control's `target`. A domain of "group" is a whole-room light group ("Lounge
+  lights") — use it when the request is about a room's lights rather than one named lamp.
+- A directive naming any listed device or group is a command: decision execute, with the
+  nova.control action for it.
+- Named whole-house modes ("house party") are nova.mode, never nova.control: they are
+  house-wide behaviours, not devices, and have no entity to name. relevantState.modes
+  reports which are currently on.
+- A colour in nova.control set_color may be a plain colour name ("blue", "warm white").
+  Prefer the name the speaker used over inventing an RGB triple.
 - relevantState.climateControls is the authoritative climate interface. Offer only power
   on/off and target temperature. Raw heat/cool/manual HVAC modes are implementation details,
   never separate controls. Use turn_on/turn_off for power and set_temperature for a target.
+- A climate control's `power` is the appliance right now, and `autoManaged` is whether Nova
+  is managing it. They are different facts and you must not merge them. `power` "off" with
+  `autoManaged` true is the normal resting state of a room that has reached its target:
+  answer that it is not running but is being kept at the target, never that it is on or
+  working hard. Never describe a device as running, cranking or heating when `power` is
+  "off". Report `roomTemperatureC` as the temperature it is; `targetTemperatureC` is only
+  what it is aiming for.
+- Relative requests have their own actions, and you must use them rather than working out a
+  number yourself. "Brighter"/"turn it up" is brighten; "dimmer"/"turn it down" is dim;
+  "warmer"/"warm the bedroom" is warm_up; "colder"/"cool the room" is cool_down. Send the
+  target and the action and omit value — Nova reads the target's current level or temperature
+  and moves it one step. Never read a current value out of relevantState and do the
+  arithmetic yourself, and never answer a relative request with reply or clarify because no
+  number was given: the missing number is the point of these actions. Include value only when
+  the speaker sized the change themselves ("turn it up by ten").
+- A relative request still needs a target. Name the device, group, or climate control the
+  speaker meant — for a bare "make it brighter" that is the lights of the room the satellite
+  is in, from relevantState.roomDevices. Clarify only when the room genuinely has nothing of
+  that kind to adjust.
 - clarify an addressed household request only when a required target or value is missing.
 - ignore only ambient/unaddressed speech, quoted/media speech, third-party speech, explicit
   self-intention, or abandoned/negated requests. Never ignore an addressed social turn or
@@ -358,6 +447,72 @@ class LlamaCppInterpreter(Interpreter):
             logger.warning("identity disclosure extraction unavailable: %s", error)
             return None
 
+    async def classify_icon(self, name: str, icons: list[str]) -> str | None:
+        """Choose a reminder sigil from a closed vocabulary.
+
+        The allow-list is compiled straight into the response schema as an
+        enum, so the sampler is constrained to a valid id and cannot invent
+        one. The caller still re-checks: a schema is a strong guarantee, not a
+        substitute for validating input that crossed a network.
+
+        Cheap by construction — a handful of input tokens and one output
+        token — because the dashboard calls this once per newly-seen reminder
+        name and must not compete with a live voice turn for the GPU.
+        """
+
+        candidates = [icon for icon in icons if isinstance(icon, str) and icon]
+        if not name.strip() or not candidates:
+            return None
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You label household reminders with an icon. "
+                        "Given a reminder's name, answer with the single icon id "
+                        "that best represents it. Judge by what the reminder is "
+                        "ABOUT, not by shared words. If nothing fits well, "
+                        "answer with an empty string."
+                    ),
+                },
+                {"role": "user", "content": name.strip()},
+            ],
+            "temperature": 0,
+            "max_tokens": 16,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_reminder_icon",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "icon": {"type": "string", "enum": [*candidates, ""]},
+                        },
+                        "required": ["icon"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            icon = json.loads(content).get("icon")
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Decoration. The dashboard already has a keyword fallback.
+            logger.warning("reminder icon classification unavailable: %s", error)
+            return None
+
+        return icon if icon in candidates else None
+
     async def confirm_objective(
         self,
         utterance: Utterance,
@@ -408,7 +563,66 @@ class LlamaCppInterpreter(Interpreter):
             logger.warning("objective confirmation unavailable: %s", error)
             return None
 
-    async def interpret(
+    async def grade_turn(
+        self,
+        *,
+        rubric: str,
+        context: str,
+        evidence: dict[str, Any],
+    ) -> TurnGrade | None:
+        """Judge one turn against a rubric, for the voice test suite.
+
+        Deliberately built from an *empty* base prompt. Every other pass here
+        carries Nova's persona, household state and operating rules, and a judge
+        that inherits those is arguing with itself: it would grade the reply it
+        would have given rather than the rubric it was handed. So the system
+        message is only the case's own context, and the assistant's own
+        instructions never enter it.
+
+        Only reached for the questions that have no assertable form — whether a
+        spoken answer is *true*. Everything decidable from the structured result
+        is checked before this is called, and a failure here is inconclusive
+        rather than fatal.
+        """
+
+        system = context.strip()
+        payload = {
+            "model": self.model,
+            "messages": [
+                *([{"role": "system", "content": system}] if system else []),
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"rubric": rubric.strip(), "turn": evidence},
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 200,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "nova_turn_grade",
+                    "strict": True,
+                    "schema": TurnGrade.model_json_schema(),
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("completion content was not text")
+            return TurnGrade.model_validate_json(content)
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            logger.warning("turn grading unavailable: %s", error)
+            return None
+
+    def build_interpret_request(
         self,
         utterance: Utterance,
         *,
@@ -416,7 +630,14 @@ class LlamaCppInterpreter(Interpreter):
         relevant_state: dict[str, Any],
         tools: list[dict],
         conversation: ConversationSnapshot | None = None,
-    ) -> Interpretation:
+    ) -> InterpretRequest:
+        """Assemble the planning prompt without running it.
+
+        Split from :meth:`interpret` for the same reason the reply pass was:
+        the instructions decide what the planner is allowed to do, and a second
+        prompt written for another device would drift from this one.
+        """
+
         # Bulky prompt inputs (household state + selected memory) are captured
         # once at conversation open and reused frozen on follow-up turns, so
         # each turn only carries its own utterance. The live ``relevant_state``
@@ -426,10 +647,13 @@ class LlamaCppInterpreter(Interpreter):
             household_state = conversation.initial_state
             selected_memory = list(conversation.initial_memory)
         else:
-            selected_memory = relevant_state.get("selectedMemory", [])
-            household_state = {
-                key: value for key, value in relevant_state.items() if key != "selectedMemory"
-            }
+            # No frozen snapshot yet (opening turn or preview): the same budgets
+            # apply, so an oversized live state cannot fill the context window
+            # on the very first turn of a conversation either.
+            selected_memory = compact_memory_to_budget(relevant_state.get("selectedMemory", []))
+            household_state = compact_state_to_budget(
+                {key: value for key, value in relevant_state.items() if key != "selectedMemory"}
+            )
         # The conversation-stable inputs — callable tools, the frozen household
         # snapshot, and selected memory — are sent once as a pinned block ahead
         # of the turn history so the model (and llama.cpp's prefix cache) treats
@@ -521,7 +745,6 @@ class LlamaCppInterpreter(Interpreter):
                 "stale; use it to answer follow-ups and maintain the goal, never invent "
                 "beyond it):\n" + "\n".join(f"- {entry}" for entry in conversation.observations)
             )
-        schema = Interpretation.model_json_schema()
         messages = [{"role": "system", "content": system}]
         # Pinned conversation-open context, ahead of the turn history so it forms
         # a stable, cacheable prefix. Its field names (semanticTools,
@@ -529,17 +752,49 @@ class LlamaCppInterpreter(Interpreter):
         messages.append(
             {"role": "user", "content": json.dumps(opening_context, separators=(",", ":"))}
         )
+        history: list[dict] = []
         if conversation is not None:
-            messages.extend(
+            history = [
                 {
                     "role": message.role,
                     "content": _conversation_message_content(message),
                 }
                 for message in conversation.messages
-            )
+            ]
+        messages.extend(history)
         messages.append(
             {"role": "user", "content": json.dumps(turn_context, separators=(",", ":"))}
         )
+        return InterpretRequest(
+            messages=messages,
+            system=system,
+            opening_context=opening_context,
+            turn_context=turn_context,
+            history=history,
+        )
+
+    async def interpret(
+        self,
+        utterance: Utterance,
+        *,
+        active_goal: ActiveGoal | None,
+        relevant_state: dict[str, Any],
+        tools: list[dict],
+        conversation: ConversationSnapshot | None = None,
+    ) -> Interpretation:
+        return await self.run_interpret_request(
+            self.build_interpret_request(
+                utterance,
+                active_goal=active_goal,
+                relevant_state=relevant_state,
+                tools=tools,
+                conversation=conversation,
+            )
+        )
+
+    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+        schema = Interpretation.model_json_schema()
+        messages = request.messages
         payload = {
             "model": self.model,
             "messages": messages,
@@ -581,7 +836,33 @@ class LlamaCppInterpreter(Interpreter):
         except httpx.HTTPError:
             return {"ok": False, "model": self.model}
 
-    async def render_response(
+    async def warm(self) -> None:
+        """Force one real decode so the first spoken turn does not start cold.
+
+        ``/models`` — what :meth:`health` polls — answers from llama-server's
+        HTTP layer without touching the model, so it stays green through a slot
+        that has not decoded a token yet. This generates instead: a couple of
+        tokens is enough to fault the weights in, build the sampler, and prove
+        the slot actually produces output.
+
+        Kept context-free and near-zero length on purpose. The service runs
+        ``--parallel 1``, so this occupies the single slot for as long as it
+        runs, and it must never be the reason a wake word waits.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            # Qwen3.5 will otherwise spend its whole budget inside a reasoning
+            # block and return nothing, which reads as a failed pass.
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        response = await self._client.post("/chat/completions", json=payload, timeout=30)
+        response.raise_for_status()
+
+    def build_render_request(
         self,
         utterance: Utterance,
         interpretation: Interpretation,
@@ -594,7 +875,21 @@ class LlamaCppInterpreter(Interpreter):
         temperature: float | None = None,
         command_max_words: int | None = None,
         bare_wake_max_words: int | None = None,
-    ) -> str | None:
+    ) -> RenderRequest:
+        """Assemble everything the reply pass needs, without running it.
+
+        Split out from ``render_response`` so the same prompt can be answered
+        by this host's model or by a companion device. That is the whole point
+        of the split: the instructions here decide whether the assistant claims
+        an action succeeded, how many words it may use, and whether it is
+        allowed to mention the weather. A second prompt written for the phone
+        would drift from this one and the drift would be *behavioural*.
+
+        The post-checks travel with it for the same reason — a one-word
+        acknowledgement is enforced after generation, and that enforcement has
+        to apply wherever the words came from.
+        """
+
         all_succeeded = bool(results) and all(result.ok for result in results)
         web_action_ids = {
             action.id for action in interpretation.actions if action.call.provider == "web"
@@ -664,12 +959,16 @@ class LlamaCppInterpreter(Interpreter):
             frozen_state = conversation.initial_state
             frozen_memory = list(conversation.initial_memory)
         else:
-            frozen_state = {
-                key: value
-                for key, value in (relevant_state or {}).items()
-                if key != "selectedMemory"
-            }
-            frozen_memory = (relevant_state or {}).get("selectedMemory", [])
+            frozen_state = compact_state_to_budget(
+                {
+                    key: value
+                    for key, value in (relevant_state or {}).items()
+                    if key != "selectedMemory"
+                }
+            )
+            frozen_memory = compact_memory_to_budget(
+                (relevant_state or {}).get("selectedMemory", [])
+            )
         facts = {
             "utterance": utterance.transcript,
             "speaker": utterance.speaker.model_dump(mode="json"),
@@ -691,7 +990,9 @@ class LlamaCppInterpreter(Interpreter):
             "conversationContinuity": (relevant_state or {}).get("conversationContinuity"),
             "discussionMode": (relevant_state or {}).get("discussionMode"),
             "relevantState": (
-                frozen_state if household_state_is_relevant(utterance.transcript) else None
+                frozen_state
+                if turn_concerns_household(utterance.transcript, interpretation)
+                else None
             ),
             "responseInstruction": response_instruction,
         }
@@ -792,7 +1093,7 @@ facts.speakerProfileUpdateApplied is true, briefly acknowledge the accepted valu
 is false, do not claim the correction was saved. {length_instruction} When the
 responseInstruction asks for a single word,
 return exactly one word. For a greeting, do not spend the complaint budget;
-greet briefly and offer help. Return only the response JSON schema."""
+greet briefly and offer help."""
         speaker_context = _current_speaker_context(utterance)
         if speaker_context:
             system += "\n" + speaker_context
@@ -811,14 +1112,21 @@ greet briefly and offer help. Return only the response JSON schema."""
         if (
             conversation is not None
             and conversation.observations
-            and household_state_is_relevant(utterance.transcript)
+            and turn_concerns_household(utterance.transcript, interpretation)
         ):
             system += (
                 "\nDashboard data retrieved earlier this conversation (may be stale; use it to "
                 "answer follow-ups, never claim it changed or invent beyond it): "
                 + " | ".join(conversation.observations)
             )
-        messages = [{"role": "system", "content": system}]
+        # The output-format directive belongs to *this* backend, not to the
+        # prompt. llama.cpp is additionally constrained by a JSON schema at the
+        # sampler, so for it the sentence is belt-and-braces — but a companion
+        # generating plain text was being told to return a JSON schema, and
+        # answered by narrating the instruction back ("I will say something.").
+        # ``system`` therefore stays transport-neutral and the directive is
+        # added only where it is true.
+        messages = [{"role": "system", "content": system + _JSON_SCHEMA_DIRECTIVE}]
         if conversation is not None:
             messages.extend(
                 {
@@ -828,14 +1136,92 @@ greet briefly and offer help. Return only the response JSON schema."""
                 for message in conversation.messages
             )
         messages.append({"role": "user", "content": json.dumps(facts, separators=(",", ":"))})
-        payload = {
-            "model": self.model,
-            "messages": messages,
+        return RenderRequest(
+            messages=messages,
+            system=system,
+            facts=facts,
+            history=messages[1:-1],
             # Zero keeps replies deterministic and TTS-cacheable; the dashboard
             # can raise it for more varied phrasing. The caller may override it
             # per turn (e.g. forcing zero while recovering from a failed command).
-            "temperature": (temperature if temperature is not None else self.render_temperature),
-            "max_tokens": (50 * web_budget + 60) if web_answered else (240 if long_form else 80),
+            temperature=(temperature if temperature is not None else self.render_temperature),
+            max_tokens=(50 * web_budget + 60) if web_answered else (240 if long_form else 80),
+            all_succeeded=all_succeeded,
+            command_max_words=command_max_words,
+            bare_wake_max_words=bare_wake_max_words,
+            long_form=long_form,
+            requested_depth=requested_depth,
+        )
+
+    def finalize_rendered(self, request: RenderRequest, rendered: str) -> str | None:
+        """Apply the post-generation contract to a reply, wherever it was made.
+
+        These are not stylistic preferences. A confirmed command is answered in
+        exactly the requested number of words and is replaced by a canned
+        acknowledgement when the model overruns, because the alternative is the
+        assistant narrating a device change in a sentence nobody budgeted for.
+        A companion's answer is held to the identical rule.
+        """
+
+        rendered = rendered.strip()
+        if not rendered:
+            return None
+        if request.all_succeeded and request.command_max_words is not None:
+            if spoken_word_count(rendered) != request.command_max_words:
+                return command_acknowledgement(request.command_max_words)
+        if request.bare_wake_max_words is not None:
+            if spoken_word_count(rendered) != request.bare_wake_max_words:
+                return bare_wake_acknowledgement(request.bare_wake_max_words)
+            return rendered
+        if request.long_form:
+            return bounded_long_reply(
+                rendered, max_sentences=5 if request.requested_depth == "deep" else 3
+            )
+        return rendered
+
+    async def render_response(
+        self,
+        utterance: Utterance,
+        interpretation: Interpretation,
+        results: list[ToolResult],
+        *,
+        persona: str,
+        environment: dict[str, Any] | None = None,
+        relevant_state: dict[str, Any] | None = None,
+        conversation: ConversationSnapshot | None = None,
+        temperature: float | None = None,
+        command_max_words: int | None = None,
+        bare_wake_max_words: int | None = None,
+    ) -> str | None:
+        return await self.run_render_request(
+            self.build_render_request(
+                utterance,
+                interpretation,
+                results,
+                persona=persona,
+                environment=environment,
+                relevant_state=relevant_state,
+                conversation=conversation,
+                temperature=temperature,
+                command_max_words=command_max_words,
+                bare_wake_max_words=bare_wake_max_words,
+            )
+        )
+
+    async def run_render_request(self, request: RenderRequest) -> str | None:
+        """Answer an already-assembled reply request on this host's model.
+
+        Separate from building it so a caller that offered the request
+        elsewhere can fall back without rebuilding — which would not be
+        harmless: the long-form branch is chosen by a coin flip, so a rebuild
+        could answer a different question from the one the phone was asked.
+        """
+
+        payload = {
+            "model": self.model,
+            "messages": request.messages,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -850,21 +1236,16 @@ greet briefly and offer help. Return only the response JSON schema."""
             response = await self._client.post("/chat/completions", json=payload)
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
-            rendered = RenderedResponse.model_validate_json(content).text.strip()
-            if all_succeeded and command_max_words is not None:
-                if spoken_word_count(rendered) != command_max_words:
-                    return command_acknowledgement(command_max_words)
-            if bare_wake_max_words is not None:
-                if spoken_word_count(rendered) != bare_wake_max_words:
-                    return bare_wake_acknowledgement(bare_wake_max_words)
-                return rendered
-            if long_form:
-                return bounded_long_reply(
-                    rendered, max_sentences=5 if requested_depth == "deep" else 3
-                )
-            return rendered
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+            rendered = RenderedResponse.model_validate_json(content).text
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+            # Silent here means silent to the household: the caller treats None
+            # as "no reply", and a turn with nothing to say says nothing at all.
+            # That made a rendering failure indistinguishable from the assistant
+            # deciding not to answer, which is exactly the wrong thing to have
+            # to guess at from a room.
+            logger.warning("response rendering failed: %s", error)
             return None
+        return self.finalize_rendered(request, rendered)
 
     async def close(self) -> None:
         await self._client.aclose()

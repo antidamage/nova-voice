@@ -10,8 +10,9 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal, get_args
 from uuid import uuid4
 
 import httpx
@@ -29,9 +30,38 @@ from nova_voice.audio.runtime import (
 )
 from nova_voice.automation import AutomationLifecycleError, AutomationManager
 from nova_voice.bootstrap import build_service
+from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
+from nova_voice.companion.auth import CompanionAuthenticator
+from nova_voice.companion.compaction import DEFAULT_CONTEXT_TOKENS, compact_for_companion
+from nova_voice.companion.dispatch import dispatch_companion_message
+from nova_voice.companion.ledger import CompanionJobLedger
+from nova_voice.companion.locality import LocalityClassifier
+from nova_voice.companion.presence import presence_from
+from nova_voice.companion.protocol import (
+    SUPPORTED_PROTOCOL_VERSIONS,
+    AuthChallenge,
+    AuthResponse,
+    CompanionHello,
+    HelloAck,
+)
+from nova_voice.companion.protocol import parse_client_message as parse_companion_message
+from nova_voice.companion.protocol import serialize as serialize_companion
+from nova_voice.companion.retention import CompanionRetention
+from nova_voice.companion.router import RouteMode
+from nova_voice.companion.workloads import parse_result as parse_companion_result
 from nova_voice.config import Settings, get_settings
 from nova_voice.diagnostics import page_html, pcm16_wav_base64, pcm16_wav_bytes
-from nova_voice.domain import HandleResult, Utterance
+from nova_voice.domain import (
+    ActiveGoal,
+    Decision,
+    Emotion,
+    HandleResult,
+    Interpretation,
+    SpeakerIdentity,
+    SpeechAct,
+    ToolResult,
+    Utterance,
+)
 from nova_voice.durable.models import (
     AutomationRecord,
     BriefingRecord,
@@ -83,6 +113,8 @@ from nova_voice.service import NovaVoiceService
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.telemetry import StructuralTelemetry
+from nova_voice.training.mode import TrainingMode
+from nova_voice.training.paths import TRAINING_MODE_STATE
 from nova_voice.tts_engines import (
     dashboard_engines_manifest,
     engine_by_id,
@@ -90,6 +122,7 @@ from nova_voice.tts_engines import (
     engine_ids,
 )
 from nova_voice.voice_settings import VoiceSettings, voice_catalog
+from nova_voice.warmth import WarmthKeeper
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +138,187 @@ class VoicePreviewRequest(BaseModel):
     text: str | None = None
     # Ask the language model this specific question instead of a random one.
     question: str | None = None
+
+
+class InterpretationBenchmarkRequest(BaseModel):
+    """One text-only interpretation sample with every elastic input removed."""
+
+    transcript: str = Field(min_length=1, max_length=500)
+    room: str = Field(default="benchmark", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class WorkloadBenchmarkRequest(BaseModel):
+    """One text-only sample of any routed workload, run through both arms.
+
+    The tool-free interpretation harness above could only ever measure one of
+    the five workloads, and only in its easiest shape. Comparing a phone to
+    Iridium on that alone says nothing about the passes that actually carry
+    risk — the ones that plan actions, judge whether a command worked, or
+    decide what gets spoken.
+
+    Nothing here executes. Tools are supplied as a catalogue for the planner to
+    choose from and are never called; tool *results* are supplied as fixture
+    data, so a benchmark can exercise response rendering over a plan that
+    already "ran" without anything in the house moving. Every utterance is
+    marked dry-run, there is no audio in or out, and no household action can
+    result from any request to this endpoint.
+    """
+
+    workload: Literal[
+        "interpret",
+        "render_response",
+        "confirm_objective",
+        "extract_self_profile_update",
+        "classify_icon",
+    ]
+    transcript: str = Field(default="", max_length=2_000)
+    room: str = Field(default="benchmark", pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # interpret
+    tools: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    state: dict[str, Any] = Field(default_factory=dict)
+    history: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    # render_response
+    facts: dict[str, Any] = Field(default_factory=dict)
+    tool_results: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    interpretation: dict[str, Any] | None = None
+    # confirm_objective
+    pending: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    # classify_icon
+    name: str = Field(default="", max_length=200)
+    icons: list[str] = Field(default_factory=list, max_length=64)
+
+
+def _benchmark_interpretation(raw: dict[str, Any] | None) -> Interpretation:
+    """The interpretation a rendering sample is answering.
+
+    Rendering is judged on whether it claims something happened that did not,
+    so the plan it is rendering has to be real rather than empty. A fixture
+    supplies one; the default is the neutral reply case.
+    """
+
+    if raw:
+        return Interpretation.model_validate(raw)
+    return Interpretation(
+        emotion=Emotion(confidence=0.5, intensity=0.1),
+        speech_act=SpeechAct.QUESTION,
+        addressed_probability=0.9,
+        decision=Decision.REPLY,
+        confidence=0.8,
+        active_goal=ActiveGoal(),
+    )
+
+
+async def _run_benchmark_workload(
+    service: Any,
+    interpreter: Any,
+    payload: WorkloadBenchmarkRequest,
+    utterance: Utterance,
+) -> Any:
+    """Dispatch one sample down the same routed path a voice turn would use."""
+
+    if payload.workload == "interpret":
+        return await interpreter.interpret(
+            utterance,
+            active_goal=None,
+            relevant_state=payload.state,
+            tools=payload.tools,
+            conversation=None,
+        )
+    if payload.workload == "render_response":
+        return await interpreter.render_response(
+            utterance,
+            _benchmark_interpretation(payload.interpretation),
+            [ToolResult.model_validate(entry) for entry in payload.tool_results],
+            persona=payload.facts.get("persona", "nova"),
+            relevant_state=payload.state,
+            conversation=None,
+        )
+    if payload.workload == "confirm_objective":
+        return await service._routed_confirm_objective(utterance, payload.pending)
+    if payload.workload == "extract_self_profile_update":
+        return await service._routed_self_profile_update(utterance)
+    if payload.workload == "classify_icon":
+        allowed = [icon for icon in payload.icons if icon]
+        if not payload.name or not allowed:
+            raise HTTPException(status_code=400, detail="name and icons are required")
+        router = getattr(service, "companion_router", None)
+        classify = getattr(interpreter, "classify_icon", None)
+        if not callable(classify):
+            raise HTTPException(status_code=503, detail="classify_icon is unavailable")
+        if router is None:
+            return await classify(payload.name, allowed)
+        outcome = await router.run(
+            "classify_icon",
+            {"name": payload.name, "icons": allowed},
+            lambda: classify(payload.name, allowed),
+            parse=lambda body: parse_companion_result("classify_icon", body),
+        )
+        icon = outcome.value
+        if hasattr(icon, "icon"):
+            icon = icon.icon
+        # Re-checked against the vocabulary that was sent, exactly as the
+        # production handler does — a benchmark that scored an unvalidated
+        # answer would flatter the phone.
+        return icon if icon in allowed else None
+    raise HTTPException(status_code=400, detail="unknown workload")
+
+
+def _benchmark_result_payload(workload: str, result: Any) -> Any:
+    """Flatten a workload's answer into something a scorer can compare.
+
+    Deliberately not a verdict. This endpoint reports what came back; whether
+    it was right is the harness's judgement against a fixture's expectation,
+    and keeping those apart is what stops the measured system from grading
+    itself.
+    """
+
+    # `classify_icon` first, because None is one of its real answers rather
+    # than an absent one: "no glyph fits" is a verdict the dashboard renders,
+    # and collapsing it to a null result would score a correct refusal as a
+    # missing one.
+    if workload == "classify_icon":
+        return {"icon": result}
+    if result is None:
+        return None
+    if workload == "interpret":
+        return {
+            "emotion": result.emotion.label,
+            "speechAct": result.speech_act,
+            "addressedProbability": result.addressed_probability,
+            "decision": result.decision,
+            "confidence": result.confidence,
+            "goalSummary": result.active_goal.summary,
+            "goalStatus": result.active_goal.status,
+            "actions": [
+                {
+                    "provider": action.call.provider,
+                    "tool": action.call.tool,
+                    "arguments": action.call.arguments,
+                }
+                for action in sorted(result.actions, key=lambda item: item.order)
+            ],
+        }
+    if workload == "render_response":
+        return {"text": result}
+    if workload == "confirm_objective":
+        return {
+            "allConfirmed": result.all_confirmed,
+            "items": [
+                {
+                    "target": item.target,
+                    "confirmed": item.confirmed,
+                    "reason": item.reason,
+                }
+                for item in result.items
+            ],
+        }
+    if workload == "extract_self_profile_update":
+        return {
+            "name": result.name,
+            "pronouns": result.pronouns,
+            "evidence": result.evidence,
+        }
+    return None
 
 
 class EngineSwitchRequest(BaseModel):
@@ -295,12 +509,34 @@ def _diagnostic_turn_payload(
         "results": [item.model_dump(mode="json") for item in result.results],
         "responseText": result.response_text,
         "responseToneInstruction": result.response_tone_instruction,
+        # Every stage and phase of the turn in one map: the audio-side stages
+        # (denoise/speaker/stt/service/tts) and the service-side phases inside
+        # `service` (providerContext/interpretation/policy/execution/response).
+        # The suite asserts on these so a slow turn is attributed to a layer
+        # rather than guessed at, and `stageMs` adds the turn machine's own
+        # view so a stage that never ran is visible as absent rather than zero.
         "timingsMs": {**result.timings_ms, **turn.timings_ms},
+        "stageMs": (
+            {record.stage.value: record.elapsed_ms for record in result.turn_trace.stages}
+            if result.turn_trace is not None
+            else {}
+        ),
         "responseAudioWavBase64": (
             pcm16_wav_base64(turn.response_pcm16, turn.response_sample_rate)
             if include_audio
             and turn.response_pcm16 is not None
             and turn.response_sample_rate is not None
+            else None
+        ),
+        "speaker": (result.speaker.model_dump(mode="json") if result.speaker else None),
+        "dryRun": result.dry_run,
+        # The exact household requests this turn built and withheld. A test
+        # asserts on these rather than on the spoken text, because they are what
+        # would actually have happened.
+        "dryRunRequests": [item.model_dump(mode="json") for item in result.dry_run_requests],
+        "turnTrace": (
+            result.turn_trace.model_dump(mode="json", by_alias=True)
+            if result.turn_trace is not None
             else None
         ),
     }
@@ -319,7 +555,22 @@ def create_app(
         frame_ms=selected_settings.tts_frame_ms,
     )
     janitor_task: asyncio.Task | None = None
+    warmth_keeper: WarmthKeeper | None = None
     monitor = VoiceMonitor()
+    # The companion channel reuses the household CA the mTLS listener already
+    # trusts. With no CA configured the authenticator refuses every peer, which
+    # is the correct direction to fail.
+    companion_authenticator = CompanionAuthenticator(
+        selected_settings.tls_ca_path.read_bytes()
+        if selected_settings.tls_ca_path and selected_settings.tls_ca_path.exists()
+        else None,
+        nonce_ttl_seconds=selected_settings.companion_auth_nonce_ttl_seconds,
+        allowed_identities=frozenset(selected_settings.companion_allowed_identities),
+    )
+    companion_locality = LocalityClassifier.from_settings(
+        selected_settings.companion_home_subnets,
+        selected_settings.companion_tailnet_subnets or None,
+    )
     structural_telemetry = StructuralTelemetry(selected_settings.structural_telemetry_path)
     multimodal_inputs = LocalMultimodalInputProvider(
         selected_settings.multimodal_data_path,
@@ -413,7 +664,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        nonlocal janitor_task, selected_audio
+        nonlocal janitor_task, selected_audio, warmth_keeper
         await selected_service.initialize()
         if selected_settings.audio_enabled and selected_audio is None:
             selected_audio = build_audio_runtime(selected_settings, selected_service)
@@ -422,6 +673,17 @@ def create_app(
             # rather than lazily on the first addressed turn where it races the
             # live audio path and NeMo's non-reentrant restore.
             await selected_audio.warmup()
+        # Recognition is warm by the line above; the *generative* half — the
+        # interpretation model's slot and the TTS engine's voice weights — is
+        # not, and on the trained engine that is a ~20 s bill the first spoken
+        # reply pays. The keeper pays it here instead, then holds it paid.
+        training_mode = TrainingMode(Path(TRAINING_MODE_STATE))
+        warmth_keeper = WarmthKeeper(
+            interpreter=getattr(selected_service, "interpreter", None),
+            speech=getattr(selected_audio, "tts", None) if selected_audio else None,
+            training_active=lambda: training_mode.active,
+            interval_seconds=selected_settings.warmth_interval_seconds,
+        )
         attach_monitor()
         try:
             await collect_voice_settings()
@@ -431,8 +693,52 @@ def create_app(
             logger.warning("Nova voice settings unavailable during startup", exc_info=True)
         janitor_task = asyncio.create_task(selected_service.store.run_janitor())
         probe_task = asyncio.create_task(upgrade_probe_watchdog())
+        # Started as a task, not awaited: the first pass drives a real
+        # synthesis, and blocking startup on it would keep the satellites
+        # unable to connect for its duration — trading a slow first reply for
+        # an unreachable service, which is strictly worse.
+        warmth_task = asyncio.create_task(warmth_keeper.run())
+        # Companion payload expiry. Separate from the store's own janitor
+        # because it is not only deletion: it strips content references off
+        # finished jobs and settled approvals while leaving their structural
+        # history, which nothing generic can do without knowing which fields
+        # are content.
+        retention = (
+            CompanionRetention(selected_service.durable_store)
+            if selected_service.durable_store is not None
+            else None
+        )
+        retention_task = asyncio.create_task(retention.run()) if retention else None
+        # Reconnect reconciliation. Bound here because it needs both halves —
+        # the session manager to know a device has arrived, and the durable
+        # store to know what it was holding — and neither owns the other.
+        companion_sessions = getattr(selected_service, "companion_sessions", None)
+        if selected_service.durable_store is not None and companion_sessions is not None:
+            companion_ledger = CompanionJobLedger(selected_service.durable_store)
+
+            async def reconcile_companion(
+                session_id: str, claimed: tuple[str, ...]
+            ) -> tuple[str, ...]:
+                _, unknown = await companion_ledger.reconcile(
+                    session_id=session_id, device_job_ids=claimed
+                )
+                return unknown
+
+            companion_sessions.bind_reconciler(reconcile_companion)
+        companion_ping_task = (
+            asyncio.create_task(companion_sessions.ping_loop())
+            if companion_sessions is not None
+            else None
+        )
         yield
+        warmth_task.cancel()
         probe_task.cancel()
+        if retention is not None:
+            retention.stop()
+        if retention_task is not None:
+            retention_task.cancel()
+        if companion_ping_task is not None:
+            companion_ping_task.cancel()
         selected_service.store.stop()
         if janitor_task:
             await janitor_task
@@ -465,6 +771,16 @@ def create_app(
         }
         payload["ok"] = bool(payload["ok"] and payload["audio"]["ok"])
         payload["multimodal"] = await multimodal_inputs.health()
+        # Reported alongside, never folded into, `ok`. They answer different
+        # questions: `ok` is "are the services up", warmth is "would a wake word
+        # be answered promptly right now". A stack that is up but cold is not a
+        # fault, and a stack that is warm but whose provider link is down is not
+        # fine — collapsing the two loses exactly the distinction that made a
+        # slow first reply indistinguishable from a broken one.
+        payload["warmth"] = warmth_keeper.health() if warmth_keeper is not None else {
+            "ok": True,
+            "state": "unknown",
+        }
         return payload
 
     @app.post("/v1/communications/{draft_id}/preview")
@@ -989,6 +1305,157 @@ def create_app(
         if selected_service.durable_store is None or selected_service.authority is None:
             raise HTTPException(status_code=503, detail="Durable agent administration is disabled")
         return selected_service.durable_store, selected_service.authority
+
+    @app.get("/v1/companion/status")
+    async def companion_status() -> dict:
+        """Everything an operator needs to explain the companion's behaviour.
+
+        Deliberately carries no certificate material, no prompt, and no job
+        payload — only structural facts. A companion may be handling personal
+        context, and a status endpoint is exactly the sort of thing that ends
+        up proxied to a browser and logged.
+
+        Reports a complete, honest answer when nothing is connected rather than
+        erroring, because "no companion" is the normal state.
+        """
+
+        sessions = selected_service.companion_sessions
+        router = selected_service.companion_router
+        snapshot = sessions.snapshot() if sessions is not None else None
+        payload: dict = {
+            # The router's live state, not the configured one: both switches
+            # can be moved at runtime, and a status endpoint that reported the
+            # file would contradict the behaviour it is describing.
+            "enabled": router.enabled if router is not None else selected_settings.companion_enabled,
+            "forceLocal": (
+                router.force_local
+                if router is not None
+                else selected_settings.companion_force_local
+            ),
+            "connected": bool(snapshot and snapshot.connected),
+            "localityConfigured": companion_locality.configured,
+            "authConfigured": companion_authenticator.configured,
+        }
+        # Published unconditionally, including when nothing is connected,
+        # because "unknown" is the answer in that case and a caller needs to
+        # receive it rather than infer it from an absent field. A disconnect is
+        # never reported as `away`.
+        presence = presence_from(
+            session_locality=snapshot.locality if snapshot else None,
+            session_connected=bool(snapshot and snapshot.connected),
+        )
+        payload["presence"] = {
+            "state": presence.state,
+            "source": presence.source,
+            "ageSeconds": presence.age_seconds,
+            "detail": presence.detail,
+            "actionable": presence.actionable,
+        }
+        if snapshot is not None and snapshot.connected:
+            payload |= {
+                "identity": snapshot.identity,
+                "roles": list(snapshot.roles),
+                "locality": snapshot.locality,
+                "tier": snapshot.tier.value,
+                "tierReason": snapshot.tier_reason,
+                "appVersion": snapshot.app_version,
+                "osVersion": snapshot.os_version,
+                "protocolSchemas": list(snapshot.schema_versions),
+                "workloads": sorted(snapshot.workloads),
+                "personalTools": sorted(snapshot.personal_tools),
+                "telemetryAgeSeconds": snapshot.telemetry_age_seconds,
+                "lastHeartbeatAgeSeconds": snapshot.last_heartbeat_age_seconds,
+                "activeAttempts": snapshot.active_attempts,
+                "contextTokens": snapshot.hot_context_tokens,
+            }
+        if router is not None:
+            payload["routes"] = {
+                workload: {
+                    "mode": route.mode,
+                    "locality": route.locality,
+                    "minTier": route.min_tier.value,
+                    "deadlineSeconds": route.deadline_seconds,
+                    # Why this workload would or would not be offered right
+                    # now, in the operator's words rather than as a flag.
+                    "eligibility": router.eligibility(workload).reason,
+                }
+                for workload, route in router.routes().items()
+            }
+            payload["counters"] = router.counters()
+            # Latency per pass, split by where the work ran. The arms are timed
+            # separately so a fallback's failed attempt is not charged to the
+            # voice server.
+            payload["timings"] = router.timings()
+            payload["comparing"] = sorted(router.comparing())
+            # Both answers, when comparison mode is on. Model output, so it is
+            # bounded and it is the one part of this endpoint that carries
+            # household content — which is why it appears only while an
+            # operator has deliberately switched comparison on.
+            payload["comparisons"] = router.comparisons()
+        return payload
+
+    @app.post("/v1/companion/routing")
+    async def set_companion_routing(payload: dict) -> dict:
+        """The rollback switches, without a restart.
+
+        ``force_local`` is the plan's second-bluntest rollback lever, and until
+        now the only way to pull it was to edit the environment file and
+        restart the whole voice stack — on a live household, to turn off a
+        feature that is misbehaving. That is the wrong tool for an incident.
+
+        It is also what makes the routing measurable. Comparing companion
+        against local by *disconnecting the phone* is not a control: the phone
+        reconnects on its own, silently, and the samples afterwards are a
+        mixture with no way to tell which is which. This settles it at the
+        router, where the decision is actually made.
+
+        Runtime only, deliberately: a restart returns to whatever the
+        configuration says, so an override made during an incident cannot
+        quietly become the permanent state nobody remembers choosing.
+        """
+
+        router = selected_service.companion_router
+        if router is None:
+            raise HTTPException(status_code=503, detail="companion routing is not configured")
+
+        applied: dict[str, bool | str] = {}
+        for key, setter in (
+            ("forceLocal", router.set_force_local),
+            ("enabled", router.set_enabled),
+        ):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+            setter(value)
+            applied[key] = value
+        modes = payload.get("routes")
+        if modes is not None:
+            if not isinstance(modes, dict):
+                raise HTTPException(status_code=400, detail="routes must be an object")
+            known = router.routes()
+            for workload, mode in modes.items():
+                if workload not in known:
+                    raise HTTPException(status_code=400, detail=f"unknown workload: {workload!r}")
+                if mode not in get_args(RouteMode):
+                    raise HTTPException(status_code=400, detail=f"unknown route mode: {mode!r}")
+                router.override(workload, mode=mode)
+                applied[f"routes.{workload}"] = mode
+
+
+        if not applied:
+            raise HTTPException(
+                status_code=400,
+                detail="supply at least one of forceLocal, enabled, routes",
+            )
+        logger.info("companion routing overridden at runtime: %s", applied)
+        return {
+            "applied": applied,
+            "eligibility": {
+                workload: router.eligibility(workload).reason for workload in router.routes()
+            },
+        }
 
     @app.get("/v1/agent/administration")
     async def agent_administration(audit_limit: int = 100) -> dict:
@@ -1620,6 +2087,69 @@ def create_app(
     # switched off its own status and stop endpoints. They are served by
     # services/training_api, which holds no models and stays up throughout.
 
+    @app.post("/v1/classify-icon")
+    async def classify_reminder_icon(payload: dict) -> dict:
+        """Pick a reminder sigil for the dashboard's reminder icon bar.
+
+        The dashboard cannot call the LLM directly: llama-server runs with
+        ``--host 127.0.0.1`` and ``IPAddressAllow=localhost``, deliberately, so
+        the model is not reachable from the LAN. This proxies one small,
+        bounded classification over that boundary without widening it.
+
+        ``icons`` is the caller's allow-list. It becomes the response schema's
+        enum AND is re-checked here, so an answer this endpoint cannot vouch
+        for comes back as ``null`` rather than as an id the dashboard would
+        fail to render.
+        """
+
+        name = payload.get("name")
+        icons = payload.get("icons")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        if not isinstance(icons, list) or not icons:
+            raise HTTPException(status_code=400, detail="icons must be a non-empty list")
+
+        allowed = [icon for icon in icons if isinstance(icon, str) and icon]
+        if not allowed:
+            raise HTTPException(status_code=400, detail="icons must contain strings")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        classify = getattr(interpreter, "classify_icon", None)
+        if not callable(classify):
+            return {"icon": None}
+
+        router = selected_service.companion_router
+        if router is None:
+            icon = await classify(name, allowed)
+            return {"icon": icon if icon in allowed else None}
+
+        # The first workload actually routed off this host. Chosen to be first
+        # because it is the cheapest thing to get wrong: it runs outside the
+        # spoken turn, the dashboard already treats None as an ordinary answer,
+        # and a bad result costs a wrong glyph rather than a wrong action in
+        # the house. With no companion connected the router runs `local` and
+        # this behaves exactly as it did before.
+        outcome = await router.run(
+            "classify_icon",
+            {"name": name, "icons": allowed},
+            lambda: classify(name, allowed),
+            parse=lambda payload: parse_companion_result("classify_icon", payload),
+        )
+        icon = outcome.value
+        # The companion answers with the parsed model; the local path answers
+        # with a bare string. Both are re-checked against the vocabulary that
+        # was sent, because a schema is not a substitute for validating what
+        # came back over a network.
+        if hasattr(icon, "icon"):
+            icon = icon.icon
+        logger.info(
+            "classify_icon resolved source=%s reason=%s elapsed_ms=%s",
+            outcome.source,
+            outcome.reason,
+            outcome.elapsed_ms,
+        )
+        return {"icon": icon if icon in allowed else None}
+
     @app.post("/v1/settings/refresh")
     async def refresh_voice_settings() -> dict:
         try:
@@ -1644,6 +2174,18 @@ def create_app(
             "agent": agent.model_dump(mode="json", by_alias=True),
             "voice": voice.model_dump(mode="json", by_alias=True),
         }
+
+    @app.delete("/v1/conversations")
+    async def end_conversations() -> dict:
+        """End every open conversation and drop the frozen context behind it.
+
+        Called when the dashboard's transcript log is cleared, so clearing the
+        visible record also clears what the assistant is still reasoning from.
+        """
+
+        if selected_audio is None:
+            return {"ok": True, "endedConversations": 0}
+        return {"ok": True, "endedConversations": selected_audio.end_conversations()}
 
     @app.get("/diagnostics", response_class=HTMLResponse, include_in_schema=False)
     async def diagnostics_page() -> HTMLResponse:
@@ -1712,6 +2254,285 @@ def create_app(
         if turn is None:
             raise HTTPException(status_code=422, detail="No transcript was produced")
         return _diagnostic_turn_payload(turn)
+
+    @app.post("/v1/test/turn", include_in_schema=False)
+    async def test_turn(
+        request: Request,
+        satellite_id: str = "test-harness",
+        room_id: str = "lounge",
+        wake_detected: bool = False,
+        dry_run: bool = True,
+        speaker_name: str | None = None,
+    ) -> dict:
+        """Inject a synthesized speech clip as if a satellite had captured it.
+
+        The voice test suite drives this: it plays no audio and opens no
+        microphone, but the PCM goes through exactly the path a real satellite's
+        audio takes — STT, wake matching, echo defence, dedup, speaker
+        recognition, interpretation, policy, execution, rendering. Only the
+        outbound household mutation is withheld, and only when ``dry_run``.
+
+        ``speaker_name`` is the test-voice override: it pins the turn's identity
+        to a recognized household speaker so the suite can run from a
+        synthesized voice the profile store has never heard, in either training
+        mode.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+        if selected_audio is None:
+            raise HTTPException(status_code=503, detail="Audio inference is disabled")
+        for label, value in (("satellite", satellite_id), ("room", room_id)):
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value.strip()) is None:
+                raise HTTPException(status_code=422, detail=f"Invalid test {label} identifier")
+        content_type = request.headers.get("content-type", "").casefold()
+        if not (
+            content_type.startswith("audio/l16")
+            or content_type.startswith("application/octet-stream")
+        ):
+            raise HTTPException(status_code=415, detail="Expected mono 16 kHz PCM16 audio")
+        maximum_bytes = selected_settings.diagnostics_max_audio_seconds * SAMPLE_RATE * 2
+        payload = bytearray()
+        async for chunk in request.stream():
+            payload.extend(chunk)
+            if len(payload) > maximum_bytes:
+                raise HTTPException(status_code=413, detail="Test clip is too long")
+        if len(payload) < SAMPLE_RATE * 2 // 5 or len(payload) % 2:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide at least 200 ms of complete PCM16 samples",
+            )
+        override: SpeakerIdentity | None = None
+        if speaker_name:
+            override = SpeakerIdentity(
+                status="recognized",
+                template_id="test-harness",
+                person_id=f"test:{speaker_name}",
+                display_name=speaker_name,
+                confidence=1.0,
+            )
+        try:
+            turn = await selected_audio.process_pcm(
+                satellite_id=satellite_id.strip(),
+                room_id=room_id.strip(),
+                pcm16=bytes(payload),
+                wake_detected=wake_detected,
+                dashboard_foreground=False,
+                dry_run=dry_run,
+                speaker_override=override,
+            )
+        except InterpretationError as error:
+            raise HTTPException(
+                status_code=503, detail="Local interpretation model unavailable"
+            ) from error
+        if turn is None:
+            # A dropped turn is a legitimate, assertable outcome — the negative
+            # cases in the suite expect exactly this — so report why rather than
+            # failing the request.
+            return {"ok": True, "dropped": True, "dryRun": dry_run}
+        return _diagnostic_turn_payload(turn, include_audio=False)
+
+    @app.post("/v1/test/interpretation", include_in_schema=False)
+    async def test_interpretation(payload: InterpretationBenchmarkRequest) -> dict:
+        """Measure only the real routed interpretation pass, without tools.
+
+        Unlike ``/v1/test/turn``, this deliberately excludes audio, provider
+        context, conversation history, memory, tool schemas, policy, execution,
+        rendering and TTS. It exists so a companion benchmark can distinguish
+        model/prompt performance from the rest of a voice turn. The ordinary
+        mTLS listener still protects it, and the test-harness switch remains a
+        second explicit gate.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        build_request = getattr(interpreter, "build_interpret_request", None)
+        interpret = getattr(interpreter, "interpret", None)
+        if not callable(build_request) or not callable(interpret):
+            raise HTTPException(status_code=503, detail="Interpretation is unavailable")
+
+        utterance = Utterance.text(
+            payload.transcript.strip(),
+            room_id=payload.room,
+            satellite_id="interpretation-benchmark",
+            wake_detected=True,
+            dry_run=True,
+        )
+        request = build_request(
+            utterance,
+            active_goal=None,
+            relevant_state={},
+            tools=[],
+            conversation=None,
+        )
+        if request is None:
+            raise HTTPException(status_code=503, detail="Interpretation prompt is unavailable")
+
+        sessions = getattr(selected_service, "companion_sessions", None)
+        snapshot = sessions.snapshot() if sessions is not None else None
+        context_tokens = (
+            snapshot.hot_context_tokens
+            if snapshot is not None and snapshot.hot_context_tokens
+            else DEFAULT_CONTEXT_TOKENS
+        )
+        compacted = compact_for_companion(
+            instructions=request.system,
+            tools=[],
+            state={},
+            memory=[],
+            history=[],
+            context_tokens=context_tokens,
+        )
+        companion_payload = compacted.as_payload() | {"turn": request.turn_context}
+
+        router = getattr(selected_service, "companion_router", None)
+        comparisons_before = router.comparisons() if router is not None else []
+        previous_at = comparisons_before[-1].get("at") if comparisons_before else None
+        started = time.perf_counter()
+        result = await interpret(
+            utterance,
+            active_goal=None,
+            relevant_state={},
+            tools=[],
+            conversation=None,
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+
+        comparison = None
+        if router is not None:
+            latest = router.comparisons()
+            candidate = latest[-1] if latest else None
+            if (
+                candidate is not None
+                and candidate.get("workload") == "interpret"
+                and candidate.get("at") != previous_at
+            ):
+                comparison = candidate
+
+        arms_ms = None
+        winner = None
+        if comparison is not None:
+            arms_ms = {
+                "companion": (comparison.get("companion") or {}).get("elapsedMs"),
+                "local": (comparison.get("local") or {}).get("elapsedMs"),
+            }
+            winner = comparison.get("spoken")
+
+        local_prompt = json.dumps(request.messages, separators=(",", ":"), default=str)
+        device_prompt = json.dumps(companion_payload, separators=(",", ":"), default=str)
+        return {
+            "elapsedMs": elapsed_ms,
+            "armsMs": arms_ms,
+            "winner": winner,
+            "input": {
+                "transcriptChars": len(utterance.transcript),
+                "toolsOffered": 0,
+                "stateFields": 0,
+                "memoryEntries": 0,
+                "historyMessages": 0,
+                "localPromptBytes": len(local_prompt.encode("utf-8")),
+                "companionPayloadBytes": len(device_prompt.encode("utf-8")),
+                "companionEstimatedTokens": compacted.report.used_tokens,
+                "companionContextTokens": context_tokens,
+                "compaction": compacted.report.as_dict(),
+            },
+            "result": {
+                "emotion": result.emotion.label,
+                "speechAct": result.speech_act,
+                "decision": result.decision,
+                "confidence": result.confidence,
+                "goalStatus": result.active_goal.status,
+                "actions": len(result.actions),
+            },
+        }
+
+    @app.post("/v1/test/workload", include_in_schema=False)
+    async def test_workload(payload: WorkloadBenchmarkRequest) -> dict:
+        """Run one sample of any routed workload through both arms.
+
+        Uses the service's own routed paths rather than reimplementing them, so
+        what a benchmark measures is what a voice turn would actually do —
+        including the router's eligibility rules, its whole-plan rejection of
+        unoffered tools, and its fallback to Iridium. A harness that called the
+        model directly would produce faster and completely unrepresentative
+        numbers.
+
+        Never executes a tool, never captures audio, never speaks.
+        """
+
+        if not selected_settings.test_harness_enabled:
+            raise HTTPException(status_code=404, detail="The voice test harness is disabled")
+
+        interpreter = getattr(selected_service, "interpreter", None)
+        if interpreter is None:
+            raise HTTPException(status_code=503, detail="Interpretation is unavailable")
+
+        router = getattr(selected_service, "companion_router", None)
+        comparisons_before = router.comparisons() if router is not None else []
+        previous_at = comparisons_before[-1].get("at") if comparisons_before else None
+
+        utterance = Utterance.text(
+            payload.transcript.strip() or "benchmark",
+            room_id=payload.room,
+            satellite_id="workload-benchmark",
+            wake_detected=True,
+            # Non-negotiable. Everything downstream that could touch a device
+            # keys off this, and a benchmark that ran a plan for real would
+            # turn a measurement into a household action.
+            dry_run=True,
+        )
+
+        started = time.perf_counter()
+        result: Any
+        try:
+            result = await _run_benchmark_workload(
+                selected_service, interpreter, payload, utterance
+            )
+        except HTTPException:
+            raise
+        except Exception as error:  # noqa: BLE001 - reported, not swallowed
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+
+        arms_ms = None
+        winner = None
+        rejection = None
+        if router is not None:
+            latest = router.comparisons()
+            candidate = latest[-1] if latest else None
+            if (
+                candidate is not None
+                and candidate.get("workload") == payload.workload
+                and candidate.get("at") != previous_at
+            ):
+                arms_ms = {
+                    "companion": (candidate.get("companion") or {}).get("elapsedMs"),
+                    "local": (candidate.get("local") or {}).get("elapsedMs"),
+                }
+                winner = candidate.get("spoken")
+                rejection = (candidate.get("companion") or {}).get("reason")
+
+        return {
+            "workload": payload.workload,
+            "elapsedMs": elapsed_ms,
+            "armsMs": arms_ms,
+            "winner": winner,
+            "companionReason": rejection,
+            "input": {
+                "transcriptChars": len(utterance.transcript),
+                "toolsOffered": len(payload.tools),
+                "stateFields": len(payload.state),
+                "historyMessages": len(payload.history),
+                "toolResults": len(payload.tool_results),
+                "pending": len(payload.pending),
+                "icons": len(payload.icons),
+            },
+            # Returned raw so the harness scores it rather than trusting a
+            # summary shaped by the thing being measured.
+            "result": _benchmark_result_payload(payload.workload, result),
+        }
 
     @app.websocket("/v1/diagnostics/stream")
     async def diagnostics_stream(websocket: WebSocket) -> None:
@@ -1881,6 +2702,205 @@ def create_app(
         finally:
             await selected_audio.stt.cancel_stream(stream_id)
 
+    async def bind_satellite_identity(websocket: WebSocket, hello: SatelliteHello) -> bool:
+        """Prove a satellite holds the identity it announced. True to continue.
+
+        Same problem as the companion channel: the mTLS listener proves a peer
+        holds *a* household certificate, not that it holds the one matching the
+        ``satelliteId`` in its hello. Until this, any household certificate
+        could claim to be any satellite.
+
+        The exchange is opt-in by the client so a deployed fleet keeps working
+        through the rollout. A client that advertises ``identityProof`` gets
+        challenged before it is accepted; one that does not is admitted only
+        while ``companion_allow_unbound_satellites`` is set, and every such
+        admission is logged so the remaining unbound clients are visible.
+
+        Browser satellites are exempt by construction: a browser cannot present
+        a client certificate at all, which is why the dashboard relays them
+        under its own identity.
+        """
+
+        if hello.is_browser:
+            return True
+        if not hello.capabilities.identity_proof:
+            if selected_settings.companion_allow_unbound_satellites:
+                logger.info(
+                    "satellite admitted without identity proof id=%s client=%s "
+                    "(migration switch is on)",
+                    hello.satellite_id,
+                    hello.client,
+                )
+                return True
+            logger.warning(
+                "satellite refused: no identity proof and unbound clients are "
+                "disabled id=%s",
+                hello.satellite_id,
+            )
+            await websocket.close(code=4003, reason="Identity proof required")
+            return False
+
+        nonce = companion_authenticator.issue_nonce()
+        await websocket.send_text(
+            json.dumps(
+                serialize_companion(
+                    AuthChallenge(
+                        nonce=nonce,
+                        supportedVersions=list(SUPPORTED_PROTOCOL_VERSIONS),
+                        expiresAt=datetime.now(UTC)
+                        + timedelta(seconds=selected_settings.companion_auth_nonce_ttl_seconds),
+                    )
+                )
+            )
+        )
+        try:
+            response = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+        except (TimeoutError, ValueError) as error:
+            logger.warning(
+                "satellite identity proof was not readable id=%s error=%s",
+                hello.satellite_id,
+                type(error).__name__,
+            )
+            await websocket.close(code=4003, reason="Identity proof required")
+            return False
+        if not isinstance(response, AuthResponse):
+            await websocket.close(code=4003, reason="Expected an auth response")
+            return False
+        try:
+            companion_authenticator.authenticate(
+                nonce=nonce,
+                protocol_version=response.protocol_version,
+                # The identity being bound is the one the *satellite* hello
+                # announced, not the one the auth frame claims, so a valid
+                # signature over a different name cannot slip through.
+                announced_id=hello.satellite_id,
+                roles=list(response.roles),
+                certificate_chain=list(response.certificate_chain),
+                signature=response.signature,
+            )
+        except CompanionAuthenticationError as error:
+            logger.warning(
+                "satellite identity rejected id=%s reason=%s", hello.satellite_id, error
+            )
+            await websocket.close(code=4003, reason="Authentication failed")
+            return False
+        logger.info("satellite identity bound id=%s", hello.satellite_id)
+        return True
+
+    @app.websocket("/v1/companion")
+    async def companion_socket(websocket: WebSocket) -> None:
+        """The companion channel: jobs out, results and tool requests back.
+
+        Authentication happens *before* the session is registered. Until the
+        peer has proved it holds the key for the identity it announced, it can
+        do nothing except answer the challenge — no hello, no telemetry, no
+        job traffic. Locality is then derived from the peer address rather
+        than from anything the device says about itself.
+        """
+
+        sessions = selected_service.companion_sessions
+        if sessions is None or not selected_settings.companion_enabled:
+            await websocket.close(code=1013, reason="Companion channel is disabled")
+            return
+        await websocket.accept()
+        session = None
+        stage = "authenticating"
+        try:
+            async def send(payload: dict) -> None:
+                await websocket.send_text(json.dumps(payload))
+
+            nonce = companion_authenticator.issue_nonce()
+            await send(
+                serialize_companion(
+                    AuthChallenge(
+                        nonce=nonce,
+                        supportedVersions=list(SUPPORTED_PROTOCOL_VERSIONS),
+                        expiresAt=datetime.now(UTC)
+                        + timedelta(seconds=selected_settings.companion_auth_nonce_ttl_seconds),
+                    )
+                )
+            )
+            auth = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+            if not isinstance(auth, AuthResponse):
+                await websocket.close(code=4003, reason="Expected an auth response")
+                return
+            if auth.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+                await websocket.close(code=4004, reason="Unsupported protocol version")
+                return
+            try:
+                identity = companion_authenticator.authenticate(
+                    nonce=nonce,
+                    protocol_version=auth.protocol_version,
+                    announced_id=auth.announced_id,
+                    roles=list(auth.roles),
+                    certificate_chain=list(auth.certificate_chain),
+                    signature=auth.signature,
+                )
+            except CompanionAuthenticationError as error:
+                logger.warning("companion authentication rejected: %s", error)
+                await websocket.close(code=4003, reason="Authentication failed")
+                return
+
+            stage = "awaiting hello"
+            hello = parse_companion_message(
+                await asyncio.wait_for(websocket.receive_text(), timeout=10)
+            )
+            if not isinstance(hello, CompanionHello):
+                await websocket.close(code=4005, reason="Expected a hello")
+                return
+            locality = companion_locality.classify(
+                websocket.client.host if websocket.client else None
+            )
+            session = sessions.register(
+                identity=identity, hello=hello, locality=locality, send=send
+            )
+            await send(
+                serialize_companion(
+                    HelloAck(
+                        protocolVersion=auth.protocol_version,
+                        authenticatedId=identity.identity,
+                        locality=locality,
+                        sessionId=session.session_id,
+                    )
+                )
+            )
+            monitor.record(
+                "companion_connected",
+                identity=identity.identity,
+                locality=locality,
+                roles=list(identity.roles),
+            )
+
+            stage = "connected"
+            while True:
+                raw = await websocket.receive_text()
+                if not sessions.is_current(session):
+                    await websocket.close(code=4001, reason="companion session superseded")
+                    return
+                try:
+                    message = parse_companion_message(raw)
+                except ValueError as error:
+                    # A malformed frame is a protocol error, not something to
+                    # guess at: it never reaches a model or a provider.
+                    logger.warning("companion frame rejected: %s", error)
+                    await websocket.close(code=1003, reason="Malformed companion frame")
+                    return
+                dispatch_companion_message(sessions, session, message)
+        except (WebSocketDisconnect, TimeoutError, ValueError) as error:
+            logger.info(
+                "companion socket closed stage=%s error=%s",
+                stage,
+                type(error).__name__,
+            )
+            return
+        finally:
+            if session is not None and sessions.release(session):
+                monitor.record("companion_disconnected", stage=stage)
+
     @app.websocket("/v1/satellites")
     async def satellite_socket(websocket: WebSocket) -> None:
         if selected_audio is None:
@@ -1899,6 +2919,9 @@ def create_app(
             )
             stage = "validating hello"
             hello.validate_protocol()
+            stage = "binding satellite identity"
+            if not await bind_satellite_identity(websocket, hello):
+                return
             # The dashboard roster is authoritative for room assignment; the
             # satellite's env-file room is a fallback (redeploys have reset it
             # to the packaged example's "office" before).

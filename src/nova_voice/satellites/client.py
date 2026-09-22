@@ -61,6 +61,10 @@ class SatelliteSettings(BaseSettings):
     local_vad_pre_roll_ms: int = Field(default=400, ge=20, le=2_000, multiple_of=20)
     local_vad_hangover_ms: int = Field(default=800, ge=200, le=3_000, multiple_of=20)
     local_vad_calibration_ms: int = Field(default=1_000, ge=0, le=5_000, multiple_of=20)
+    # Prove this satellite holds the key for the identity it announces. Off by
+    # default so an upgraded client still connects to a server that predates
+    # the exchange; turn it on once the server is known to support it.
+    identity_proof: bool = False
     reconnect_max_seconds: float = Field(default=30, ge=1, le=300)
 
     @model_validator(mode="after")
@@ -277,6 +281,52 @@ class NativeSatelliteClient:
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         return context
 
+    async def _answer_identity_challenge(self, websocket, first_frame) -> str:
+        """Sign the server's nonce, then return the real hello acknowledgement.
+
+        Proves this client holds the private key for the identity it announced,
+        rather than merely holding some certificate the household CA signed.
+        The signed material covers the nonce, protocol version, announced id
+        and roles together, so none of them can be substituted afterwards.
+        """
+
+        # Imported here rather than at module scope: a satellite host installs
+        # a deliberately small dependency set, and cryptography is only needed
+        # by a client that has opted into proving its identity.
+        from cryptography.hazmat.primitives import serialization
+
+        from nova_voice.companion.auth import challenge_material
+        from nova_voice.companion.protocol import AuthResponse
+        from nova_voice.companion.reference import sign_challenge
+
+        if not isinstance(first_frame, str):
+            raise RuntimeError("satellite server did not issue an identity challenge")
+        challenge = json.loads(first_frame)
+        if challenge.get("type") != "auth_challenge":
+            raise RuntimeError("satellite server did not issue an identity challenge")
+
+        private_key = serialization.load_pem_private_key(
+            self.settings.tls_key_path.read_bytes(), password=None
+        )
+        roles = ["satellite"]
+        response = AuthResponse(
+            protocolVersion=PROTOCOL_VERSION,
+            announcedId=self.settings.satellite_id,
+            roles=roles,
+            certificateChain=[self.settings.tls_cert_path.read_text(encoding="utf-8")],
+            signature=sign_challenge(
+                private_key,
+                challenge_material(
+                    nonce=challenge["nonce"],
+                    protocol_version=PROTOCOL_VERSION,
+                    announced_id=self.settings.satellite_id,
+                    roles=roles,
+                ),
+            ),
+        )
+        await websocket.send(response.model_dump_json(by_alias=True))
+        return await asyncio.wait_for(websocket.recv(), timeout=10)
+
     def _hello(self) -> SatelliteHello:
         return SatelliteHello(
             protocolVersion=PROTOCOL_VERSION,
@@ -291,6 +341,7 @@ class NativeSatelliteClient:
                 noise_suppression=self.settings.noise_suppression,
                 automatic_gain_control=self.settings.automatic_gain_control,
                 local_vad=True,
+                identity_proof=self.settings.identity_proof,
             ),
         )
 
@@ -356,6 +407,12 @@ class NativeSatelliteClient:
             # This avoids streaming audio into a server that rejected the
             # identity/policy and lets a stale endpoint fail closed.
             acknowledgement = await asyncio.wait_for(websocket.recv(), timeout=10)
+            if self.settings.identity_proof:
+                # The server challenges before acknowledging when the hello
+                # advertises proof, so the first frame back is the nonce.
+                acknowledgement = await self._answer_identity_challenge(
+                    websocket, acknowledgement
+                )
             if not isinstance(acknowledgement, str):
                 raise RuntimeError("satellite server did not acknowledge hello")
             try:

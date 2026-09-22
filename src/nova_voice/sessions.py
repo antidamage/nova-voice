@@ -18,6 +18,10 @@ from nova_voice.domain import (
 class RoomSession:
     goal: ActiveGoal
     updated_at: datetime
+    # When this goal first opened. The follow-up clock is refreshed on every
+    # turn, so it cannot bound the session on its own; the absolute ceiling is
+    # measured from here.
+    started_at: datetime
 
 
 class SessionManager:
@@ -25,9 +29,11 @@ class SessionManager:
         self,
         follow_up_seconds: float = 60,
         *,
+        max_seconds: float | None = None,
         key_fn: Callable[[str], str] | None = None,
     ) -> None:
         self.follow_up = timedelta(seconds=follow_up_seconds)
+        self.max_lifetime = None if max_seconds is None else timedelta(seconds=max_seconds)
         # Same shared-air collapsing as the conversation window: a goal opened
         # via one satellite must stay active for a follow-up elected on another.
         self._key = key_fn if key_fn is not None else lambda room_id: room_id
@@ -38,6 +44,17 @@ class SessionManager:
 
         self.follow_up = timedelta(seconds=max(1.0, float(follow_up_seconds)))
 
+    def set_max_seconds(self, max_seconds: float | None) -> None:
+        """Track the conversation ceiling live; goals expire with the window.
+
+        A goal that outlives its conversation would carry stale intent into the
+        next wake word, so the two clocks are kept in lockstep.
+        """
+
+        self.max_lifetime = (
+            None if max_seconds is None else timedelta(seconds=max(1.0, float(max_seconds)))
+        )
+
     def active_goal(self, room_id: str, now: datetime | None = None) -> ActiveGoal | None:
         room_id = self._key(room_id)
         session = self._rooms.get(room_id)
@@ -45,6 +62,9 @@ class SessionManager:
             return None
         current = now or datetime.now(UTC)
         if current - session.updated_at > self.follow_up:
+            self._rooms.pop(room_id, None)
+            return None
+        if self.max_lifetime is not None and current - session.started_at > self.max_lifetime:
             self._rooms.pop(room_id, None)
             return None
         return session.goal
@@ -72,7 +92,9 @@ class SessionManager:
             existing = self.active_goal(utterance.room_id, utterance.ended_at)
             if existing is not None:
                 self._rooms[room_key] = RoomSession(
-                    goal=existing, updated_at=utterance.ended_at
+                    goal=existing,
+                    updated_at=utterance.ended_at,
+                    started_at=self._started_at(room_key, utterance.ended_at),
                 )
             return existing
         if goal.status == GoalStatus.ABANDONED:
@@ -98,8 +120,18 @@ class SessionManager:
             return None
 
         if goal.status in {GoalStatus.NEW, GoalStatus.IN_PROGRESS, GoalStatus.NEEDS_CLARIFICATION}:
-            self._rooms[room_key] = RoomSession(goal=goal, updated_at=utterance.ended_at)
+            self._rooms[room_key] = RoomSession(
+                goal=goal,
+                updated_at=utterance.ended_at,
+                started_at=self._started_at(room_key, utterance.ended_at),
+            )
             return goal
 
         self._rooms.pop(room_key, None)
         return None
+
+    def _started_at(self, room_key: str, fallback: datetime) -> datetime:
+        """Keep the original open time so the ceiling measures the whole goal."""
+
+        session = self._rooms.get(room_key)
+        return session.started_at if session is not None else fallback

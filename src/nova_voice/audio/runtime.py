@@ -50,14 +50,14 @@ from nova_voice.inference.speaker import SpeakerRecognizer
 from nova_voice.inference.stt import SpeechToText
 from nova_voice.inference.tts import TextToSpeech
 from nova_voice.interpretation.speech_cues import has_abandonment, has_speech_interrupt
-from nova_voice.service import NovaVoiceService
-from nova_voice.tts_engines import engine_by_id
+from nova_voice.service import NovaVoiceService, turn_extends_conversation
 from nova_voice.speaker_profiles import SpeakerSpeechPreferences
 from nova_voice.speech_normalization import (
     apply_pronunciation_dictionary,
     normalize_spoken_numbers,
     spoken_language_for_text,
 )
+from nova_voice.tts_engines import engine_by_id
 from nova_voice.turns import ForegroundTurnStateMachine, TaskCancellationDecision
 from nova_voice.voice_settings import VoiceSettings
 
@@ -260,6 +260,60 @@ def is_usable_transcript(transcript: str) -> bool:
     return any(token not in _FILLER_TOKENS for token in tokens)
 
 
+def _format_timings(timings: dict[str, float]) -> str:
+    """Render a timing map compactly, largest first, omitting the trivial.
+
+    Sorted by cost rather than by name because the point of reading one of
+    these lines is finding where the time went, and near-zero phases are noise
+    that pushes the interesting ones off the end.
+    """
+
+    entries = [
+        (name, value)
+        for name, value in timings.items()
+        if isinstance(value, (int, float)) and value >= 0.5
+    ]
+    entries.sort(key=lambda item: item[1], reverse=True)
+    return " ".join(f"{name}={value:.1f}" for name, value in entries)
+
+
+def _slowest_stage(*timings: dict[str, float]) -> str:
+    """The single costliest stage, excluding aggregates that contain others."""
+
+    # ``service`` is the audio-side measurement of the whole service call, and
+    # ``total`` covers everything; naming either would say nothing useful.
+    aggregates = {"service", "total", "audioTotal", "prefetchHit"}
+    candidates = [
+        (name, value)
+        for mapping in timings
+        for name, value in mapping.items()
+        if name not in aggregates and isinstance(value, (int, float))
+    ]
+    if not candidates:
+        return "none"
+    name, value = max(candidates, key=lambda item: item[1])
+    return f"{name}:{value:.1f}"
+
+
+def _transcript_outcome(result: HandleResult) -> str:
+    """What actually became of this turn, for the dashboard transcript.
+
+    ``kind`` says whether a turn was a command; it cannot say whether the
+    command ran. A command that took effect, one withheld by shadow mode or a
+    dry run, and one that failed outright are indistinguishable without this.
+    """
+
+    if result.dry_run:
+        return "dry-run"
+    if result.shadowed:
+        return "shadowed"
+    if result.executed:
+        return "failed" if any(not item.ok for item in result.results) else "executed"
+    if result.interpretation.decision == Decision.IGNORE:
+        return "ignored"
+    return "answered"
+
+
 _DEFAULT_WAKE_MATCHER = WakePhraseMatcher()
 
 
@@ -342,8 +396,13 @@ class SatelliteAudioRuntime:
         arbitration_scope: str = "household",
         dedup: TranscriptDeduplicator | None = None,
         ambient_min_words: int = 2,
+        # Addressing floor a turn must clear to keep the conversation window
+        # open. Held here rather than read from the service so the runtime does
+        # not reach through it for configuration.
+        addressed_threshold: float = 0.5,
         listening_ack_controller: ListeningAckController | None = None,
     ) -> None:
+        self._addressed_threshold = addressed_threshold
         self.service = service
         self.stt = stt
         self.tts = tts
@@ -580,6 +639,28 @@ class SatelliteAudioRuntime:
         if callable(stt_warmup):
             await stt_warmup()
 
+    def _voice_training_gate_active(self) -> bool:
+        """Whether unrecognized voices should be turned away at the wake word.
+
+        Only when training is explicitly off *and* there is a working speaker
+        recognizer to be unrecognized by. An identity that cannot be computed
+        cannot be gated on, and gating anyway would silence the household in
+        exactly the situations where recognition has broken.
+        """
+
+        if self._speaker_recognizer is None:
+            return False
+        # Fail open on anything unknown: the service is an adapter interface,
+        # and a gate that cannot read its own configuration must not be the
+        # thing that stops the household being heard.
+        settings = getattr(self.service, "voice_settings", None)
+        if settings is None or settings.voice_training_enabled:
+            return False
+        return bool(
+            getattr(getattr(self.service, "settings", None), "speaker_recognition_enabled", False)
+            and settings.speaker_recognition_enabled
+        )
+
     async def _resolve_current_speaker(
         self,
         speaker_task: asyncio.Task[Any] | None,
@@ -630,6 +711,9 @@ class SatelliteAudioRuntime:
         visible: bool = True,
         kind: str | None = None,
         speaker_name: str | None = None,
+        outcome: str | None = None,
+        decision: str | None = None,
+        routes: list[dict] | None = None,
     ) -> str:
         announce_id = replaces_id or uuid4().hex
         # ``visible=False`` still hands back an id so dedup bookkeeping stays
@@ -653,6 +737,19 @@ class SatelliteAudioRuntime:
             # The dashboard's transcript header tags each turn [COMMAND] or
             # [EXCHANGE]; absent means exchange, so only command turns send it.
             payload["kind"] = kind
+        if outcome is not None:
+            # What actually happened, which ``kind`` alone cannot say: a command
+            # that ran, one that was withheld, and one that failed all look
+            # identical without this.
+            payload["outcome"] = outcome
+        if decision is not None:
+            payload["decision"] = decision
+        if routes:
+            # Which stack ran each reasoning pass of this turn. Carries no
+            # content — only the pass name, where it ran and how long it took —
+            # so it is safe on every line, and a pass that ran on both stacks
+            # appears twice rather than having to be inferred from counters.
+            payload["routes"] = routes
         if role == "user" and speaker_name:
             payload["speakerName"] = speaker_name
         if replaces_id is not None:
@@ -795,6 +892,22 @@ class SatelliteAudioRuntime:
         task.add_done_callback(self._speech_lifecycle_tasks.discard)
         return task
 
+    def end_conversations(self) -> int:
+        """Close every open conversation window and drop its frozen context.
+
+        Used when the household clears the transcript log: the visible record
+        and the model's working context are one thing to the person clearing
+        it, so wiping the panel while the assistant silently keeps replying
+        from the old conversation would be a lie about what it remembers. The
+        next utterance must start with the wake word and a fresh snapshot.
+        """
+
+        if self._conversations is None:
+            return 0
+        open_rooms = self._conversations.open_room_count()
+        self._conversations.clear()
+        return open_rooms
+
     async def apply_voice_settings(self, settings: VoiceSettings) -> None:
         # System-wide killswitch: when voice is turned off, close every open
         # conversation immediately so re-enabling requires the wake word again.
@@ -846,6 +959,17 @@ class SatelliteAudioRuntime:
         # required for invented ones the RNNT would otherwise delete.
         set_boost = getattr(self.stt, "set_boosted_phrases", None)
         if callable(set_boost):
+            # Only the wake words and the agent name. Boosting the
+            # household's own device and room names as well is an
+            # obvious-looking idea that was tried and measured on 2026-08-15
+            # and could not be shown to help — each configuration appeared to
+            # trade one word for another. Note the measurement itself was
+            # underpowered: transcription varies run to run, so a single run
+            # per configuration cannot settle it. Revisit only with repeated
+            # runs and a word-error rate, and probably with a different
+            # mechanism than a longer list, since the tree biases decoding
+            # rather than defining a vocabulary.
+            # See docs/evidence/stt-household-biasing-20260815.md.
             await set_boost([*settings.wake_words, settings.spoken_name])
         self.playback_preroll_ms = max(20, min(2000, int(settings.tts_preroll_ms)))
         self.playback_frame_ms = max(20, min(200, int(settings.tts_frame_ms)))
@@ -1239,6 +1363,8 @@ class SatelliteAudioRuntime:
         endpoint_probability: float = 1.0,
         prefetch: ForegroundPrefetch | None = None,
         supersedes_announce_id: str | None = None,
+        dry_run: bool = False,
+        speaker_override: SpeakerIdentity | None = None,
     ) -> ProcessedAudioTurn | None:
         """Process one bounded PCM utterance through the resident voice stack.
 
@@ -1246,6 +1372,12 @@ class SatelliteAudioRuntime:
         source election. The development diagnostics page calls it with an
         explicitly recorded utterance so it can inspect STT/LLM/TTS results
         without creating a second model path or persisting raw audio.
+
+        ``dry_run`` and ``speaker_override`` exist for the voice test harness.
+        The override replaces the biometric verdict *after* recognition has run,
+        so a synthesized test clip — a voice the household has never heard — can
+        still exercise the paths that require a recognized speaker. Recognition
+        itself is unaffected and still reported.
         """
         if not pcm16 or len(pcm16) % 2:
             raise ValueError("audio turn must contain non-empty PCM16 samples")
@@ -1494,6 +1626,39 @@ class SatelliteAudioRuntime:
         # conversation and widens the accepted vocabulary; without it the
         # narrow simplified-English pass applies and only clean, actionable
         # directives may have any effect.
+        # Voice training off: only recognized household voices are heard at all,
+        # so an unrecognized voice must not be able to open a conversation with
+        # the wake word. Resolving the speaker here rather than at the usual
+        # point is what makes that possible; the result is carried forward so
+        # recognition still runs exactly once per turn.
+        # The test harness's speaker override stands in for recognition here as
+        # well as later, so the suite can exercise both training modes from a
+        # synthesized voice the profile store has never heard.
+        resolved_speaker: SpeakerIdentity | None = speaker_override
+        if wake_detected and speaker_override is None and self._voice_training_gate_active():
+            resolved_speaker = await self._resolve_current_speaker(
+                speaker_task,
+                room_id=room_id,
+                conversation_active=conversation_active,
+                eligible=True,
+            )
+            if resolved_speaker is None or resolved_speaker.status != "recognized":
+                logger.info(
+                    "voice dropped satellite=%s room=%s reason=unrecognized_speaker words=%r",
+                    satellite_id,
+                    room_id,
+                    transcript,
+                )
+                await self._record_monitor(
+                    "segment_suppressed",
+                    satelliteId=satellite_id,
+                    roomId=room_id,
+                    reason="unrecognized_speaker",
+                    wakeDetected=True,
+                    speechDurationMs=selected_acoustic.duration_ms,
+                )
+                self.release_turn(arbiter_claim)
+                return None
         if wake_detected and self._conversations is not None:
             self._conversations.start(room_id)
             if not conversation_active:
@@ -1573,7 +1738,10 @@ class SatelliteAudioRuntime:
             self.release_turn(arbiter_claim)
             return None
         speaker_started = time.perf_counter()
-        speaker_identity = await self._resolve_current_speaker(
+        # Already resolved by the training gate above, if that ran: recognition
+        # persists templates and counts enrolment samples, so it must not run
+        # twice for one utterance.
+        speaker_identity = resolved_speaker or await self._resolve_current_speaker(
             speaker_task,
             room_id=room_id,
             conversation_active=conversation_active,
@@ -1643,6 +1811,7 @@ class SatelliteAudioRuntime:
             wake_detected=wake_detected,
             conversation_active=conversation_active,
             dashboard_foreground=dashboard_foreground,
+            dry_run=dry_run,
             acoustic=selected_acoustic,
             **({"speaker": speaker_identity} if speaker_identity is not None else {}),
         )
@@ -1681,6 +1850,20 @@ class SatelliteAudioRuntime:
                 stage="interpretation_or_execution",
                 errorType=type(error).__name__,
             )
+            if addressed:
+                # The line is displayed as still working until it resolves, so
+                # a turn that dies here has to say so — otherwise the dashboard
+                # shows a command in flight that nothing will ever finish.
+                self._announce_transcript(
+                    "user",
+                    spoken_transcript,
+                    satellite_id=satellite_id,
+                    room_id=room_id,
+                    replaces_id=announce_id,
+                    kind="command",
+                    speaker_name=announced_speaker_name,
+                    outcome="failed",
+                )
             raise
         if result.speaker is not None:
             speaker_identity = result.speaker
@@ -1729,16 +1912,25 @@ class SatelliteAudioRuntime:
         # Command turns re-announce for every path: an addressed turn already
         # has a visible line, so this upgrades it in place with the [COMMAND]
         # tag; an unaddressed one appears for the first time here.
+        #
+        # Every *displayed* turn re-announces, not just command turns: the
+        # dashboard shows a user line as still working until an outcome
+        # arrives, so an exchange that never sent one would sit there in flight
+        # forever. Non-command turns send the outcome without the [COMMAND]
+        # tag, which resolves the line without claiming it was a command.
         is_dashboard_command = bool(result.executed or result.shadowed)
-        if is_dashboard_command:
+        turn_outcome = _transcript_outcome(result)
+        if addressed or is_dashboard_command:
             self._announce_transcript(
                 "user",
                 spoken_transcript,
                 satellite_id=satellite_id,
                 room_id=room_id,
                 replaces_id=announce_id,
-                kind="command",
+                **({"kind": "command"} if is_dashboard_command else {}),
                 speaker_name=final_speaker_name,
+                outcome=turn_outcome,
+                decision=result.interpretation.decision.value,
             )
         # Log the outcome (output side): the decision, whether a command took
         # effect, and what (if anything) will be spoken back.  ``said=None``
@@ -1763,6 +1955,9 @@ class SatelliteAudioRuntime:
                 room_id=room_id,
                 visible=addressed or is_dashboard_command,
                 kind="command" if is_dashboard_command else None,
+                outcome=turn_outcome,
+                decision=result.interpretation.decision.value,
+                routes=result.route_chain,
             )
         # Provider execution is complete at this point. Publish it before TTS
         # so an operator can see an allowed/rejected command immediately even
@@ -2125,13 +2320,14 @@ class SatelliteAudioRuntime:
                     )
                 )
         # Only a genuinely engaged turn extends the follow-up window; ambient,
-        # third-party, and media speech inside a conversation must let it time
-        # out rather than keep it alive indefinitely (mirrors the service rule).
-        engaged_turn = wake_detected or result.interpretation.speech_act.value not in {
-            "third_party",
-            "quoted_or_media",
-            "self_intention",
-        }
+        # unintelligible, and ignored speech inside a conversation must let it
+        # time out rather than keep it alive indefinitely. Shares the service's
+        # rule rather than restating it, so the two cannot drift apart.
+        engaged_turn = turn_extends_conversation(
+            wake_detected=wake_detected,
+            interpretation=result.interpretation,
+            addressed_threshold=self._addressed_threshold,
+        )
         if (
             self._conversations is not None
             and conversation_active
@@ -2151,14 +2347,36 @@ class SatelliteAudioRuntime:
         turn_machine.finish(terminal)
         result = result.model_copy(update={"turn_trace": turn_machine.snapshot()})
         total_ms = round((time.perf_counter() - turn_started) * 1000, 3)
+        audio_stages = {
+            "denoise": denoise_ms,
+            "speaker": speaker_ms,
+            "stt": stt_ms,
+            "service": service_ms,
+            "tts": tts_ms,
+            "ttsFirstChunk": tts_first_chunk_ms,
+        }
+        # One line carrying every stage and phase of the turn. The suite reads
+        # these back to attribute a slow turn to a layer instead of guessing,
+        # and `slowest` is called out because that attribution is the whole
+        # reason to log it — `service` being large only says the answer is
+        # further down, and the service phases say where.
         logger.info(
-            "audio turn timing satellite=%s room=%s stt_ms=%s service_ms=%s tts_ms=%s total_ms=%s",
+            "voice turn timings satellite=%s room=%s total_ms=%s audio={%s} service={%s} "
+            "stages={%s} slowest=%s",
             satellite_id,
             room_id,
-            stt_ms,
-            service_ms,
-            tts_ms,
             total_ms,
+            _format_timings(audio_stages),
+            _format_timings(result.timings_ms),
+            _format_timings(
+                {
+                    record.stage.value: record.elapsed_ms
+                    for record in (
+                        result.turn_trace.stages if result.turn_trace is not None else ()
+                    )
+                }
+            ),
+            _slowest_stage(audio_stages, result.timings_ms),
         )
         turn = ProcessedAudioTurn(
             transcript=spoken_transcript,
@@ -2191,5 +2409,9 @@ class SatelliteAudioRuntime:
                 if result.turn_trace is not None
                 else None
             ),
+            # Both models' replies, tagged with where each ran, when the reply
+            # pass is in comparison mode. Absent the rest of the time, so the
+            # ordinary transcript is unchanged.
+            routeComparison=result.route_comparison,
         )
         return turn

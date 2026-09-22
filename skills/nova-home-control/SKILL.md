@@ -13,6 +13,12 @@ description: Query or control Nova household devices when speech requests a home
 - Clarify ambiguous target, value, negation, or unusual duration.
 - Put multiple requested changes into the bounded ordered action plan; do not
   drop later actions or merge targets with different values.
+- A chained turn ("tell me the weather and then turn on the kitchen lights, and
+  turn off the bedroom heater") is one action per clause, in the order spoken.
+  A turn inside a conversation is no different: an instruction is still an
+  instruction, and answering the conversational part is not enough.
+- Use `nova.mode` for named whole-house modes such as House Party.
+- Colours may be named ("blue", "warm white") in `nova.control` `set_color`.
 - Report only verified observed results. On partial failure, name the failed
   action, retain successful results, and keep the unfinished goal open.
 - Treat unavailable tools as unavailable capability; never construct raw API/MCP calls.

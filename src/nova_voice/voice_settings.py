@@ -8,6 +8,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 DEFAULT_WAKE_WORDS = ["beemo", "bimo", "bemo", "beamo", "bmo"]
 
+# The operator-facing vocabulary for where a pass runs. Deliberately three
+# words rather than the router's five internal modes: an operator is choosing
+# a machine, not a fallback policy, and the two rarely-useful modes
+# (``companion_fallback``, ``disabled``) have no sensible plain-English name
+# and no reason to appear in a dropdown.
+CompanionRouteChoice = Literal["local", "companion", "both"]
+
+# The passes that can be routed. Restated rather than imported from the
+# companion package: this module is the settings *contract*, and a settings
+# file naming a workload that no longer exists should be ignored, not crash
+# the pull.
+COMPANION_ROUTABLE_WORKLOADS = (
+    "interpret",
+    "render_response",
+    "confirm_objective",
+    "extract_self_profile_update",
+    "classify_icon",
+)
+
 
 def _to_camel(value: str) -> str:
     head, *tail = value.split("_")
@@ -288,6 +307,17 @@ class VoiceSettings(BaseModel):
     # Learn local biometric voice templates and use confidently recognized
     # household profiles for conversational personalization.
     speaker_recognition_enabled: bool = True
+    # Voice training. ON: an unrecognized voice may still use the wake word and
+    # issue commands, and each accepted turn refines the household's voice
+    # templates — the mode to be in when enrolling someone, adding a microphone
+    # or room, or when a familiar voice is sounding different today. OFF: only
+    # recognized household voices are heard at all; anyone else is ignored.
+    #
+    # Defaults ON so a fresh installation can enrol its first voice. It is
+    # bypassed entirely when speaker recognition is unavailable — identity that
+    # cannot be computed cannot be gated on, and the alternative is locking the
+    # household out of its own house.
+    voice_training_enabled: bool = True
     # Speaker-matching tuning (TitaNet cosine similarity of L2-normalized voice
     # embeddings, range 0-1). These make recognition "fuzzier" or "stricter" so
     # one household voice is matched across different microphones, rooms,
@@ -320,6 +350,29 @@ class VoiceSettings(BaseModel):
     # Global live override for the native satellites' local transport gate.
     # False is a diagnostic mode that streams every captured frame.
     satellite_noise_gate_enabled: bool = True
+    # Where each LLM pass runs: ``local`` on this host, ``companion`` only on
+    # the phone, or ``both`` (phone first, this host when it cannot answer).
+    #
+    # Stored here rather than as a runtime-only override so the choice survives
+    # a restart — an operator who moved a pass to the phone did not mean "until
+    # the service next restarts". A workload absent from the map keeps its code
+    # default, so an empty map is "leave everything as shipped" rather than
+    # "route nothing".
+    companion_routes: dict[str, CompanionRouteChoice] = Field(default_factory=dict)
+    # The two operator kill switches, in increasing severity.
+    #
+    # `companion_force_local` stops every reasoning workload going to the
+    # device while leaving the session up, so it can be thrown mid-incident
+    # without the owner touching the phone and undone the same way.
+    # `companion_enabled=False` is the rollback invariant: it restores the
+    # previous behaviour exactly, as if the feature had never shipped.
+    #
+    # Both default to the *server's* current setting rather than a fixed value,
+    # because a dashboard that shipped its own default would silently switch
+    # the feature on or off for any deployment that had not touched these
+    # controls. `None` means "leave it as configured".
+    companion_enabled: bool | None = None
+    companion_force_local: bool | None = None
     speaker: VoiceSpeaker = VoiceSpeaker.RYAN
     # Custom-engine (dots.tts) voice: a cloned-voice id resolved by the dots
     # service's registry. Kept separate from ``speaker`` because the two engines
@@ -382,6 +435,10 @@ class VoiceSettings(BaseModel):
     # How long a wake-opened conversation stays open without another usable
     # turn before context clears and the wake word is required again.
     conversation_idle_seconds: int = Field(default=60, ge=10, le=300, multiple_of=5)
+    # Absolute lifetime of a conversation from the wake word that opened it,
+    # regardless of how much usable speech keeps arriving. The idle window is
+    # not a bound on its own: continuous engaged speech refreshes it forever.
+    conversation_max_seconds: int = Field(default=300, ge=60, le=1800, multiple_of=30)
     # The satellite holds this much streamed PCM before starting its player,
     # absorbing short TTS/network scheduling bursts. Lower values start audio
     # sooner at the cost of headroom against a stutter; live health reports
@@ -460,6 +517,26 @@ class VoiceSettings(BaseModel):
             if satellite and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", room):
                 rooms[satellite] = room
         return rooms
+
+    @field_validator("companion_routes", mode="before")
+    @classmethod
+    def normalize_companion_routes(cls, value: object) -> object:
+        """Drop anything unrecognised rather than rejecting the whole pull.
+
+        A settings blob that names a workload this build no longer has, or a
+        choice it does not understand, must not take the entire voice settings
+        refresh down with it — that would turn a stale preferences file into an
+        outage. Unknown entries are ignored and the workload keeps its default.
+        """
+
+        if not isinstance(value, dict):
+            return {}
+        allowed = {"local", "companion", "both"}
+        return {
+            workload: choice
+            for workload, choice in value.items()
+            if workload in COMPANION_ROUTABLE_WORKLOADS and choice in allowed
+        }
 
     @field_validator("disabled_satellites", mode="before")
     @classmethod

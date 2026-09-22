@@ -27,8 +27,33 @@ Nocturnium service / Indium LaunchAgent / Iridium mic / dashboard browser
               dashboard REST/MCP (external protocol only)
 ```
 
-Iridium is the only inference host. Satellites capture/play audio and report
-room/device metadata; they do not host alternative STT, TTS, or LLM models.
+Iridium is the only **required** inference host, and a single-Iridium
+deployment is fully supported and remains the baseline. It hosts all STT and
+all TTS; neither is offloaded anywhere, so the trained voice and the playback
+routing have exactly one owner.
+
+**Satellites still host nothing.** The satellite role is audio-only — capture,
+playback, and room/device metadata — and satellites do not execute tools or run
+models. That has not changed.
+
+What has changed is that a *device* is not the same thing as a *role*. A device
+may independently hold the satellite role and the **companion** role, and the
+companion role may host reasoning: a paired household device can accept
+`Interpreter` workloads and answer them on its own model, freeing Iridium's
+single llama.cpp slot. Both roles have their own kill switch and their own
+lifecycle, so turning the microphone off does not stop reasoning and losing the
+reasoning socket does not stop audio.
+
+The companion is optional in the strongest sense. Every workload it can take,
+Iridium can still do; the route table defaults preserve the existing local
+path; and disconnecting the device, revoking its certificate, denying a
+permission or deleting the app leaves the local pipeline working unchanged. A
+companion never executes a tool itself — it proposes, and Iridium validates,
+applies policy, asks for approval where required, and performs the execution.
+
+See `docs/COMPANION-RUNBOOK.md` for operating it and `COMPANION-ROLLBACK.md`
+for switching it off.
+
 The legacy Home Assistant Assist/Wyoming service has been retired and is no
 longer a supported fallback.
 

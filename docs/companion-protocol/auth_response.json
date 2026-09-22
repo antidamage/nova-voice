@@ -1,0 +1,13 @@
+{
+  "type": "auth_response",
+  "protocolVersion": 1,
+  "announcedId": "companion-1",
+  "roles": [
+    "companion",
+    "satellite"
+  ],
+  "certificateChain": [
+    "-----BEGIN CERTIFICATE-----\nPLACEHOLDER\n-----END CERTIFICATE-----\n"
+  ],
+  "signature": "MEUCIQDPLACEHOLDERsignatureBASE64=="
+}

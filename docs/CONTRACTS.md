@@ -161,7 +161,7 @@ candidates. It never returns secrets or the full raw HA snapshot.
 ```json
 {
   "target": "lounge air con",
-  "action": "turn_on|turn_off|set_level|set_temperature|set_color|set_timer|wake|sleep",
+  "action": "turn_on|turn_off|set_level|set_temperature|set_color|set_timer|brighten|dim|warm_up|cool_down|wake|sleep",
   "value": 19,
   "unit": "celsius",
   "durationMinutes": 60,
@@ -172,6 +172,16 @@ candidates. It never returns secrets or the full raw HA snapshot.
 Only `target` and `action` are generally required. The adapter resolves the
 target against its alias index, applies domain-specific schemas and configured
 bounds, calls the Nova REST endpoint, then verifies the resulting state.
+
+`brighten`, `dim`, `warm_up` and `cool_down` are relative and take no `value`.
+The adapter reads the resolved target's current brightness or target temperature
+and rewrites the call into an absolute `set_level` / `set_temperature` before
+anything is sent, so the request body, the verification objective and the
+household endpoint are identical to a call the model sized itself. The default
+step is 25 percentage points of brightness or 2 °C, clamped to the same 0-100
+and 5-35 °C bounds as the absolute actions; a `value` overrides the magnitude
+but never the direction, which belongs to the verb. A target that reports no
+current reading is refused rather than moved from a guessed baseline.
 
 ### `nova.lighting_shortcut`
 
