@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Completely local, room-aware voice control for Nova"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = { text = "Private" }
+license = { text = "GPL-3.0-only" }
 dependencies = [
   "beautifulsoup4>=4.12,<5",
   # Companion channel proof-of-possession: chain validation and signature

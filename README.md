@@ -144,3 +144,8 @@ Hostnames, LAN addresses, account names and signing identities are deliberately
 absent from this repository. Documentation refers to them as
 `PRIVATEREF.md#<section>`; that file is git-ignored and lives only on household
 machines. Copy your own values into a local `PRIVATEREF.md` when deploying.
+
+## License
+
+Licensed under the GNU General Public License, version 3 only (GPL-3.0-only).
+See [LICENSE](LICENSE).
