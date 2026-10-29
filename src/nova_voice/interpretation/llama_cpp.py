@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import re
+from math import isfinite
 from typing import Any
 
 import httpx
@@ -368,6 +369,123 @@ class IdentityDisclosure(BaseModel):
             pronouns=self.pronouns,
             evidence=self.evidence,
         )
+
+
+def _as_order(value: Any) -> float:
+    """Sort key for a model-written action order; junk sorts last."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return float("inf")
+    return float(value)
+
+
+_PADDING_TOOL_NAMES = frozenset({"", "null", "none", "undefined", "nil"})
+
+
+def _addressed_tools(action: Any) -> set[str]:
+    """Every tool name an action could be addressing, or an empty set.
+
+    The policy layer accepts either the bare ``tool`` or ``provider.tool``
+    against the turn's catalogue, so the repair must not call an action junk
+    that the layer downstream would have run.
+    """
+    if not isinstance(action, dict):
+        return set()
+    call = action.get("call")
+    if not isinstance(call, dict):
+        return set()
+    tool = call.get("tool")
+    if not isinstance(tool, str):
+        return set()
+    names = {tool}
+    provider = call.get("provider")
+    if isinstance(provider, str) and provider:
+        names.add(f"{provider}.{tool}")
+    return names
+
+
+def _call_signature(action: Any) -> str | None:
+    """What an action asks for, ignoring its id and its position.
+
+    Two actions with the same signature are one request written twice. ``None``
+    means the action is too malformed to compare, so it is never treated as a
+    repeat of anything.
+    """
+
+    if not isinstance(action, dict):
+        return None
+    call = action.get("call")
+    if not isinstance(call, dict):
+        return None
+    try:
+        return json.dumps(call, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_padding(action: Any) -> bool:
+    """Whether an action is filler a small model added rather than a real call.
+
+    LFM3 pads a plan with entries it never meant to run: a blank tool name, the
+    literal ``"null"``, a ``tool`` that is not a string, or no ``call`` object at
+    all. Those carry no intent to recover and one of them fails validation for
+    every good action beside it.
+
+    A *named* tool this turn did not offer is not padding. It may be absent for
+    a reason the model cannot see - ``web.ask`` is omitted while web access is
+    off - so dropping it would run the rest of the plan and report success,
+    which is the silent partial execution this repair exists to remove. Those
+    stay in the plan for the policy layer, which rejects the turn by name.
+    """
+    if not isinstance(action, dict):
+        return True
+    call = action.get("call")
+    if not isinstance(call, dict):
+        # Half-decoded rather than padding: validation must reject the turn,
+        # not let it through with the action quietly missing.
+        return False
+    tool = call.get("tool")
+    if not isinstance(tool, str):
+        return True
+    return tool.strip().lower() in _PADDING_TOOL_NAMES
+
+
+def _names_unoffered_tool(action: Any, allowed_tools: set[str]) -> bool:
+    """Whether the action names a real tool that this turn did not offer."""
+    if not isinstance(action, dict) or _is_padding(action):
+        return False
+    return not (_addressed_tools(action) & allowed_tools)
+
+
+def _dependency_order(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order actions so each one follows the actions it depends on.
+
+    A small model numbers its plan and writes dependencies separately, and the
+    two disagree: the numbers must not win, or a stated "do this after that"
+    runs backwards. Declared order only breaks ties. A cycle cannot be ordered,
+    so the dependency that closes it is dropped rather than inverting the plan.
+    """
+    remaining = list(actions)
+    tie_break = {action["id"]: position for position, action in enumerate(actions)}
+    execution: list[dict[str, Any]] = []
+    done: set[str] = set()
+    while remaining:
+        ready = [
+            action
+            for action in remaining
+            if all(dependency in done for dependency in action["depends_on"])
+        ]
+        if not ready:
+            for action in remaining:
+                action["depends_on"] = [
+                    dependency for dependency in action["depends_on"] if dependency in done
+                ]
+            ready = list(remaining)
+        ready.sort(key=lambda action: tie_break[action["id"]])
+        chosen = ready[0]
+        execution.append(chosen)
+        done.add(chosen["id"])
+        remaining.remove(chosen)
+    return execution
 
 
 class LlamaCppInterpreter(Interpreter):
@@ -792,8 +910,220 @@ class LlamaCppInterpreter(Interpreter):
             )
         )
 
-    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+    @staticmethod
+    def _clamp_unit_range(data: Any) -> None:
+        """Coerce out-of-range probability fields into the domain's 0..1 range.
+
+        llama.cpp's JSON-schema grammar enforces integer bounds only, so a model
+        that reads these fields as a signed value (LFM3 emits ``intensity: -0.6``)
+        still decodes cleanly. Every field here is a magnitude between zero and
+        one, so take the absolute value and cap it at one rather than letting a
+        single negative number fail validation for the whole turn.
+        """
+        if not isinstance(data, dict):
+            return
+        emotion = data.get("emotion")
+        containers = [data] + ([emotion] if isinstance(emotion, dict) else [])
+        for container in containers:
+            for field in ("intensity", "confidence", "addressed_probability"):
+                value = container.get(field)
+                if not isinstance(value, (int, float)) or 0 <= value <= 1:
+                    continue
+                magnitude = abs(float(value))
+                # json.loads accepts bare NaN/Infinity, and a NaN reaches here
+                # as "out of range"; leave the payload alone so validation fails
+                # closed rather than turning junk into a maximal value.
+                if isfinite(magnitude):
+                    container[field] = min(1.0, magnitude)
+
+    @staticmethod
+    def _repair_action_graph(data: Any, allowed_tools: set[str] | None = None) -> None:
+        """Make a model-written action plan satisfy the plan invariants.
+
+        The JSON-schema grammar constrains the shape of the payload, not the
+        relationships inside it: it cannot say "ids are unique" or "a dependency
+        names an earlier action". A small model therefore decodes cleanly and
+        still produces a plan the domain model rejects (LFM3 reuses an id for
+        two different targets and writes ``depends_on: ["none"]``), which costs
+        the whole turn. Repair the graph where the intent is unambiguous and
+        leave everything else for validation:
+
+        * a turn that is not executing carries no actions at all, so a plan the
+          model added to a reply is removed rather than failing the answer
+        * the same call written twice under one id is one request, so the repeat
+          is removed - renaming it would run a non-idempotent tool twice
+          (``nova.task`` add would add the task again)
+        * a repeated id over two different calls gets an ordinal suffix, in list
+          order, so both actions survive; a dependency on that id resolves to
+          its first occurrence
+        * a dependency naming no action in the plan is dropped - it orders
+          nothing, and the action it came with still runs. A dependency that
+          names an action of this plan is kept and honoured: the plan is
+          ordered by its dependencies, with the model's ``order`` breaking
+          ties, so a plan numbered against its own graph still runs the
+          sequence it declared instead of failing outright
+        * padding is dropped while a real action survives: LFM3 pads a plan with
+          a blank tool name, the literal ``"null"`` or a non-string ``tool``, and
+          one such entry fails validation for every good action beside it. **A
+          named tool is never dropped, offered or not** -
+          it may be absent for a reason the model cannot see (``web.ask`` while
+          web access is off), and removing it would run the rest of the plan and
+          report success. Those stay for the policy layer, which rejects the
+          turn by name, and the count is logged. An action whose ``call`` object
+          is missing or not an object is half-decoded rather than padding, so it
+          is left alone and validation rejects the turn
+        * a null action list on an execute turn is left null, so the turn fails
+          loudly instead of succeeding at doing nothing
+        """
+        if not isinstance(data, dict):
+            return
+        if data.get("decision") != "execute":
+            # Only an execute turn may carry actions; anything else here fails
+            # validation, and a small model pads replies with the plan it was
+            # not asked for. Clearing them keeps the spoken answer.
+            if isinstance(data.get("actions"), list) and data["actions"]:
+                logger.info(
+                    "plan repair: cleared %d actions from a %s turn",
+                    len(data["actions"]),
+                    data.get("decision"),
+                )
+            data["actions"] = []
+            return
+        actions = data.get("actions")
+        if not isinstance(actions, list) or not actions:
+            return
+
+        ordered = [action for action in actions if isinstance(action, dict)]
+        if len(ordered) != len(actions):
+            return
+        original_count = len(ordered)
+        kept_actions = [action for action in ordered if not _is_padding(action)]
+        # Shrink only when something survives. An execute plan emptied here
+        # would validate, run nothing and still report success, so a plan that
+        # is nothing but padding is left whole for validation to reject.
+        if kept_actions:
+            ordered = kept_actions
+        unoffered = 0
+        if allowed_tools:
+            unoffered = sum(1 for action in ordered if _names_unoffered_tool(action, allowed_tools))
+        declared = {id(action): _as_order(action.get("order")) for action in ordered}
+        placed = sorted(ordered, key=lambda action: declared[id(action)])
+
+        seen: set[str] = set()
+        kept_calls: set[tuple[str, str]] = set()
+        collapsed: list[dict] = []
+        renamed: dict[str, str] = {}
+        for position, action in enumerate(placed, start=1):
+            identifier = action.get("id")
+            if not isinstance(identifier, str) or not identifier:
+                identifier = f"action-{position}"
+            signature = _call_signature(action)
+            key = (identifier, signature) if signature is not None else None
+            # The same action written twice is one request, and renaming it
+            # runs it twice: a non-idempotent tool (nova.task add) would add
+            # the task again. Collapse it instead, against every call already
+            # kept under that id - a model can repeat the second of two, not
+            # just the first. A repeated id over two different calls is a model
+            # numbering fault, so that is renamed.
+            if key is not None and key in kept_calls:
+                collapsed.append(action)
+                continue
+            unique = identifier
+            ordinal = 2
+            while unique in seen:
+                unique = f"{identifier}#{ordinal}"
+                ordinal += 1
+            if key is not None:
+                kept_calls.add(key)
+            renamed.setdefault(identifier, unique)
+            seen.add(unique)
+            action["id"] = unique
+        if collapsed:
+            # Remove by identity: a verbatim repeat compares equal to the copy
+            # that must stay, and an equality filter would delete both - leaving
+            # an execute turn with nothing to do that still answers "Done".
+            dropped = {id(action) for action in collapsed}
+            kept_placed = [action for action in placed if id(action) not in dropped]
+            kept_actions_after = [action for action in ordered if id(action) not in dropped]
+            if kept_actions_after:
+                placed, ordered = kept_placed, kept_actions_after
+            else:  # pragma: no cover - the first copy is never a collapsed one
+                collapsed = []
+
+        dropped_dependencies = 0
+        for action in placed:
+            depends_on = action.get("depends_on")
+            if not isinstance(depends_on, list):
+                action["depends_on"] = []
+                continue
+            kept: list[str] = []
+            for dependency in depends_on:
+                if not isinstance(dependency, str):
+                    # A non-string entry (a nested list, say) would raise out of
+                    # the dict lookup, and it names no action either way.
+                    dropped_dependencies += 1
+                    continue
+                resolved = renamed.get(dependency, dependency)
+                if resolved in seen and resolved != action["id"] and resolved not in kept:
+                    kept.append(resolved)
+                else:
+                    dropped_dependencies += 1
+            action["depends_on"] = kept
+
+        execution = _dependency_order(placed)
+        for position, action in enumerate(execution, start=1):
+            action["order"] = position
+        actions[:] = execution
+        if len(execution) != original_count or dropped_dependencies or unoffered:
+            logger.info(
+                "plan repair: kept %d of %d actions, collapsed %d repeats, "
+                "dropped %d dependencies, %d actions name a tool this turn did not offer",
+                len(execution),
+                original_count,
+                len(collapsed),
+                dropped_dependencies,
+                unoffered,
+            )
+
+    @staticmethod
+    def _offered_tools(request: InterpretRequest) -> set[str]:
+        """The tool names this turn's prompt actually offered the model."""
+        tools = request.opening_context.get("semanticTools") or []
+        names: set[str] = set()
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                names.add(function["name"])
+        return names
+
+    @staticmethod
+    def _plan_schema() -> dict:
+        """The interpretation schema, with nothing optional a plan depends on.
+
+        The grammar obeys the schema, and a field carrying a default may be
+        left out entirely, so a small model takes that escape: asked to switch
+        a light on, LFM3-1.7B answers ``decision: execute`` with no actions at
+        all, which the turn then cannot execute. Requiring every field and
+        fixing ``actions`` as an array - never null, never absent - leaves it
+        no cheaper shape to decode than the plan it was asked for.
+        """
         schema = Interpretation.model_json_schema()
+        schema["required"] = list(schema["properties"])
+        schema["properties"]["actions"] = {
+            "type": "array",
+            "items": schema["$defs"]["PlannedAction"],
+            # No minItems on purpose: reply and clarify turns legitimately carry
+            # an empty list, and the grammar cannot make the minimum depend on
+            # `decision`. An execute turn that planned nothing is downgraded to
+            # a reply by the policy layer, so it never claims an action.
+            "maxItems": 6,
+        }
+        return schema
+
+    async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
+        schema = self._plan_schema()
         messages = request.messages
         payload = {
             "model": self.model,
@@ -824,7 +1154,10 @@ class LlamaCppInterpreter(Interpreter):
             content = content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            return Interpretation.model_validate_json(content)
+            data = json.loads(content)
+            self._clamp_unit_range(data)
+            self._repair_action_graph(data, self._offered_tools(request))
+            return Interpretation.model_validate(data)
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
             raise InterpretationError("local LLM interpretation failed") from error
 
@@ -938,11 +1271,13 @@ class LlamaCppInterpreter(Interpreter):
         else:
             response_instruction = (
                 "Answer the user's conversational request directly. facts.results is empty: "
-                "you took no device action this turn. Never claim, imply, or narrate turning "
-                "on, off, up, or changing any light, switch, zone, or device, even one named "
-                "earlier in this conversation. If the request needed a device change, say so "
-                "honestly (for example ask them to repeat it or name the target) instead of "
-                "inventing that it happened."
+                "you took no action this turn. Never claim, imply, or narrate performing "
+                "anything the user asked for - changing any light, switch, zone, device, or "
+                "scene, and equally adding, completing or removing a task, reminder or timer, "
+                "sending a message, or changing what is playing - even one named earlier in "
+                "this conversation. If the request needed an action, say so honestly (for "
+                "example ask them to repeat it or name the target) instead of inventing that "
+                "it happened."
             )
         conversation_environment = (
             select_environment_context(

@@ -28,6 +28,18 @@ interface, but the deployed turn path currently runs batch decoding after
 central VAD finalizes the utterance. The 24-hour residency gate remains
 mandatory; no model is swapped at runtime.
 
+Since 2026-10-29 the resident LLM is LiquidAI LFM3-1.7B Q4_K_M, served from
+`/opt/nova-voice/runtime/llama.cpp-lfm3` with `--ctx-size 16384`, one slot,
+`--n-gpu-layers 99` (every layer on GPU; the dots-engine profile in the repo
+offloads to 24 instead, and it is not installed on this host — only
+`10-mem-gate.conf` is — so the repo's copy is edited to match the swap only so
+that selecting it later cannot restore the retired model), q8_0 KV cache
+and `--cache-ram 1024`. `nvidia-smi --query-compute-apps=used_memory` reports
+1,418 MiB for that process, against 3,022 MiB for the Qwen3.5-4B it replaced
+(the 2026-07 figures above are the snapshot, not the current state). The
+Qwen3.5-4B GGUF and its llama.cpp tree remain installed as the fallback; only
+one is ever resident.
+
 Iridium's dummy audio graph is expected while the primary microphone/speaker
 paths are the Nocturnium and Indium satellites. Their physical audio,
 certificate installation, AEC, and macOS microphone-consent checks must be

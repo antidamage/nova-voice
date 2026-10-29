@@ -184,7 +184,19 @@ class _Registry:
         self.provider_instance = provider
 
     def tool_catalog(self) -> list[dict]:
-        return []
+        # The service refuses a plan that names a tool the turn did not offer,
+        # so the fixture registry has to offer the tools its actions use.
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "fixture tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in ("fixture.control", "nova.control", "dashboard.command")
+        ]
 
     def validate_action(self, action: PlannedAction) -> PlannedAction:
         return action
@@ -463,6 +475,61 @@ async def test_short_execute_from_recognized_speaker_remains_executable(utteranc
 
 
 @pytest.mark.asyncio
+async def test_a_tool_the_catalog_did_not_offer_is_never_executed(utterance) -> None:
+    """The registry knows every tool; the turn only offered the ones it listed.
+
+    ``web.ask`` keeps its validator while web access is off, so without this
+    check the plan would run a tool the planner was never shown.
+    """
+
+    value = interpretation(
+        decision=Decision.EXECUTE,
+        actions=[_action(provider="nova", tool="nova.control")],
+        addressed=1.0,
+    )
+    interpreter = _Interpreter(value)
+    provider = _Provider()
+    registry = _Registry(provider)
+    registry.tool_catalog = lambda: [
+        {
+            "type": "function",
+            "function": {
+                "name": "fixture.control",
+                "description": "fixture tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    service = NovaVoiceService(
+        Settings(shadow_mode=False, passive_execution_enabled=True),
+        interpreter,
+        registry,
+        provider,
+        _Store(),
+        _Persona(),
+        speaker_profiles=_SpeakerProfiles(),
+    )
+    spoken = utterance.model_copy(
+        update={
+            "transcript": "Nova, lights on",
+            "wake_detected": True,
+            "speaker": SpeakerIdentity(
+                status="recognized",
+                template_id="voice-a",
+                person_id="person-a",
+                display_name="alex",
+                confidence=0.91,
+            ),
+        }
+    )
+
+    result = await service.handle(spoken)
+
+    assert provider.executed == []
+    assert "did not offer" in result.results[0].message
+
+
+@pytest.mark.asyncio
 async def test_longer_execute_from_unrecognized_speaker_uses_normal_policy(utterance) -> None:
     value = interpretation(decision=Decision.EXECUTE, actions=[_action()], addressed=1.0)
     interpreter = _Interpreter(value)
@@ -512,6 +579,46 @@ def test_agent_settings_apply_live_to_provider_without_changing_voice() -> None:
         "llm_confirm_timeout_seconds": 3.0,
     }
     assert service.voice_settings is None
+
+
+@pytest.mark.asyncio
+async def test_a_task_directive_that_planned_nothing_is_not_answered_as_done(utterance) -> None:
+    """The renderer must not claim a task it never added.
+
+    A directive naming a task or reminder is not a household-device command, so
+    the household-state check let it through to the renderer, which was free to
+    answer "Done" for an action nobody took.
+    """
+
+    value = interpretation(decision=Decision.EXECUTE, actions=[], addressed=1.0)
+    interpreter = _Interpreter(value)
+    provider = _Provider()
+    service = _service(Settings(), interpreter, provider, _Store())
+    spoken = utterance.model_copy(
+        update={"transcript": "Nova, add a task to buy milk", "wake_detected": True}
+    )
+
+    result = await service.handle(spoken)
+
+    assert provider.executed == []
+    assert result.response_text is None
+
+
+@pytest.mark.asyncio
+async def test_a_joke_directive_is_still_answered(utterance) -> None:
+    """Silence is for a command that failed, not for conversation."""
+
+    value = interpretation(decision=Decision.EXECUTE, actions=[], addressed=1.0)
+    interpreter = _Interpreter(value)
+    provider = _Provider()
+    service = _service(Settings(), interpreter, provider, _Store())
+    spoken = utterance.model_copy(
+        update={"transcript": "Nova, tell me a joke", "wake_detected": True}
+    )
+
+    result = await service.handle(spoken)
+
+    assert result.response_text
 
 
 @pytest.mark.asyncio

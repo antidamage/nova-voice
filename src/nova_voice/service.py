@@ -125,6 +125,40 @@ _LIVE_MANIFEST_KEYS = frozenset(
 )
 
 
+def _addressed_tools_of(action: PlannedAction) -> set[str]:
+    """Every name an action's call addresses a tool by.
+
+    The registry accepts both spellings, ``tool`` and ``provider.tool``, so both
+    count as naming the tool - the same pair the router matches on.
+    """
+
+    call = action.call
+    names = {call.tool}
+    if call.provider:
+        names.add(f"{call.provider}.{call.tool}")
+    return names
+
+
+_ACTION_REQUEST = re.compile(
+    r"\b(tasks?|reminders?|remind|timers?|alarms?|memos?|messages?|emails?|"
+    r"calendar|appointments?|play|pause|resume|skip|playlist|songs?|music|"
+    r"volume|mute|unmute|shuffle|queue)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_for_an_action(transcript: str) -> bool:
+    """Whether the words ask for something the assistant could have done.
+
+    The household-state check only recognises lights, climate and locks. A
+    directive that named a task, a reminder, a message or playback passed it,
+    was silently downgraded to a reply, and the renderer was free to claim it
+    had done the thing. This is the rest of the action vocabulary.
+    """
+
+    return bool(_ACTION_REQUEST.search(transcript or ""))
+
+
 def turn_extends_conversation(
     *,
     wake_detected: bool,
@@ -588,6 +622,27 @@ class NovaVoiceService:
             for tool in catalog
             if not str(tool.get("function", {}).get("name", "")).startswith("web.")
         ]
+
+    def _offered_tool_names(self) -> set[str]:
+        """Every name the tools offered this turn can be addressed by.
+
+        The policy layer accepts both spellings, ``tool`` and ``provider.tool``,
+        so both are offered here. Derived from `_available_tools` rather than
+        the registry, so a tool withheld from the planner (``web.*`` with web
+        access off) is not offered for execution either.
+        """
+
+        names: set[str] = set()
+        for tool in self._available_tools():
+            function = tool.get("function", {})
+            name = str(function.get("name", "")).strip()
+            if not name:
+                continue
+            names.add(name)
+            provider = str(function.get("provider") or tool.get("provider") or "").strip()
+            if provider:
+                names.add(f"{provider}.{name}")
+        return names
 
     def _apply_companion_switches(self, settings) -> None:
         """Apply the two kill switches, if the dashboard has an opinion.
@@ -1685,6 +1740,7 @@ class NovaVoiceService:
                 results = await self._execute_plan(
                     interpretation.actions,
                     cancellation=cancellation,
+                    offered_tools=self._offered_tool_names(),
                 )
         if (
             outcome.execute
@@ -1751,8 +1807,12 @@ class NovaVoiceService:
             # The speech act alone is too loose: "tell me a joke" and "how are
             # you" are routinely classified as directives, and silencing those
             # would make the assistant mute rather than accurate. Only a turn
-            # that plausibly concerns the household is a household command.
-            and household_state_is_relevant(utterance.transcript)
+            # that plausibly asks for an action - a household one, or a task,
+            # reminder, timer, message or media one - is a command that failed.
+            and (
+                household_state_is_relevant(utterance.transcript)
+                or _asks_for_an_action(utterance.transcript)
+            )
             # A bare wake word carries no command to have failed.
             and command_word_count(utterance.transcript, self._address_words()) > 0
         )
@@ -2196,6 +2256,7 @@ class NovaVoiceService:
         actions: Iterable[PlannedAction],
         *,
         cancellation: TurnCancellationController | None = None,
+        offered_tools: set[str] | None = None,
     ) -> list[ToolResult]:
         """Execute a bounded action DAG with provider-declared parallelism.
 
@@ -2209,11 +2270,20 @@ class NovaVoiceService:
         ordered = sorted(actions, key=lambda candidate: candidate.order)
         canonical_actions: dict[str, PlannedAction] = {}
         invalid_actions: set[str] = set()
+        unknown_tool_actions: set[str] = set()
         duplicate_of: dict[str, str] = {}
         seen_idempotent: dict[str, str] = {}
         for action in ordered:
             try:
                 canonical = self.registry.validate_action(action)
+                # The registry knows every tool that exists, not the ones this
+                # turn offered. A tool withheld from the planner - web.ask while
+                # web access is off - still has a validator, so it would run
+                # here having never been offered. Refuse it instead.
+                if offered_tools is not None and not (_addressed_tools_of(action) & offered_tools):
+                    unknown_tool_actions.add(action.id)
+                    invalid_actions.add(action.id)
+                    continue
                 canonical_actions[action.id] = canonical
                 policy = self.registry.policy_for(canonical.call.provider, canonical.call.tool)
                 idempotent = bool(policy is not None and getattr(policy, "idempotent", False))
@@ -2236,6 +2306,11 @@ class NovaVoiceService:
             except (KeyError, ValueError):
                 invalid_actions.add(action.id)
         if invalid_actions:
+            if unknown_tool_actions:
+                logger.warning(
+                    "plan refused: %d action(s) named a tool this turn did not offer",
+                    len(unknown_tool_actions),
+                )
             # Do not partially mutate the household when the model mixed a
             # supported request with an unknown/invalid tool call.
             return [
@@ -2245,9 +2320,13 @@ class NovaVoiceService:
                     code="invalid" if action.id in invalid_actions else "blocked",
                     requested=action.call.arguments,
                     message=(
-                        "Action did not match an allowlisted semantic tool schema"
-                        if action.id in invalid_actions
-                        else "Plan contains an unsupported action; nothing was executed"
+                        "Action names a tool this turn did not offer"
+                        if action.id in unknown_tool_actions
+                        else (
+                            "Action did not match an allowlisted semantic tool schema"
+                            if action.id in invalid_actions
+                            else "Plan contains an unsupported action; nothing was executed"
+                        )
                     ),
                 )
                 for action in ordered

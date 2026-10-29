@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         )
 
     llm_base_url: str = "http://127.0.0.1:8765/v1"
-    llm_model: str = "Qwen3.5-4B"
+    llm_model: str = "LFM3-1.7B"
     llm_timeout_seconds: float = Field(default=20, gt=0, le=120)
 
     # Web access (optional). The voice LLM can rewrite a spoken request into a

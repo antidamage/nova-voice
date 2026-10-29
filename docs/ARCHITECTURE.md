@@ -334,7 +334,7 @@ connection.
 
 The deployed resident topology has three model services:
 
-1. `nova-voice-llm.service`: pinned `llama-server` with Qwen3.5-4B
+1. `nova-voice-llm.service`: pinned `llama-server` with LFM3-1.7B
 2. `nova-voice.service`: Python orchestration plus resident Nemotron STT
 3. `nova-voice-tts.service`: vLLM-Omni Qwen3-TTS, implemented by separate
    stage-0 talker and stage-1 codec CUDA workers

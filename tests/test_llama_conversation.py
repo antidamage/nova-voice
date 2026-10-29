@@ -5,16 +5,20 @@ import json
 import httpx
 import pytest
 from conftest import interpretation
+from pydantic import ValidationError
 
 from nova_voice.audio.conversation import ConversationMessage, ConversationSnapshot
 from nova_voice.domain import (
     CapabilityToolCall,
     Decision,
+    EmotionLabel,
+    Interpretation,
     PlannedAction,
     SelfProfileUpdate,
     SpeakerIdentity,
     ToolResult,
 )
+from nova_voice.interpretation.base import InterpretRequest
 from nova_voice.interpretation.llama_cpp import (
     IDENTITY_DISCLOSURE_PROMPT,
     SYSTEM_PROMPT,
@@ -704,3 +708,444 @@ def test_time_and_weather_context_are_selected_independently() -> None:
         "now": environment["now"],
         "weather": environment["weather"],
     }
+
+
+@pytest.mark.asyncio
+async def test_negative_emotion_intensity_is_folded_into_the_domain_range() -> None:
+    wire = interpretation(decision=Decision.REPLY).model_dump(mode="json")
+    wire["emotion"]["intensity"] = -0.6
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps(wire)}}]}
+        )
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test",
+        "fixture-model",
+        transport=httpx.MockTransport(handler),
+    )
+    request = InterpretRequest(
+        messages=[{"role": "user", "content": "{}"}],
+        system="system",
+        opening_context={},
+        turn_context={},
+    )
+
+    result = await interpreter.run_interpret_request(request)
+
+    assert result.emotion.intensity == pytest.approx(0.6)
+    assert result.emotion.label == EmotionLabel.NEUTRAL
+    assert result.decision == Decision.REPLY
+
+    await interpreter.close()
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [(-6.0, 1.0), (1.4, 1.0), (0.2, 0.2), (0.0, 0.0), (1.0, 1.0)],
+)
+def test_signed_probability_fields_are_folded_into_the_domain_range(
+    raw_value: float, expected: float
+) -> None:
+    data = interpretation().model_dump(mode="json")
+    data["emotion"]["intensity"] = raw_value
+    data["emotion"]["confidence"] = raw_value
+    data["addressed_probability"] = raw_value
+    data["confidence"] = raw_value
+
+    LlamaCppInterpreter._clamp_unit_range(data)
+
+    assert data["emotion"]["intensity"] == pytest.approx(expected)
+    assert data["emotion"]["confidence"] == pytest.approx(expected)
+    assert data["addressed_probability"] == pytest.approx(expected)
+    assert data["confidence"] == pytest.approx(expected)
+    assert Interpretation.model_validate(data)
+
+
+def test_nan_probability_fails_validation_rather_than_saturating() -> None:
+    data = interpretation().model_dump(mode="json")
+    data["emotion"]["intensity"] = float("nan")
+
+    LlamaCppInterpreter._clamp_unit_range(data)
+
+    with pytest.raises(ValidationError):
+        Interpretation.model_validate(data)
+
+
+def test_a_non_mapping_payload_is_left_for_validation_to_reject() -> None:
+    assert LlamaCppInterpreter._clamp_unit_range(["not", "a", "mapping"]) is None
+
+
+def _plan(*actions: dict) -> dict:
+    data = interpretation(decision=Decision.EXECUTE).model_dump(mode="json")
+    data["actions"] = list(actions)
+    return data
+
+
+def _action(identifier: str, order: float, depends_on: list | None = None, **arguments) -> dict:
+    return {
+        "id": identifier,
+        "order": order,
+        "depends_on": depends_on or [],
+        "call": {"provider": "nova", "tool": identifier, "arguments": arguments},
+    }
+
+
+def test_a_dependency_outranks_the_number_the_model_gave_it() -> None:
+    """The model numbered b before a while saying b depends on a; a runs first."""
+
+    data = _plan(
+        _action("nova.control", 2, target="Deadbolt"),
+        {**_action("nova.lighting_shortcut", 1, ["nova.control"], target="Porch light")},
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.control", "nova.lighting_shortcut"]
+    assert [action.order for action in plan.actions] == [1, 2]
+    assert plan.actions[1].depends_on == ["nova.control"]
+
+
+def test_a_half_decoded_action_is_left_for_validation() -> None:
+    """No call at all is not padding, so it must not be dropped silently."""
+
+    data = _plan(
+        _action("nova.control", 1, target="Lounge lights"),
+        {"id": "b", "order": 2, "depends_on": [], "call": None},
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert [action["id"] for action in data["actions"]] == ["nova.control", "b"]
+
+
+def test_actions_on_a_reply_turn_are_cleared_rather_than_failing_the_answer() -> None:
+    data = interpretation(decision=Decision.REPLY).model_dump(mode="json")
+    data["actions"] = [_action("nova.control", 1, target="Lounge lights")]
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    assert data["actions"] == []
+
+
+def test_a_dependency_cycle_is_broken_rather_than_left_unordered() -> None:
+    data = _plan(
+        _action("nova.control", 1, ["nova.lighting_shortcut"], target="Lounge lights"),
+        _action("nova.lighting_shortcut", 2, ["nova.control"], target="Porch light"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.control", "nova.lighting_shortcut"]
+    assert [action.depends_on for action in plan.actions] == [[], []]
+
+
+def test_a_repeated_action_id_is_kept_and_made_unique() -> None:
+    data = _plan(
+        _action("nova.control", 1, target="Lounge lights"),
+        _action("nova.control", 2, target="Air Conditioner"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.control", "nova.control#2"]
+    assert [action.order for action in plan.actions] == [1, 2]
+
+
+def test_the_same_call_written_twice_under_one_id_runs_once() -> None:
+    """Renaming the repeat would run a non-idempotent tool twice.
+
+    ``nova.task`` add is not idempotent, so a model repeating the action under
+    the same id must not add the reminder twice and answer "Done".
+    """
+
+    data = _plan(
+        _action("nova.task", 1, target="call the plumber"),
+        _action("nova.task", 2, target="call the plumber"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.task"]
+    assert [action.order for action in plan.actions] == [1]
+
+
+def test_a_repeat_of_the_second_call_under_one_id_is_collapsed_too() -> None:
+    """The repeat can be of the second call, not only the first."""
+
+    data = _plan(
+        _action("nova.control", 1, target="kitchen"),
+        _action("nova.control", 2, target="bedroom"),
+        _action("nova.control", 3, target="bedroom"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.control", "nova.control#2"]
+    assert [action.call.arguments["target"] for action in plan.actions] == ["kitchen", "bedroom"]
+
+
+def test_a_verbatim_repeat_leaves_the_action_it_repeats_in_place() -> None:
+    """The repeat compares equal to the copy that must stay.
+
+    Removing by equality would delete both, and an execute turn with nothing to
+    do still answers "Done" - the failure this repair exists to remove.
+    """
+
+    first = _action("nova.task", 1, target="call the plumber")
+    second = _action("nova.task", 1, target="call the plumber")
+    data = _plan(first, second)
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert len(plan.actions) == 1
+    assert plan.actions[0].id == "nova.task"
+
+
+def test_a_repeat_does_not_orphan_the_action_that_depends_on_it() -> None:
+    data = _plan(
+        _action("nova.task", 1, target="call the plumber"),
+        _action("nova.task", 1, target="call the plumber"),
+        _action("nova.lighting_shortcut", 2, ["nova.task"], target="Porch light"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.task", "nova.lighting_shortcut"]
+    assert plan.actions[1].depends_on == ["nova.task"]
+
+
+def test_a_repeat_judged_on_the_call_not_the_target_alone() -> None:
+    """Only an identical call is one request; a different one still runs."""
+
+    data = _plan(
+        _action("nova.task", 1, target="call the plumber"),
+        _action("nova.task", 2, target="call the dentist"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.task", "nova.task#2"]
+
+
+def test_a_dependency_on_a_repeated_id_resolves_to_its_first_occurrence() -> None:
+    data = _plan(
+        _action("nova.control", 1, target="Lounge lights"),
+        _action("nova.control", 2, target="Air Conditioner"),
+        _action("nova.task", 3, ["nova.control"], target="Mirror light"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert plan.actions[2].depends_on == ["nova.control"]
+
+
+def test_a_dependency_that_names_no_earlier_action_is_dropped() -> None:
+    data = _plan(
+        _action("nova.control", 1, ["none"], target="Lounge lights"),
+        _action("nova.control", 2, ["nova.control", "ghost"], target="Air Conditioner"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert plan.actions[0].depends_on == []
+    assert plan.actions[1].depends_on == ["nova.control"]
+
+
+def test_out_of_order_actions_are_renumbered_from_their_execution_sequence() -> None:
+    data = _plan(
+        _action("nova.query", 4, query="power"),
+        _action("nova.control", 2, target="Lounge lights"),
+    )
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    plan = Interpretation.model_validate(data)
+    assert [action.id for action in plan.actions] == ["nova.control", "nova.query"]
+    assert [action.order for action in plan.actions] == [1, 2]
+
+
+def test_a_payload_that_is_not_an_action_list_is_left_for_validation() -> None:
+    data = _plan()
+    data["actions"] = ["not", "a", "plan"]
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    assert data["actions"] == ["not", "a", "plan"]
+    assert LlamaCppInterpreter._repair_action_graph(None) is None
+
+
+def test_a_null_action_list_is_repaired_to_an_empty_plan() -> None:
+    data = interpretation(decision=Decision.IGNORE).model_dump(mode="json")
+    data["actions"] = None
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    assert data["actions"] == []
+
+
+def test_an_execute_plan_with_a_null_action_list_still_fails_validation() -> None:
+    """Repairing it to [] would succeed at doing nothing, so leave it to fail."""
+
+    data = interpretation(decision=Decision.EXECUTE).model_dump(mode="json")
+    data["actions"] = None
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    assert data["actions"] is None
+    with pytest.raises(ValidationError):
+        Interpretation.model_validate(data)
+
+
+def test_a_provider_qualified_tool_name_counts_as_offered() -> None:
+    """The policy layer accepts provider.tool too, so the repair must as well."""
+
+    qualified = {
+        "id": "a",
+        "order": 1,
+        "call": {"provider": "nova", "tool": "control", "arguments": {}},
+        "depends_on": [],
+    }
+    data = _plan(qualified)
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert [action["id"] for action in data["actions"]] == ["a"]
+
+
+def test_a_non_string_dependency_is_dropped_rather_than_raising() -> None:
+    data = _plan(_action("nova.control", 1, [["nova.control"]], target="Lounge lights"))
+
+    LlamaCppInterpreter._repair_action_graph(data)
+
+    assert Interpretation.model_validate(data).actions[0].depends_on == []
+
+
+def test_the_plan_schema_requires_an_action_array() -> None:
+    """A field with a default may be omitted, and a small model omits it."""
+
+    schema = LlamaCppInterpreter._plan_schema()
+
+    assert set(schema["properties"]) <= set(schema["required"])
+    assert schema["properties"]["actions"]["type"] == "array"
+    assert schema["properties"]["actions"]["items"] == schema["$defs"]["PlannedAction"]
+
+def test_an_action_naming_a_tool_the_turn_did_not_offer_is_left_for_the_policy_layer() -> None:
+    """A named tool is not padding: dropping it would half-run the request.
+
+    ``web.ask`` is absent while web access is off, so a named tool the model
+    cannot see must reach the policy layer, which rejects the turn by name.
+    """
+
+    good = {
+        "id": "a",
+        "order": 1,
+        "call": {"provider": "nova", "tool": "nova.control", "arguments": {}},
+        "depends_on": [],
+    }
+    unoffered = {
+        "id": "b",
+        "order": 2,
+        "call": {"provider": "nova", "tool": "nova.not_offered", "arguments": {}},
+        "depends_on": [],
+    }
+    data = _plan(good, unoffered)
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert [action["id"] for action in data["actions"]] == ["a", "b"]
+
+
+def test_padding_entries_are_dropped_and_the_real_actions_kept() -> None:
+    """One blank entry fails validation for the whole plan, so drop that entry."""
+
+    good = {
+        "id": "a",
+        "order": 1,
+        "call": {"provider": "nova", "tool": "nova.control", "arguments": {}},
+        "depends_on": [],
+    }
+    blank = {
+        "id": "b",
+        "order": 2,
+        "call": {"provider": "nova", "tool": "", "arguments": {}},
+        "depends_on": [],
+    }
+    literal_null = {
+        "id": "c",
+        "order": 3,
+        "call": {"provider": "nova", "tool": "null", "arguments": {}},
+        "depends_on": ["a"],
+    }
+    non_string = {
+        "id": "d",
+        "order": 4,
+        "call": {"provider": "nova", "tool": None, "arguments": {}},
+        "depends_on": [],
+    }
+    data = _plan(good, blank, literal_null, non_string)
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert [action["id"] for action in data["actions"]] == ["a"]
+    assert data["actions"][0]["order"] == 1
+
+
+def test_a_plan_of_nothing_but_padding_is_left_for_validation() -> None:
+    """Emptied, it would validate, run nothing and report success."""
+
+    data = _plan({"id": "a", "order": 1, "call": {"provider": "nova", "tool": ""}})
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert len(data["actions"]) == 1
+    with pytest.raises(ValidationError):
+        Interpretation.model_validate(data)
+
+
+def test_the_plan_keeps_every_offered_tool_when_none_is_named() -> None:
+    """No menu means nothing to filter against; the plan passes through."""
+
+    action = {
+        "id": "a",
+        "order": 1,
+        "call": {"provider": "nova", "tool": "nova.control", "arguments": {}},
+        "depends_on": [],
+    }
+    data = _plan(action)
+
+    LlamaCppInterpreter._repair_action_graph(data, set())
+
+    assert len(data["actions"]) == 1
+
+
+def test_a_plan_naming_no_offered_tool_is_kept_whole() -> None:
+    """An execute plan with nothing left would run nothing and report success.
+
+    The policy layer rejects an unknown tool by name, so the plan is passed
+    through rather than emptied into a turn that silently does nothing.
+    """
+
+    action = {
+        "id": "a",
+        "order": 1,
+        "call": {"provider": "nova", "tool": "nova.not_offered", "arguments": {}},
+        "depends_on": [],
+    }
+    data = _plan(action)
+
+    LlamaCppInterpreter._repair_action_graph(data, {"nova.control"})
+
+    assert [action["id"] for action in data["actions"]] == ["a"]
+    assert data["actions"][0]["call"]["tool"] == "nova.not_offered"

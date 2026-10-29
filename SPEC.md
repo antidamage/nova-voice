@@ -287,9 +287,9 @@ configuration:
 
 - A pinned Pipecat processor prototype may be retained only if it meets the
   local latency and complexity gate.
-- The intended LLM is official Qwen3.5-4B, locally converted Q4_K_M, run as a
-  single resident llama.cpp instance in non-thinking, JSON-Schema/GBNF
-  constrained mode.
+- The LLM is LiquidAI LFM3-1.7B Q4_K_M, run as a single resident llama.cpp
+  instance in non-thinking, JSON-Schema/GBNF constrained mode. Qwen3.5-4B,
+  locally converted to Q4_K_M, is the fallback selected only before deployment.
 - STT candidates are English Nemotron Streaming 0.6B, Nemotron 3.5 `en-GB`,
   and Parakeet TDT 0.6B v3.  The selected engine is measured on Iridium rather
   than chosen from published model-card figures.

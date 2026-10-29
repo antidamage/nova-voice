@@ -7,7 +7,7 @@ Selection is finalized only after the simultaneous Iridium benchmark.
 
 | Role | Candidate | Runtime | Why |
 | --- | --- | --- | --- |
-| LLM | Qwen3.5-4B Q4_K_M | pinned llama.cpp server | current compact post-trained Qwen, non-thinking mode, small enough for shared VRAM, schema-constrained output |
+| LLM | LFM3-1.7B Q4_K_M | pinned llama.cpp server (`llama.cpp-lfm3`) | resident interpretation model; a 1.1 GB GGUF against Qwen3.5-4B's 2.6 GB, so it leaves twice the headroom on the shared 11 GiB card, schema-constrained output |
 | STT primary | NVIDIA Nemotron Speech Streaming EN 0.6B | pinned NeMo/Transformers | NVIDIA's recommended English-only cache-aware streaming model; punctuation and low-latency chunk choices |
 | Speaker identity | NVIDIA TitaNet-Large (English) | pinned NeMo, CPU | 23M-parameter embedding model already supported by the NeMo runtime; enables local multi-template household profiles without using GPU residency |
 | STT challenger | NVIDIA Nemotron 3.5 ASR Streaming 0.6B, `en-GB` | NeMo 26.06 or Transformers 5.13+ | native cache-aware 80-1120 ms streaming, explicit locale conditioning and Turing/Linux support |
@@ -56,8 +56,33 @@ conversion and constrain every interpretation response; do not make correctness
 depend on a model-specific native tool parser. Pin the tested llama.cpp commit.
 One inference slot is enough; household concurrency is scheduled above it.
 
-Fallback selected only before deployment: Qwen3-4B-Instruct-2507 Q4_K_M. Use it
-if Qwen3.5 GGUF/tool parsing is not reliable on Turing. Do not load both.
+Fallback: Qwen3.5-4B Q4_K_M (`QWEN_LLM_REPO` in `ops/versions.env`), the model
+LFM3-1.7B replaced. Its GGUF and its own llama.cpp tree stay installed and the
+systemd unit names one model, so a rollback is an edit to the unit rather than a
+download. The earlier Qwen3-4B-Instruct-2507 suggestion was not what was
+deployed and is not a second fallback. Do not load both.
+
+### LFM3-1.7B
+
+Replaced Qwen3.5-4B as the resident LLM on 2026-10-29. LiquidAI's LFM3-1.7B
+Q4_K_M ships as a ready GGUF, so there is no local conversion step. It needs a
+newer llama.cpp than the Qwen-era pin, so it is built into its own tree,
+`runtime/llama.cpp-lfm3`, pinned as `LLAMA_CPP_LFM3_COMMIT`; the flags, memory
+gate and alias contract are unchanged, `--ctx-size` stays at 16384, and the
+same q8_0 KV cache and 1024 MB cache-RAM budget apply. The Qwen3.5-4B GGUF stays on disk as the
+model to fall back to; the systemd unit selects between them, and only one loads.
+
+One behavioural difference matters. LFM3 reads `emotion.intensity` as a signed
+valence and emits values such as `-0.6`, while the domain model requires 0..1.
+The request already carries `minimum: 0`, but llama.cpp's schema-to-grammar
+conversion applies integer bounds only, so the constraint is not enforced during
+decoding. `LlamaCppInterpreter` therefore folds the magnitude of every
+probability-valued field (`intensity`, `confidence`, `addressed_probability`)
+into range before validating; without it every utterance fails validation and
+the API answers 503. The sign is read as valence, so `-0.6` becomes intensity
+`0.6`: the field is treated as distance from neutral, not as strength. That is
+a deliberate mapping for a household assistant, not a neutral coercion, and it
+should be revisited if the TTS ever wants arousal rather than magnitude.
 
 ### Streaming STT bake-off
 

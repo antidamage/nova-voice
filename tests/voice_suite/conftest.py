@@ -48,7 +48,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--llm-model",
-        default=os.environ.get("NOVA_VOICE_LLM_MODEL", "Qwen3.5-4B"),
+        default=os.environ.get("NOVA_VOICE_LLM_MODEL", "LFM3-1.7B"),
         help="Model id for the grading pass",
     )
 
