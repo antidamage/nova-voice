@@ -16,7 +16,7 @@ from nova_voice.audio.announce import SpeechAnnouncer
 from nova_voice.audio.arbitration import TurnArbiter, TurnClaim
 from nova_voice.audio.consistency import acoustic_consistency_metrics, consistency_drift
 from nova_voice.audio.conversation import ConversationTracker
-from nova_voice.audio.dedup import TranscriptDeduplicator, normalize_transcript
+from nova_voice.audio.dedup import DedupVerdict, TranscriptDeduplicator, normalize_transcript
 from nova_voice.audio.denoise import NoiseSuppressor
 from nova_voice.audio.echo import PlaybackEchoGuard
 from nova_voice.audio.election import SegmentElection
@@ -34,6 +34,7 @@ from nova_voice.audio.speech_timing import (
     consonant_onsets_ms,
     estimate_speech_duration_ms,
 )
+from nova_voice.audio.typed_turn import primary_speaker
 from nova_voice.audio.vocab import SimplifiedEnglishGate
 from nova_voice.domain import (
     AcousticFeatures,
@@ -995,6 +996,17 @@ class SatelliteAudioRuntime:
             return self._volume_day_percent
         return self._volume_night_percent
 
+    @property
+    def disabled_satellites(self) -> set[str]:
+        """Casefolded ids of satellites whose microphones are switched off."""
+
+        return set(self._disabled_satellites)
+
+    async def primary_speaker(self) -> SpeakerIdentity | None:
+        """Who a typed dashboard turn stands for (see ``audio.typed_turn``)."""
+
+        return await primary_speaker(self._speaker_recognizer)
+
     async def health(self) -> dict:
         # These probes are independent I/O — a GPU-memory read, two sidecar HTTP
         # round trips, and a SQLite read. Run them concurrently so /health costs
@@ -1365,6 +1377,7 @@ class SatelliteAudioRuntime:
         supersedes_announce_id: str | None = None,
         dry_run: bool = False,
         speaker_override: SpeakerIdentity | None = None,
+        typed_transcript: str | None = None,
     ) -> ProcessedAudioTurn | None:
         """Process one bounded PCM utterance through the resident voice stack.
 
@@ -1378,8 +1391,18 @@ class SatelliteAudioRuntime:
         so a synthesized test clip — a voice the household has never heard — can
         still exercise the paths that require a recognized speaker. Recognition
         itself is unaffected and still reported.
+
+        ``typed_transcript`` is the dashboard's typed input: words that enter
+        after STT. ``pcm16`` is empty, and the stages that only make sense for
+        captured sound — denoise, STT, speaker extraction, the transcript echo
+        check and the cross-microphone dedup — are skipped. Everything from
+        wake handling onward, including the spoken reply, runs as for speech.
         """
-        if not pcm16 or len(pcm16) % 2:
+        typed = typed_transcript is not None
+        if typed:
+            if not typed_transcript.strip():
+                raise ValueError("typed turn must contain words")
+        elif not pcm16 or len(pcm16) % 2:
             raise ValueError("audio turn must contain non-empty PCM16 samples")
         turn_started = time.perf_counter()
         scope_id = self._scope_id(room_id)
@@ -1388,7 +1411,7 @@ class SatelliteAudioRuntime:
         # Input stage 1: DeepFilterNet3 noise suppression via the sidecar.
         # Best-effort — a sidecar outage passes the raw audio through.
         denoise_ms = 0.0
-        if self._denoiser is not None:
+        if self._denoiser is not None and not typed:
             denoise_started = time.perf_counter()
             pcm16 = await self._denoiser.enhance(pcm16)
             denoise_ms = round((time.perf_counter() - denoise_started) * 1000, 3)
@@ -1403,7 +1426,7 @@ class SatelliteAudioRuntime:
                     duration_ms=selected_acoustic.duration_ms,
                 )
             )
-            if self._speaker_recognizer is not None
+            if self._speaker_recognizer is not None and not typed
             else None
         )
 
@@ -1415,7 +1438,10 @@ class SatelliteAudioRuntime:
         # ``transcribe_stream`` remains available for a future transport that
         # actually decodes concurrently with capture.
         try:
-            transcript, confidence = await self.stt.transcribe(pcm16)
+            if typed:
+                transcript, confidence = typed_transcript.strip(), 1.0
+            else:
+                transcript, confidence = await self.stt.transcribe(pcm16)
         except Exception as error:
             await self._record_monitor(
                 "processing_error",
@@ -1460,7 +1486,7 @@ class SatelliteAudioRuntime:
         # voice returning through the room, not a new request.
         transcript_echo = (
             self._echo_guard.transcript_echo_verdict(scope_id, transcript)
-            if self._echo_guard is not None
+            if self._echo_guard is not None and not typed
             else None
         )
         if transcript_echo is not None and transcript_echo.matched:
@@ -1501,7 +1527,9 @@ class SatelliteAudioRuntime:
         conversation_active = (
             self._conversations.active(room_id) if self._conversations is not None else False
         )
-        if scope_id in self._speech_cancel_events:
+        # Typed words were deliberately sent, never a backchannel or cross-talk
+        # under the reply; the new reply replaces the old one at TTS.
+        if scope_id in self._speech_cancel_events and not typed:
             explicit_speech_stop = has_speech_interrupt(
                 transcript,
                 self._wake_matcher.words,
@@ -1635,7 +1663,14 @@ class SatelliteAudioRuntime:
         # well as later, so the suite can exercise both training modes from a
         # synthesized voice the profile store has never heard.
         resolved_speaker: SpeakerIdentity | None = speaker_override
-        if wake_detected and speaker_override is None and self._voice_training_gate_active():
+        # A typed turn has no voice to recognise; it stands for the primary
+        # household user whether or not one could be named.
+        if (
+            wake_detected
+            and speaker_override is None
+            and not typed
+            and self._voice_training_gate_active()
+        ):
             resolved_speaker = await self._resolve_current_speaker(
                 speaker_task,
                 room_id=room_id,
@@ -1699,12 +1734,18 @@ class SatelliteAudioRuntime:
             transcript, self._wake_matcher.words, self._wake_matcher.prefixes
         )
         addressed = wake_detected or conversation_active
-        dedup_verdict = self._dedup.check(
-            scope_id=scope_id,
-            satellite_id=satellite_id,
-            tokens=dedup_tokens,
-            text=transcript,
-            addressed=addressed,
+        # A typed line is never a second microphone's copy, and sending the
+        # same test sentence twice in a row has to run twice.
+        dedup_verdict = (
+            DedupVerdict(suppress=False)
+            if typed
+            else self._dedup.check(
+                scope_id=scope_id,
+                satellite_id=satellite_id,
+                tokens=dedup_tokens,
+                text=transcript,
+                addressed=addressed,
+            )
         )
         if dedup_verdict.suppress:
             if dedup_verdict.replace_announce_id is not None:

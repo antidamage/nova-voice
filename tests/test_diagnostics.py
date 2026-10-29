@@ -864,3 +864,46 @@ async def test_runtime_marks_a_crashed_turn_as_failed() -> None:
     failed = user_payloads[-1]
     assert failed["replacesId"] == user_payloads[0]["id"]
     assert failed["outcome"] == "failed"
+
+
+class FakeTypedAudio(FakeDiagnosticAudio):
+    disabled_satellites: set[str] = set()
+
+    async def primary_speaker(self) -> SpeakerIdentity:
+        return SpeakerIdentity(status="recognized", person_id="p-main", display_name="Main")
+
+
+async def test_a_typed_turn_enters_after_stt_as_the_primary_user() -> None:
+    audio = FakeTypedAudio()
+    app = create_app(Settings(), service=object(), audio_runtime=audio)
+
+    response = await request(app, "POST", "/v1/typed-turns", json={"text": "hello there"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["responseText"] == "Done"
+    # No speaker is connected in the test app, so nothing could be spoken.
+    assert payload["spoken"] is False
+    assert audio.received is not None
+    assert audio.received["typed_transcript"] == "hello there"
+    assert audio.received["pcm16"] == b""
+    assert audio.received["wake_detected"] is True
+    assert audio.received["speaker_override"].person_id == "p-main"
+
+
+async def test_a_typed_turn_refuses_an_empty_line() -> None:
+    app = create_app(Settings(), service=object(), audio_runtime=FakeTypedAudio())
+
+    response = await request(app, "POST", "/v1/typed-turns", json={"text": ""})
+
+    assert response.status_code == 422
+
+
+async def test_a_typed_turn_refuses_a_whitespace_line() -> None:
+    audio = FakeTypedAudio()
+    app = create_app(Settings(), service=object(), audio_runtime=audio)
+
+    response = await request(app, "POST", "/v1/typed-turns", json={"text": "   "})
+
+    assert response.status_code == 422
+    assert audio.received is None

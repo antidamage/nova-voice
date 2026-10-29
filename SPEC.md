@@ -386,6 +386,18 @@ running. During a semantic endpoint wait, an addressed turn may receive one
 bounded nonverbal earcon. The earcon has no completion semantics and its PCM is
 registered with echo suppression.
 
+### Typed turns
+
+`POST /v1/typed-turns` `{text, room_id?}` is the dashboard transcript panel's
+typed input. The text enters the audio runtime's turn after STT
+(`process_pcm(typed_transcript=...)`): denoise, STT, speaker embedding, the
+transcript echo check and the cross-microphone dedup are skipped; the turn is
+addressed, stands for the primary household user (the enrolled person with the
+most samples, or unattributed when nobody is enrolled), is never a dry run, and
+its reply is spoken through the first connected speaker with an enabled
+microphone. The day/night playback volume applies, so both at 0 makes it
+silent; agents testing with it mute that way and restore the values after.
+
 ## Privacy and non-negotiables
 
 - Inference and audio remain on the household LAN. A configured public web

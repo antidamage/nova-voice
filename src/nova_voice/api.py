@@ -28,6 +28,12 @@ from nova_voice.audio.runtime import (
     ProcessedAudioTurn,
     SatelliteAudioRuntime,
 )
+from nova_voice.audio.typed_turn import (
+    FALLBACK_ROOM_ID,
+    TYPED_SATELLITE_ID,
+    TypedTurnRequest,
+    playback_target,
+)
 from nova_voice.automation import AutomationLifecycleError, AutomationManager
 from nova_voice.bootstrap import build_service
 from nova_voice.companion.auth import AuthenticationError as CompanionAuthenticationError
@@ -1107,6 +1113,58 @@ def create_app(
             raise HTTPException(
                 status_code=503, detail="Local interpretation model unavailable"
             ) from error
+
+    @app.post("/v1/typed-turns")
+    async def typed_turn(payload: TypedTurnRequest) -> dict:
+        """The dashboard's typed input, injected after STT and answered aloud.
+
+        Unlike ``/v1/utterances`` this runs the audio runtime's turn: the line
+        appears in the live transcript, it opens or extends the room's
+        conversation, and the reply is spoken through a connected speaker. It
+        stands for the primary household user. Playback volume is the normal
+        day/night setting, so setting both to 0 makes it silent.
+        """
+
+        if selected_audio is None:
+            raise HTTPException(status_code=503, detail="Audio inference is disabled")
+        target = playback_target(
+            room_playback.connected(),
+            room_id=payload.room_id,
+            disabled=selected_audio.disabled_satellites,
+        )
+        room_id, satellite_id = target or (
+            payload.room_id or FALLBACK_ROOM_ID,
+            TYPED_SATELLITE_ID,
+        )
+        playback = room_playback.open_stream(room_id, satellite_id)
+        try:
+            turn = await selected_audio.process_pcm(
+                satellite_id=satellite_id,
+                room_id=room_id,
+                pcm16=b"",
+                wake_detected=True,
+                dashboard_foreground=False,
+                response_audio_sink=playback.emit,
+                response_cancel_sink=playback.cancel,
+                response_playback_events=playback.playback_events,
+                speaker_override=await selected_audio.primary_speaker(),
+                typed_transcript=payload.text,
+            )
+            await playback.finish()
+        except InterpretationError as error:
+            raise HTTPException(
+                status_code=503, detail="Local interpretation model unavailable"
+            ) from error
+        finally:
+            playback.release()
+        return {
+            "ok": True,
+            "handled": turn is not None,
+            "roomId": room_id,
+            "satelliteId": satellite_id,
+            "spoken": target is not None,
+            "responseText": turn.result.response_text if turn is not None else None,
+        }
 
     @app.get("/v1/voices")
     async def voices() -> dict:

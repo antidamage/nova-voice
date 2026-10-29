@@ -316,6 +316,15 @@ class RoomPlaybackRouter:
     def speakers(self, room_id: str) -> tuple[str, ...]:
         return tuple(self._rooms.get(room_id, ()))
 
+    def connected(self) -> tuple[tuple[str, str], ...]:
+        """Every connected speaker as (room id, satellite id)."""
+
+        return tuple(
+            (room_id, satellite_id)
+            for room_id, room in self._rooms.items()
+            for satellite_id in room
+        )
+
     def open_stream(self, room_id: str, source_satellite_id: str) -> RoomPlaybackStream:
         """Open a response stream locked to the satellite that won the turn.
 
