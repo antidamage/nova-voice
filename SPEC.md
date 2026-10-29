@@ -386,6 +386,60 @@ running. During a semantic endpoint wait, an addressed turn may receive one
 bounded nonverbal earcon. The earcon has no completion semantics and its PCM is
 registered with echo suppression.
 
+### Interpretation model selection
+
+The interpretation LLM is one of a registry of llama.cpp models
+(`nova_voice.llm_models`), exactly one of which serves at a time. Each model has
+its own systemd unit and localhost port, so starting one never disturbs another:
+
+| id | label | unit | port | served alias |
+|---|---|---|---|---|
+| `lfm3` (default) | LFM3 1.7B | `nova-voice-llm.service` | 8765 | `LFM3-1.7B` |
+| `bonsai` | Bonsai 9B | `nova-voice-llm-bonsai.service` | 8768 | `Ternary-Bonsai-2-9B` |
+
+Bonsai is PrismML's `Ternary-Bonsai-2-9B` at `Q2_0` (2.56 GB, Apache-2.0, a
+ternary build of Qwen3.5-9B), the one packing upstream llama.cpp loads. It runs
+on the same llama.cpp build as LFM3 (`LLAMA_CPP_LFM3_COMMIT`), text only (no
+vision projector), ctx 16384, q8 KV, every layer on the GPU. Measured on
+iridium's 2080 Ti on 2026-10-30: 2.9 GB of VRAM, ~67 tokens/s decode, and
+thinking off through the same `chat_template_kwargs` the client already sends.
+With layers offloaded to the CPU it decodes at ~5 tokens/s, which is unusable, so
+Bonsai is marked as not fitting beside a TTS engine that trims the LLM's VRAM
+(Custom / dots.tts). That pairing is refused in both directions with HTTP 409 and
+a reason: selecting Bonsai while Custom is resident, and switching TTS to Custom
+while Bonsai is selected. The root switchers refuse it as well.
+
+Selecting a model is a handshake with a root switcher, like the TTS engine
+switch, but the orchestrator is never restarted:
+
+1. `POST /v1/llm {llm}` writes `/var/lib/nova-voice/llm-switch-request.json`; a
+   `.path` unit runs `nova-switch-llm` as root.
+2. The switcher enables and starts the selected unit and waits up to 5 minutes for
+   its `/health`. The old model keeps serving meanwhile. If the new unit does not
+   become healthy it is stopped and disabled, and the switch fails with the old
+   model still selected and serving.
+3. It writes `/var/lib/nova-voice/llm-selected.json` `{llm}`. The orchestrator
+   polls that file every second, routes the interpreter's client to the model's
+   port and alias, and acknowledges in `/var/lib/nova-voice/llm-routed.json`. A
+   request already in flight completes on the old client. The switcher waits up
+   to 30 s for the acknowledgement. When the orchestrator is not running it does
+   not wait, and the orchestrator routes from the selection file when it starts.
+4. After a 25 s grace, so a turn still decoding on the old model can finish,
+   it stops and disables every other model unit. Progress is reported as
+   `preparing → starting → routing → stopping → ready` (or `failed` with an
+   `error`) in `/var/lib/nova-voice/llm-switch-status.json`.
+
+`GET /v1/llm` returns the model the interpreter is routed to (`llm`), the
+browser-safe registry (`llms`: id, label, detail, and `available` /
+`unavailableReason` for the resident TTS engine), and the switcher's `switch`
+status. Without a selection file the interpreter uses `NOVA_VOICE_LLM_BASE_URL` /
+`NOVA_VOICE_LLM_MODEL` (LFM3). The selected unit is the enabled one, so the choice
+survives a reboot. The orchestrator `Wants=` the selected unit through the managed
+drop-in `nova-voice.service.d/zz-llm.conf` and does not `Requires=` any LLM, so
+stopping a model never stops the orchestrator; the Classic TTS unit no longer
+`Requires=` LFM3 either, and voice training `Conflicts=` every model unit. The dashboard picker is specified in
+`nova-ha-dashboard/specs/voice-llm-selector.md`.
+
 ### Typed turns
 
 `POST /v1/typed-turns` `{text, room_id?}` is the dashboard transcript panel's

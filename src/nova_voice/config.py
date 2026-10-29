@@ -94,9 +94,17 @@ class Settings(BaseSettings):
             )
         )
 
+    # The interpretation model used until the root LLM switcher has written a
+    # selection (nova_voice.llm_models). The switch handshake files sit beside
+    # the engine-switch ones: request (written here), status and selection
+    # (written by the root switcher), and the routing acknowledgement (here).
     llm_base_url: str = "http://127.0.0.1:8765/v1"
     llm_model: str = "LFM3-1.7B"
     llm_timeout_seconds: float = Field(default=20, gt=0, le=120)
+    llm_switch_request_path: Path = Path("/var/lib/nova-voice/llm-switch-request.json")
+    llm_switch_status_path: Path = Path("/var/lib/nova-voice/llm-switch-status.json")
+    llm_selected_path: Path = Path("/var/lib/nova-voice/llm-selected.json")
+    llm_routed_path: Path = Path("/var/lib/nova-voice/llm-routed.json")
 
     # Web access (optional). The voice LLM can rewrite a spoken request into a
     # clean query and either delegate it to a grounded cloud model (Google

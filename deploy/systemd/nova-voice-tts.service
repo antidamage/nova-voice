@@ -1,8 +1,10 @@
 [Unit]
 Description=Nova Voice streaming Qwen3-TTS runtime
-After=network-online.target nova-voice-llm.service
+# Loads after whichever interpretation model is selected, but does not
+# Requires= one: the LLM selector stops the unselected models, and a Requires=
+# on LFM3 would take this engine down with it (or start LFM3 beside Bonsai).
+After=network-online.target nova-voice-llm.service nova-voice-llm-bonsai.service
 Wants=network-online.target
-Requires=nova-voice-llm.service
 # Mutually exclusive with the other TTS engine units — only one TTS engine is
 # GPU-resident at a time. The switcher stops the inactive engines explicitly;
 # this Conflicts= is the symmetric systemd-level backstop.

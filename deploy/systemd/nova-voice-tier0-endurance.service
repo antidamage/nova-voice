@@ -1,7 +1,9 @@
 [Unit]
 Description=Nova Voice 24-hour Tier 0 endurance evidence
-After=nova-voice.service nova-voice-llm.service nova-voice-tts.service
-Requires=nova-voice.service nova-voice-llm.service nova-voice-tts.service
+After=nova-voice.service nova-voice-llm.service nova-voice-llm-bonsai.service nova-voice-tts.service
+# The orchestrator pulls the selected interpretation model; naming one here
+# would start it beside whichever the LLM selector chose.
+Requires=nova-voice.service nova-voice-tts.service
 
 [Service]
 Type=oneshot

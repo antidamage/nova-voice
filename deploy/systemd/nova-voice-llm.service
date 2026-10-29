@@ -11,6 +11,8 @@ WorkingDirectory=/opt/nova-voice
 # demand-pages it at random during load. With 24 GiB of host RAM the weights
 # stay resident afterwards, so a restart re-loads from cache rather than disk.
 # Best-effort: the leading '-' keeps startup working if vmtouch is absent.
+# One of the interpretation models the LLM selector (nova-switch-llm) chooses
+# between; only the selected unit is enabled and running.
 ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/LFM3-1.7B-Q4_K_M.gguf
 # The upstream 8 GiB prompt-cache default can push this 5 GiB-capped service
 # into sustained reclaim/swap and leave its only slot unresponsive. One GiB is

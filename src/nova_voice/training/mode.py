@@ -31,8 +31,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from nova_voice.llm_models import LLMS
+
 ORCHESTRATOR = "nova-voice.service"
-LLM_UNIT = "nova-voice-llm.service"
+# Every selectable interpretation model (nova_voice.llm_models); only the
+# selected one runs, but any of them could be up.
+LLM_UNITS = tuple(spec.unit for spec in LLMS)
 ENGINE_REGISTRY = Path("/etc/nova-voice/engine-registry.json")
 
 # Free VRAM below this means something is still resident and training would OOM
@@ -97,7 +101,7 @@ class ModeSnapshot:
         unit = selected_engine_unit()
         return cls(
             orchestrator_active=_is_active(ORCHESTRATOR),
-            llm_active=_is_active(LLM_UNIT),
+            llm_active=any(_is_active(unit) for unit in LLM_UNITS),
             engine_unit=unit,
             engine_active=_is_active(unit) if unit else False,
             entered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -156,7 +160,7 @@ class TrainingMode:
         Waits for the units to report inactive, which is the authoritative
         signal, then confirms the card actually has memory free.
         """
-        units = [ORCHESTRATOR, LLM_UNIT]
+        units = [ORCHESTRATOR, *LLM_UNITS]
         registry_unit = selected_engine_unit()
         if registry_unit:
             units.append(registry_unit)
@@ -192,12 +196,12 @@ class TrainingMode:
     def leave(self) -> None:
         """Restore the pre-training stack. Safe to call when not in training mode.
 
-        Starting the orchestrator is enough: its Requires= pulls the LLM and the
+        Starting the orchestrator is enough: it pulls the selected LLM and the
         selected engine's TTS unit back up, so this restores whatever engine is
         selected now rather than pinning the one captured at entry.
         """
         # Restoring is systemd's job too: the training unit's OnSuccess= and
-        # OnFailure= both start nova-voice.service, whose Requires= pulls the LLM
+        # OnFailure= both start nova-voice.service, which pulls the selected LLM
         # and the selected engine back up. Declaring it on the unit rather than
         # doing it here means a crash, an abort, or a kill -9 still restores the
         # household voice -- no code path can skip it. This only clears the flag

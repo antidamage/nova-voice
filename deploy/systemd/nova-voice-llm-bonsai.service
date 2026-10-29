@@ -1,0 +1,50 @@
+[Unit]
+Description=Nova Voice local interpretation model (Bonsai 9B)
+After=network.target
+
+[Service]
+Type=simple
+User=nova-voice
+Group=nova-voice
+WorkingDirectory=/opt/nova-voice
+# Sequentially prefetch the mmap'd GGUF into page cache before llama.cpp
+# demand-pages it at random during load. With 24 GiB of host RAM the weights
+# stay resident afterwards, so a restart re-loads from cache rather than disk.
+# Best-effort: the leading '-' keeps startup working if vmtouch is absent.
+# One of the interpretation models the LLM selector (nova-switch-llm) chooses
+# between; only the selected unit is enabled and running. Ternary Bonsai 2 9B
+# at Q2_0 loads on the same llama.cpp tree as LFM3 and must keep every layer
+# on the GPU (~2.9 GB with this context): offloaded it decodes at ~5 tok/s.
+ExecStartPre=-/usr/bin/vmtouch -qt /opt/nova-voice/models/Ternary-Bonsai-2-9B-Q2_0.gguf
+# The upstream 8 GiB prompt-cache default can push this 6 GiB-capped service
+# into sustained reclaim/swap and leave its only slot unresponsive. One GiB is
+# enough for three typical Nova prompt entries while keeping the hot model and
+# KV cache resident.
+ExecStart=/opt/nova-voice/runtime/llama.cpp-lfm3/build/bin/llama-server --model /opt/nova-voice/models/Ternary-Bonsai-2-9B-Q2_0.gguf --alias Ternary-Bonsai-2-9B --host 127.0.0.1 --port 8768 --ctx-size 16384 --parallel 1 --n-gpu-layers 99 --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024 --jinja --no-webui
+# Soft per-service memory ceiling. Under the 24 GiB host the resident set fits
+# with headroom, so this throttles-and-reclaims a runaway (the old failure was a
+# load-spike ballooning past the whole system into swap-thrash) instead of
+# letting it reach the system-wide earlyoom backstop that SIGTERMs this service.
+# It is above steady RSS + the GGUF cache + KV growth, so the hot path is never
+# throttled. Applied live to the running unit on `systemctl daemon-reload`.
+MemoryAccounting=yes
+MemoryHigh=6G
+# earlyoom deliberately sends SIGTERM under a transient model-load spike.
+# llama.cpp exits cleanly in response, so on-failure would leave the required
+# interpretation service down even after memory pressure has passed.
+Restart=always
+RestartSec=3
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nova-voice/cache
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -520,6 +521,8 @@ class LlamaCppInterpreter(Interpreter):
         # to both the interpretation and response prompts. Dashboard-tunable and
         # part of a saved voice personality; empty disables it.
         self.pronoun_instruction: str = ""
+        self._transport = transport
+        self._retiring: set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
@@ -1582,5 +1585,40 @@ greet briefly and offer help."""
             return None
         return self.finalize_rendered(request, rendered)
 
+    @property
+    def base_url(self) -> str:
+        return str(self._client.base_url)
+
+    def route(self, base_url: str, model: str) -> bool:
+        """Point every later request at another llama-server (the LLM selector).
+
+        A request already in flight holds the old client and completes on it;
+        the old client is closed once it can no longer be in use. Returns
+        whether anything changed.
+        """
+        base_url = base_url.rstrip("/")
+        if self.base_url.rstrip("/") == base_url and self.model == model:
+            return False
+        loop = asyncio.get_running_loop()
+        retired = self._client
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=retired.timeout,
+            transport=self._transport,
+        )
+        self.model = model
+
+        async def close_when_idle() -> None:
+            # Longest single request is the 30 s warm-up decode.
+            await asyncio.sleep(max(30.0, float(retired.timeout.read or 0)) + 5)
+            await retired.aclose()
+
+        task = loop.create_task(close_when_idle())
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
+        return True
+
     async def close(self) -> None:
+        for task in list(self._retiring):
+            task.cancel()
         await self._client.aclose()

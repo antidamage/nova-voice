@@ -1,12 +1,14 @@
 [Unit]
 Description=Nova Voice local voice orchestration
-After=network-online.target nova-voice-llm.service nova-voice-dfn.service
+After=network-online.target nova-voice-llm.service nova-voice-llm-bonsai.service nova-voice-dfn.service
 Wants=network-online.target nova-voice-dfn.service
 # TTS is intentionally not a hard dependency here.  Classic Qwen and Custom
 # dots.tts are mutually exclusive model services, selected by deployment from
 # NOVA_VOICE_TTS_BACKEND; requiring Classic here would make every dots restart
 # submit contradictory start/stop jobs for nova-voice-tts.service.
-Requires=nova-voice-llm.service
+# Nor is any interpretation model: the LLM selector stops the unselected ones
+# while this service keeps running, so a Requires= would take it down with them.
+# The managed drop-in zz-llm.conf (nova-switch-llm) Wants= the selected model.
 
 [Service]
 Type=simple

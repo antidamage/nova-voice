@@ -35,6 +35,23 @@ prepare_lfm3() {
     | sudo -H -u nova-voice tee "$model_file.sha256"
 }
 
+# The second selectable model (the LLM selector, nova_voice.llm_models): PrismML
+# publishes the ternary Q2_0 GGUF directly, so it is fetched the same way.
+prepare_bonsai() {
+  sudo -H -u nova-voice env HF_HOME="$ROOT/cache/huggingface" \
+    "$UV_BIN" tool run --from huggingface-hub hf download \
+    "$BONSAI_LLM_REPO" \
+    "$BONSAI_LLM_FILE" \
+    --revision "$BONSAI_LLM_REVISION" \
+    --local-dir "$ROOT/models"
+
+  local model_file="$ROOT/models/$BONSAI_LLM_FILE"
+  echo "$BONSAI_LLM_SHA256  $model_file" \
+    | sudo -H -u nova-voice sha256sum -c -
+  echo "$BONSAI_LLM_SHA256  $BONSAI_LLM_FILE" \
+    | sudo -H -u nova-voice tee "$model_file.sha256"
+}
+
 # The fallback, selected only before deployment: Qwen3.5-4B is distributed as an
 # HF checkpoint and converted locally to Q4_K_M.
 prepare_qwen() {
@@ -69,9 +86,10 @@ prepare_qwen() {
 
 case "${1:-lfm3}" in
   lfm3) prepare_lfm3 ;;
+  bonsai) prepare_bonsai ;;
   qwen) prepare_qwen ;;
   *)
-    echo "usage: $0 [lfm3|qwen]" >&2
+    echo "usage: $0 [lfm3|bonsai|qwen]" >&2
     exit 2
     ;;
 esac

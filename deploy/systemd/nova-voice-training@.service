@@ -13,10 +13,10 @@ After=network-online.target
 # Training mode, expressed declaratively so it needs no privileges at runtime.
 # Starting this unit makes systemd stop the resident voice stack (they cannot
 # share the GPU), and finishing it -- successfully, by a stop request, or by
-# crashing -- starts nova-voice.service again, whose Requires= pulls the LLM and
-# whichever TTS engine is selected back up. The restore therefore cannot be
+# crashing -- starts nova-voice.service again, which pulls the selected LLM
+# (zz-llm.conf Wants=) and whichever TTS engine is selected back up. The restore therefore cannot be
 # skipped by a code path that failed to run.
-Conflicts=nova-voice.service nova-voice-llm.service nova-voice-tts.service nova-voice-dots-tts.service nova-voice-trained-tts.service
+Conflicts=nova-voice.service nova-voice-llm.service nova-voice-llm-bonsai.service nova-voice-tts.service nova-voice-dots-tts.service nova-voice-trained-tts.service
 OnSuccess=nova-voice.service
 OnFailure=nova-voice.service
 

@@ -106,6 +106,25 @@ health_style="$(reg field "$target" healthStyle)"
 all_units="$(reg units)"
 [[ -f "$profile" ]] || fail "engine profile missing: $profile"
 
+# An engine that trims the LLM's GPU layers cannot sit beside a model that is
+# unusable off the GPU (the LLM selector's fitsWithVramTrim). Refuse rather than
+# leave interpretation decoding on the CPU.
+LLM_REGISTRY=/etc/nova-voice/llm-registry.json
+LLM_SELECTED=/var/lib/nova-voice/llm-selected.json
+if [[ -n "$vram_profile" && -f "$LLM_REGISTRY" && -f "$LLM_SELECTED" ]]; then
+  llm_blocker="$(python3 - "$LLM_REGISTRY" "$LLM_SELECTED" <<'PY'
+import json, sys
+llm = json.load(open(sys.argv[2])).get("llm")
+for e in json.load(open(sys.argv[1])):
+    if e["id"] == llm and not e.get("fitsWithVramTrim", True):
+        print(e["label"])
+PY
+)" || llm_blocker=""
+  if [[ -n "$llm_blocker" ]]; then
+    fail "the $target engine needs part of the GPU that $llm_blocker uses; switch the language model first. Leaving the current engine running."
+  fi
+fi
+
 # Refuse to switch to an engine that cannot possibly serve audio. An engine whose
 # voices are per-voice checkpoint bundles (the Trained engine) is useless with an
 # empty catalogue: the old engine gets stopped, the new one never reaches ready,
@@ -153,7 +172,9 @@ done
 systemctl enable "$selected"
 # The LLM's context size / GPU-layer split changes with the engine, so apply
 # the (possibly changed) ExecStart now, while the orchestrator is down anyway.
-systemctl restart nova-voice-llm.service
+# try-restart: only when LFM3 is the running model -- the LLM selector may have
+# another model serving, and a plain restart would start a second one.
+systemctl try-restart nova-voice-llm.service
 systemctl start "$selected"
 # Start the orchestrator immediately rather than waiting for TTS warmup: STT
 # and interpretation come back within a couple of minutes, and the TTS adapter

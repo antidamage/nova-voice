@@ -121,6 +121,7 @@ from nova_voice.speech_normalization import normalize_spoken_numbers
 from nova_voice.telemetry import StructuralTelemetry
 from nova_voice.training.mode import TrainingMode
 from nova_voice.training.paths import TRAINING_MODE_STATE
+from nova_voice.llm_switch import LlmRouteWatcher, register_llm_routes, selected_llm
 from nova_voice.tts_engines import (
     dashboard_engines_manifest,
     engine_by_id,
@@ -699,6 +700,14 @@ def create_app(
             logger.warning("Nova voice settings unavailable during startup", exc_info=True)
         janitor_task = asyncio.create_task(selected_service.store.run_janitor())
         probe_task = asyncio.create_task(upgrade_probe_watchdog())
+        # Interpretation-model selector: route to whichever llama-server the
+        # root switcher last selected, now and whenever it selects another.
+        interpreter = getattr(selected_service, "interpreter", None)
+        llm_route_task = None
+        if callable(getattr(interpreter, "route", None)):
+            llm_route_watcher = LlmRouteWatcher(interpreter, get_settings)
+            llm_route_watcher.sync()
+            llm_route_task = asyncio.create_task(llm_route_watcher.run())
         # Started as a task, not awaited: the first pass drives a real
         # synthesis, and blocking startup on it would keep the satellites
         # unable to connect for its duration — trading a slow first reply for
@@ -739,6 +748,8 @@ def create_app(
         yield
         warmth_task.cancel()
         probe_task.cancel()
+        if llm_route_task is not None:
+            llm_route_task.cancel()
         if retention is not None:
             retention.stop()
         if retention_task is not None:
@@ -754,6 +765,9 @@ def create_app(
     app.state.service = selected_service
     app.state.monitor = monitor
     app.state.structural_telemetry = structural_telemetry
+    register_llm_routes(
+        app, get_settings, lambda: getattr(selected_service, "interpreter", None)
+    )
 
     @app.get("/health")
     async def health() -> dict:
@@ -1270,6 +1284,15 @@ def create_app(
         current = engine_for_backend(cfg.tts_backend).id
         if payload.engine == current:
             return {"ok": True, "engine": current, "changed": False}
+        llm = selected_llm(cfg)
+        if engine_by_id(payload.engine).vram_profile is not None and not llm.fits_with_vram_trim:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The {engine_by_id(payload.engine).label} engine needs part of the GPU "
+                    f"that {llm.label} uses; switch the language model to one that fits first."
+                ),
+            )
         # Write the engine id as the target; the root-side switcher resolves it
         # to a unit/profile/backend through the same engine registry manifest.
         target = payload.engine
