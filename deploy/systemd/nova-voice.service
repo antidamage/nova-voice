@@ -34,7 +34,13 @@ ExecStart=/opt/nova-voice/venv/bin/nova-voice serve
 # before the system-wide earlyoom backstop can SIGTERM a model service.
 MemoryAccounting=yes
 MemoryHigh=12G
-Restart=on-failure
+# always, not on-failure: earlyoom stops this process with SIGTERM when the host
+# runs out of memory, and the orchestrator exits cleanly on SIGTERM. Under
+# on-failure that clean exit left household voice down for hours (2026-10-30
+# 10:34 and 2026-10-31 10:15, both at ~7.5 GiB RSS). A deliberate
+# `systemctl stop`, a training Conflicts= stop or an engine switch still stops
+# it; systemd does not restart a unit it was asked to stop.
+Restart=always
 RestartSec=3
 TimeoutStartSec=180
 NoNewPrivileges=true
