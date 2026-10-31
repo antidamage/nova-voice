@@ -490,7 +490,10 @@ and withheld real commands ("I'm cold", "louder", "next", "I'm home"), so the
 default is to plan and the exception is narrow. A
 withheld turn sends the same prompt (the cached prefix is untouched) with only
 the reply branch in the grammar. On a woken turn that branch offers `reply` and
-`clarify` only, unless the self-intention cue is set. With nothing to execute,
+`clarify` only, unless the self-intention cue is set. A withheld reply or
+ignore must leave the goal `new`, `satisfied` or `abandoned` with no pending
+items. Only a clarify may leave it open. Otherwise LFM3 marked "are you there?"
+in progress, and the gate let the next "tell me a joke" plan. With nothing to execute,
 LFM3 otherwise chose `ignore` for "are you there?" and stayed silent.
 
 ### Typed turns

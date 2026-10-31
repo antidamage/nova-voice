@@ -1064,11 +1064,25 @@ def test_the_plan_schema_bounds_ids_and_dependencies() -> None:
     assert "enum" not in action["call"]["properties"]["tool"]
 
 
-def test_a_withheld_plan_leaves_only_the_reply_branch() -> None:
+def test_a_withheld_plan_leaves_only_answers_without_actions() -> None:
     schema = LlamaCppInterpreter._plan_schema(planning_offered=False)
 
-    assert len(schema["anyOf"]) == 1
-    assert schema["anyOf"][0]["properties"]["actions"]["maxItems"] == 0
+    decisions = [branch["properties"]["decision"]["enum"] for branch in schema["anyOf"]]
+    assert decisions == [["reply", "ignore"], ["clarify"]]
+    for branch in schema["anyOf"]:
+        assert branch["properties"]["actions"]["maxItems"] == 0
+
+
+def test_small_talk_cannot_leave_an_open_goal() -> None:
+    """LFM3 left "are you there?" in progress, and the next joke planned again."""
+
+    reply, clarify = LlamaCppInterpreter._plan_schema(planning_offered=False)["anyOf"]
+    goal = reply["properties"]["active_goal"]["properties"]
+
+    assert goal["status"]["enum"] == ["new", "satisfied", "abandoned"]
+    assert goal["pending"]["maxItems"] == 0
+    # Only a clarify leaves something open for the answer to land on.
+    assert "needs_clarification" in str(clarify["properties"]["active_goal"])
 
 
 def test_a_woken_chat_turn_cannot_decode_ignore() -> None:
@@ -1090,7 +1104,8 @@ def test_a_woken_chat_turn_cannot_decode_ignore() -> None:
 
     assert chat.ignore_offered is False
     reply_only = LlamaCppInterpreter._plan_schema(chat.planning_offered, chat.ignore_offered)
-    assert reply_only["anyOf"][0]["properties"]["decision"]["enum"] == ["reply", "clarify"]
+    decisions = [branch["properties"]["decision"]["enum"] for branch in reply_only["anyOf"]]
+    assert decisions == [["reply"], ["clarify"]]
     assert overheard.ignore_offered is True
     assert intention.ignore_offered is True
 
@@ -1143,7 +1158,8 @@ async def test_a_withheld_plan_sends_the_reply_only_grammar() -> None:
     await interpreter.run_interpret_request(request)
 
     schema = sent[0]["response_format"]["json_schema"]["schema"]
-    assert len(schema["anyOf"]) == 1
+    for branch in schema["anyOf"]:
+        assert "execute" not in branch["properties"]["decision"]["enum"]
     await interpreter.close()
 
 def test_an_action_naming_a_tool_the_turn_did_not_offer_is_left_for_the_policy_layer() -> None:

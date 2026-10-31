@@ -20,6 +20,7 @@ from nova_voice.audio.conversation import (
 from nova_voice.domain import (
     ActiveGoal,
     Decision,
+    GoalStatus,
     Interpretation,
     SelfProfileUpdate,
     ToolResult,
@@ -1167,7 +1168,7 @@ class LlamaCppInterpreter(Interpreter):
         }
         text = {"type": "string", "maxLength": 80}
 
-        def branch(decisions: list[str], actions: dict) -> dict:
+        def branch(decisions: list[str], actions: dict, goal: dict | None = None) -> dict:
             properties = {
                 # Classification first, so the plan is decoded after the
                 # decision that governs it rather than before.
@@ -1185,7 +1186,8 @@ class LlamaCppInterpreter(Interpreter):
                     },
                     "required": ["label", "confidence", "intensity"],
                 },
-                "active_goal": {
+                "active_goal": goal
+                or {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
@@ -1218,10 +1220,40 @@ class LlamaCppInterpreter(Interpreter):
                 "required": list(properties),
             }
 
+        no_actions = {"type": "array", "maxItems": 0}
+        if not planning_offered:
+            # Small talk with no open goal. A reply may not open one: LFM3 left
+            # "are you there?" with an in-progress goal and a pending item, the
+            # gate read that as an open goal, and "tell me a joke" planned
+            # again. Only a clarify leaves something open for the answer.
+            settled = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "summary": text,
+                    "status": {
+                        "enum": [
+                            GoalStatus.NEW.value,
+                            GoalStatus.SATISFIED.value,
+                            GoalStatus.ABANDONED.value,
+                        ]
+                    },
+                    "pending": {"type": "array", "maxItems": 0},
+                },
+                "required": ["summary", "status", "pending"],
+            }
+            answers = [Decision.REPLY.value] + ([Decision.IGNORE.value] if ignore_offered else [])
+            return {
+                "$defs": {"SelfProfileUpdate": defs["SelfProfileUpdate"]},
+                "anyOf": [
+                    branch(answers, no_actions, settled),
+                    branch([Decision.CLARIFY.value], no_actions),
+                ],
+            }
         answers = [Decision.REPLY.value, Decision.CLARIFY.value]
         if ignore_offered:
             answers.append(Decision.IGNORE.value)
-        branches = [branch(answers, {"type": "array", "maxItems": 0})]
+        branches = [branch(answers, no_actions)]
         if planning_offered:
             branches.append(
                 branch(
