@@ -440,6 +440,59 @@ stopping a model never stops the orchestrator; the Classic TTS unit no longer
 `Requires=` LFM3 either, and voice training `Conflicts=` every model unit. The dashboard picker is specified in
 `nova-ha-dashboard/specs/voice-llm-selector.md`.
 
+### Planning output and the planning gate
+
+The planning pass's latency is its output, not its prompt. Profiled on
+2026-10-30, LFM3 read the ~9,100-token prompt in 50–110 ms once it was cached,
+then decoded 300–865 tokens of plan JSON at ~120 tokens/s. It planned actions
+for "are you there?" and "tell me a joke" too, so chat turns paid 4–7 s for a
+plan nobody asked for.
+
+The local backend's grammar (`LlamaCppInterpreter._plan_schema`) bounds that
+output:
+
+- Every field is required, so there is no shorter escape than the plan itself.
+- The schema is two branches keyed on `decision`. `reply` / `clarify` /
+  `ignore` decode an empty `actions` array, and `execute` decodes 1–6 actions.
+- Action ids are `a1`..`a6`, and `depends_on` lists those ids (at most 5).
+  `active_goal.summary` and `pending` entries are at most 80 characters, and
+  `pre_action_speech` at most 120.
+- `tool` stays an open string. A tool absent this turn must reach the policy
+  layer by name.
+- `speech_act` and `decision` come first, so the decision is decoded before
+  the plan.
+
+The planning gate (`nova_voice.interpretation.planning_gate`) runs on the words
+alone, when the request is built. It withholds the `execute` branch only for
+recognised small talk. The wake words and the agent's name are removed first,
+and then every clause (split on punctuation) must be one of these:
+
+- a greeting ("good night" is excluded, because it can start a bedtime
+  routine);
+- a presence check ("are you there", "testing");
+- "how are you" or "how's it going";
+- thanks or praise;
+- a request for a joke, story or fun fact;
+- a question about the assistant itself ("who are you", "what's your name").
+
+Even then it keeps planning if the line has any of these:
+
+- household or tool vocabulary;
+- a relay to someone else ("tell Sam …");
+- a number;
+- a word from a target, room or mode name in the household snapshot;
+- the web-lookup cue;
+- an active goal that has pending items, is in progress, or is awaiting
+  clarification.
+
+Everything else plans as before. A closed list of action words was tried first
+and withheld real commands ("I'm cold", "louder", "next", "I'm home"), so the
+default is to plan and the exception is narrow. A
+withheld turn sends the same prompt (the cached prefix is untouched) with only
+the reply branch in the grammar. On a woken turn that branch offers `reply` and
+`clarify` only, unless the self-intention cue is set. With nothing to execute,
+LFM3 otherwise chose `ignore` for "are you there?" and stayed silent.
+
 ### Typed turns
 
 `POST /v1/typed-turns` `{text, room_id?}` is the dashboard transcript panel's

@@ -17,6 +17,7 @@ from nova_voice.domain import (
     SelfProfileUpdate,
     SpeakerIdentity,
     ToolResult,
+    Utterance,
 )
 from nova_voice.interpretation.base import InterpretRequest
 from nova_voice.interpretation.llama_cpp import (
@@ -1037,9 +1038,113 @@ def test_the_plan_schema_requires_an_action_array() -> None:
 
     schema = LlamaCppInterpreter._plan_schema()
 
-    assert set(schema["properties"]) <= set(schema["required"])
-    assert schema["properties"]["actions"]["type"] == "array"
-    assert schema["properties"]["actions"]["items"] == schema["$defs"]["PlannedAction"]
+    for branch in schema["anyOf"]:
+        assert set(branch["properties"]) == set(branch["required"])
+        assert branch["properties"]["actions"]["type"] == "array"
+
+
+def test_the_plan_schema_ties_the_action_count_to_the_decision() -> None:
+    reply, execute = LlamaCppInterpreter._plan_schema()["anyOf"]
+
+    assert "execute" not in reply["properties"]["decision"]["enum"]
+    assert reply["properties"]["actions"]["maxItems"] == 0
+    assert execute["properties"]["decision"]["enum"] == ["execute"]
+    assert execute["properties"]["actions"]["minItems"] == 1
+
+
+def test_the_plan_schema_bounds_ids_and_dependencies() -> None:
+    """LFM3 wrote sentence-long ids and dependencies, seconds of decoding."""
+
+    execute = LlamaCppInterpreter._plan_schema()["anyOf"][1]
+    action = execute["properties"]["actions"]["items"]["properties"]
+
+    assert action["id"]["pattern"] == "^a[1-6]$"
+    assert action["depends_on"]["items"]["pattern"] == "^a[1-6]$"
+    # An unoffered tool must still reach the policy layer by name.
+    assert "enum" not in action["call"]["properties"]["tool"]
+
+
+def test_a_withheld_plan_leaves_only_the_reply_branch() -> None:
+    schema = LlamaCppInterpreter._plan_schema(planning_offered=False)
+
+    assert len(schema["anyOf"]) == 1
+    assert schema["anyOf"][0]["properties"]["actions"]["maxItems"] == 0
+
+
+def test_a_woken_chat_turn_cannot_decode_ignore() -> None:
+    """Offered no execute branch, LFM3 chose ignore for "are you there?"."""
+
+    interpreter = LlamaCppInterpreter("http://llama.test", "fixture-model")
+
+    def request_for(transcript: str, *, woken: bool):
+        return interpreter.build_interpret_request(
+            Utterance.text(transcript, room_id="lounge", wake_detected=woken),
+            active_goal=None,
+            relevant_state={},
+            tools=[],
+        )
+
+    chat = request_for("are you there?", woken=True)
+    overheard = request_for("are you there?", woken=False)
+    intention = request_for("I plan to sleep in", woken=True)
+
+    assert chat.ignore_offered is False
+    reply_only = LlamaCppInterpreter._plan_schema(chat.planning_offered, chat.ignore_offered)
+    assert reply_only["anyOf"][0]["properties"]["decision"]["enum"] == ["reply", "clarify"]
+    assert overheard.ignore_offered is True
+    assert intention.ignore_offered is True
+
+
+@pytest.mark.parametrize(
+    ("transcript", "offered"),
+    [
+        ("are you there?", False),
+        ("tell me a joke", False),
+        ("how are you", False),
+        ("turn on the lounge lights", True),
+        ("what's the temperature in the lounge?", True),
+        ("put the neon ones on", True),
+    ],
+)
+def test_the_planning_request_carries_the_gate(transcript: str, offered: bool) -> None:
+    interpreter = LlamaCppInterpreter("http://llama.test", "fixture-model")
+    state = {"roomDevices": [{"name": "Neon lights", "room": "lounge"}]}
+
+    request = interpreter.build_interpret_request(
+        Utterance.text(transcript, room_id="lounge", wake_detected=True),
+        active_goal=None,
+        relevant_state=state,
+        tools=[],
+    )
+
+    assert request.planning_offered is offered
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_plan_sends_the_reply_only_grammar() -> None:
+    sent: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        wire = interpretation(decision=Decision.REPLY).model_dump(mode="json")
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(wire)}}]})
+
+    interpreter = LlamaCppInterpreter(
+        "http://llama.test", "fixture-model", transport=httpx.MockTransport(handler)
+    )
+    request = InterpretRequest(
+        messages=[{"role": "user", "content": "{}"}],
+        system="system",
+        opening_context={},
+        turn_context={},
+        planning_offered=False,
+    )
+
+    await interpreter.run_interpret_request(request)
+
+    schema = sent[0]["response_format"]["json_schema"]["schema"]
+    assert len(schema["anyOf"]) == 1
+    await interpreter.close()
 
 def test_an_action_naming_a_tool_the_turn_did_not_offer_is_left_for_the_policy_layer() -> None:
     """A named tool is not padding: dropping it would half-run the request.

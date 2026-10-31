@@ -61,6 +61,12 @@ class InterpretRequest:
     # This turn only: the utterance and the cues derived from it.
     turn_context: dict
     history: list[dict] = field(default_factory=list)
+    # False when the words name no target and ask for nothing a tool does:
+    # the turn is then decoded as a reply, clarify or ignore, never a plan.
+    planning_offered: bool = True
+    # False on a woken turn with planning withheld: with no execute branch,
+    # LFM3 answers "are you there?" with ignore, which is silence.
+    ignore_offered: bool = True
 
 
 class Interpreter(ABC):

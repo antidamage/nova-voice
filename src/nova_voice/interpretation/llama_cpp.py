@@ -19,6 +19,7 @@ from nova_voice.audio.conversation import (
 )
 from nova_voice.domain import (
     ActiveGoal,
+    Decision,
     Interpretation,
     SelfProfileUpdate,
     ToolResult,
@@ -26,7 +27,8 @@ from nova_voice.domain import (
     Utterance,
     VerificationVerdict,
 )
-from nova_voice.interpretation.base import InterpretRequest, Interpreter, RenderRequest
+from nova_voice.interpretation.base import Interpreter, InterpretRequest, RenderRequest
+from nova_voice.interpretation.planning_gate import planning_offered
 from nova_voice.interpretation.response_length import (
     bare_wake_acknowledgement,
     bounded_long_reply,
@@ -886,12 +888,26 @@ class LlamaCppInterpreter(Interpreter):
         messages.append(
             {"role": "user", "content": json.dumps(turn_context, separators=(",", ":"))}
         )
+        cues = turn_context["deterministicCues"]
+        offered = planning_offered(
+            utterance.transcript,
+            household_state=household_state,
+            active_goal=active_goal,
+            web_lookup_requested=cues["webLookupRequested"],
+            address_words=[*self.wake_words, self.agent_name],
+        )
         return InterpretRequest(
             messages=messages,
             system=system,
             opening_context=opening_context,
             turn_context=turn_context,
             history=history,
+            planning_offered=offered,
+            # A woken turn was addressed; ignoring it is only right for a
+            # self-intention ("I need to call mum"), which the cue flags.
+            ignore_offered=(
+                offered or not utterance.wake_detected or cues["explicitSelfIntention"]
+            ),
         )
 
     async def interpret(
@@ -1102,31 +1118,121 @@ class LlamaCppInterpreter(Interpreter):
         return names
 
     @staticmethod
-    def _plan_schema() -> dict:
-        """The interpretation schema, with nothing optional a plan depends on.
+    def _plan_schema(planning_offered: bool = True, ignore_offered: bool = True) -> dict:
+        """The interpretation schema: every field required, every string bounded.
 
         The grammar obeys the schema, and a field carrying a default may be
         left out entirely, so a small model takes that escape: asked to switch
         a light on, LFM3-1.7B answers ``decision: execute`` with no actions at
-        all, which the turn then cannot execute. Requiring every field and
-        fixing ``actions`` as an array - never null, never absent - leaves it
-        no cheaper shape to decode than the plan it was asked for.
+        all, which the turn then cannot execute. Requiring every field leaves
+        it no cheaper shape to decode than the plan it was asked for.
+
+        Free text is what made planning slow. LFM3 wrote sentence-long action
+        ids and dependency entries ("relevantState.roomDevices: 'Bedroom
+        heater' in ...") and padded a greeting to 700 tokens, about six seconds
+        of decoding. Ids are now ``a1``..``a6``, dependencies name those ids,
+        and the remaining strings carry a length cap. ``tool`` stays an open
+        string on purpose: a tool absent this turn (``web.ask`` with web access
+        off) must reach the policy layer by name, not be swapped for one that
+        is offered.
+
+        The decision chooses the action count: a reply, clarify or ignore
+        decodes no actions, and execute decodes at least one. When the planning
+        gate withholds planning, only the first branch exists, and on a woken
+        turn it holds reply and clarify only: offered nothing to execute, LFM3
+        otherwise picks ignore for "are you there?" and says nothing.
         """
-        schema = Interpretation.model_json_schema()
-        schema["required"] = list(schema["properties"])
-        schema["properties"]["actions"] = {
-            "type": "array",
-            "items": schema["$defs"]["PlannedAction"],
-            # No minItems on purpose: reply and clarify turns legitimately carry
-            # an empty list, and the grammar cannot make the minimum depend on
-            # `decision`. An execute turn that planned nothing is downgraded to
-            # a reply by the policy layer, so it never claims an action.
-            "maxItems": 6,
+        source = Interpretation.model_json_schema()
+        defs = source["$defs"]
+        action_id = {"type": "string", "pattern": "^a[1-6]$"}
+        action = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "id": action_id,
+                "order": {"type": "integer", "minimum": 0, "maximum": 6},
+                "depends_on": {"type": "array", "items": action_id, "maxItems": 5},
+                "call": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "provider": {"type": "string", "maxLength": 40},
+                        "tool": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "arguments": {"type": "object"},
+                    },
+                    "required": ["provider", "tool", "arguments"],
+                },
+            },
+            "required": ["id", "order", "depends_on", "call"],
         }
-        return schema
+        text = {"type": "string", "maxLength": 80}
+
+        def branch(decisions: list[str], actions: dict) -> dict:
+            properties = {
+                # Classification first, so the plan is decoded after the
+                # decision that governs it rather than before.
+                "speech_act": defs["SpeechAct"],
+                "decision": {"enum": decisions},
+                "addressed_probability": {"type": "number", "minimum": 0, "maximum": 1},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "emotion": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "label": defs["EmotionLabel"],
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "intensity": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["label", "confidence", "intensity"],
+                },
+                "active_goal": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "summary": text,
+                        "status": defs["GoalStatus"],
+                        "pending": {"type": "array", "items": text, "maxItems": 4},
+                    },
+                    "required": ["summary", "status", "pending"],
+                },
+                "actions": actions,
+                "response_plan": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "pre_action_speech": {
+                            "anyOf": [{"type": "string", "maxLength": 120}, {"type": "null"}]
+                        },
+                        "requires_post_tool_rendering": {"type": "boolean"},
+                    },
+                    "required": ["pre_action_speech", "requires_post_tool_rendering"],
+                },
+                "self_profile_update": {
+                    "anyOf": [{"$ref": "#/$defs/SelfProfileUpdate"}, {"type": "null"}]
+                },
+            }
+            return {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": properties,
+                "required": list(properties),
+            }
+
+        answers = [Decision.REPLY.value, Decision.CLARIFY.value]
+        if ignore_offered:
+            answers.append(Decision.IGNORE.value)
+        branches = [branch(answers, {"type": "array", "maxItems": 0})]
+        if planning_offered:
+            branches.append(
+                branch(
+                    [Decision.EXECUTE.value],
+                    {"type": "array", "items": action, "minItems": 1, "maxItems": 6},
+                )
+            )
+        return {"$defs": {"SelfProfileUpdate": defs["SelfProfileUpdate"]}, "anyOf": branches}
 
     async def run_interpret_request(self, request: InterpretRequest) -> Interpretation:
-        schema = self._plan_schema()
+        schema = self._plan_schema(request.planning_offered, request.ignore_offered)
         messages = request.messages
         payload = {
             "model": self.model,
