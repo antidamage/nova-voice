@@ -28,8 +28,8 @@ from nova_voice.companion.tiers import (
 
 
 def test_locality_is_derived_from_the_peer_address():
-    classifier = LocalityClassifier.from_settings(["192.168.50.0/24"])
-    assert classifier.classify("192.168.50.30") == "home_lan"
+    classifier = LocalityClassifier.from_settings(["192.0.2.0/24"])
+    assert classifier.classify("192.0.2.30") == "home_lan"
     assert classifier.classify("100.64.0.15") == "tailnet"
     assert classifier.classify("203.0.113.5") == "other"
     assert classifier.classify(None) == "other"
@@ -39,12 +39,12 @@ def test_unconfigured_home_subnets_never_qualify_as_home():
     """The safe failure direction: nothing is home until it is configured."""
 
     classifier = LocalityClassifier.from_settings([])
-    assert classifier.classify("192.168.50.30") == "other"
+    assert classifier.classify("192.0.2.30") == "other"
 
 
 def test_malformed_subnets_are_ignored_not_fatal():
-    classifier = LocalityClassifier.from_settings(["not-a-subnet", "192.168.50.0/24"])
-    assert classifier.classify("192.168.50.30") == "home_lan"
+    classifier = LocalityClassifier.from_settings(["not-a-subnet", "192.0.2.0/24"])
+    assert classifier.classify("192.0.2.30") == "home_lan"
 
 
 # -- tiers --------------------------------------------------------------------
